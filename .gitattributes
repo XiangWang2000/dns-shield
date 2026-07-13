@@ -1,0 +1,20 @@
+* text=auto
+
+*.bat text eol=crlf
+*.gitignore text eol=crlf
+*.gradle text eol=crlf
+*.kts text eol=crlf
+*.kt text eol=crlf
+*.md text eol=crlf
+*.pro text eol=crlf
+*.properties text eol=crlf
+*.ps1 text eol=crlf
+*.toml text eol=crlf
+*.xml text eol=crlf
+LICENSE text eol=crlf
+
+gradlew text eol=lf
+
+*.jar binary
+*.png binary
+*.webp binary
