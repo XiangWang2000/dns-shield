@@ -13,6 +13,8 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.xiangwang2000.dnsshield.MainActivity
+import io.github.xiangwang2000.dnsshield.blocking.BuiltInDomainMatcher
+import io.github.xiangwang2000.dnsshield.blocking.DomainMatcher
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import kotlin.coroutines.resume
 import kotlinx.coroutines.*
@@ -115,6 +117,7 @@ class DnsVpnService : VpnService() {
         class CachedDnsRecord(val responseData: ByteArray, val expireAt: Long)
         private val dnsCache = LruCache<DnsQueryKey, CachedDnsRecord>(500)
         private val blockDecisionCache = LruCache<String, Boolean>(1024)
+        private val domainMatcher: DomainMatcher = BuiltInDomainMatcher()
 
         // Thread-safe singleton lock for OkHttpClient
         @Volatile private var okHttpClientInstance: OkHttpClient? = null
@@ -395,71 +398,14 @@ class DnsVpnService : VpnService() {
             return if (sb.isEmpty()) "Unknown" else sb.toString()
         }
 
-        object AdDomainMatcher {
-            private val exactBlocks = setOf(
-                "doubleclick.net", "admob.com", "pagead2.googlesyndication.com",
-                "googleads.g.doubleclick.net", "analytics.google.com", "crashlytics.com"
-            )
-
-            private val suffixBlocks = listOf(
-                ".doubleclick.net", ".admob.com", ".analytics.google.com",
-                ".adnxs.com", ".adcolony.com", ".adservice.google.com",
-                ".scorecardresearch.com", ".hotjar.com", ".telemetry.mozilla.org",
-                ".adjust.com", ".appsflyer.com"
-            )
-
-            private val containsBlocks = listOf(
-                "adservice", "adsystem", "googleads", "pagead", "amazon-adsystem",
-                "telemetry-", "analytics-"
-            )
-
-            private val exactBlockedKeywords = setOf(
-                "ads", "tracker", "telemetry", "analytics", "crashlytics"
-            )
-
-            fun shouldBlock(domain: String): Boolean {
-                val lowercase = domain.lowercase().trim()
-                if (lowercase.isEmpty() || lowercase == "unknown") return false
-                blockDecisionCache.get(lowercase)?.let { return it }
-
-                // 1. Exact match checking
-                if (exactBlocks.contains(lowercase)) {
-                    blockDecisionCache.put(lowercase, true)
-                    return true
-                }
-
-                // 2. Suffix match checking
-                for (suffix in suffixBlocks) {
-                    if (lowercase.endsWith(suffix)) {
-                        blockDecisionCache.put(lowercase, true)
-                        return true
-                    }
-                }
-
-                // 3. Substring contains checking (careful with parts)
-                for (part in containsBlocks) {
-                    if (lowercase.contains(part)) {
-                        blockDecisionCache.put(lowercase, true)
-                        return true
-                    }
-                }
-
-                // 4. Exact split keyword checking (e.g., ads.example.com or any subdomain being strictly equal to the keyword)
-                val parts = lowercase.split('.')
-                for (part in parts) {
-                    if (exactBlockedKeywords.contains(part)) {
-                        blockDecisionCache.put(lowercase, true)
-                        return true
-                    }
-                }
-
-                blockDecisionCache.put(lowercase, false)
-                return false
-            }
-        }
-
         fun isAdOrTracker(domain: String): Boolean {
-            return AdDomainMatcher.shouldBlock(domain)
+            val normalized = domain.lowercase().trim()
+            if (normalized.isEmpty() || normalized == "unknown") return false
+            blockDecisionCache.get(normalized)?.let { return it }
+
+            return domainMatcher.shouldBlock(normalized).also {
+                blockDecisionCache.put(normalized, it)
+            }
         }
 
         fun estimateSavedBytes(domain: String): Long {
