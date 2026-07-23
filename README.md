@@ -10,6 +10,7 @@ DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標
 - 內建 Google DNS、Cloudflare DNS、AdGuard DNS 與 Quad9 預設值。
 - 已知的內建解析器優先使用 DNS-over-HTTPS；不支援 DoH 的自訂解析器及 DoH 失敗情況會改用標準 UDP DNS。
 - 依內建規則以 NXDOMAIN 回覆部分廣告及追蹤網域。
+- 阻擋規則已由可單元測試的 `DomainMatcher` 元件處理，並保留既有的決策快取與 VPN DNS 熱路徑行為。
 - 支援自訂 DNS、DNS 回應快取及同時重複查詢去重。
 - 支援選擇已安裝的 App，使其略過 DNS Shield VPN。
 - 在 App 開啟時顯示查詢數、阻擋數、估算節省流量與診斷日誌。
@@ -21,6 +22,7 @@ DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆
 - 目前只處理由系統 VPN DNS 路徑送入的 IPv4 UDP/53 查詢。
 - App 自行使用 DoH、DoT、非標準連接埠、直接 IP 連線或其他繞過系統 DNS 的方式，不會被此工具攔截。
 - 內建阻擋規則規模有限，無法涵蓋所有廣告、追蹤或惡意網域。
+- 專案提供本機離線 blocklist 編譯器，但產生的清單目前尚未載入 App；它不會改變現有 APK 的攔截行為。
 - 「節省流量」是依被阻擋網域類型推算的參考值，不是實際網路流量量測。
 - 實際解析延遲、耗電與攔截效果會因裝置、Android 版本、網路及 DNS 解析器而異。
 
@@ -62,9 +64,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 
 驗證入口會執行 Debug APK 建置、單元測試 task 與 Kotlin 編譯。
 
+離線 blocklist 編譯器及其測試可獨立執行：
+
+```powershell
+python -m unittest discover tools/tests
+python tools/build_blocklist.py --input tools/tests/fixtures/blocklist.txt --output build/test-blocklist.bin
+```
+
+二進位格式請參閱 [docs/blocklist-format.md](docs/blocklist-format.md)。第一版只接受本機文字清單，不會下載遠端來源，也尚未接入 VPN 熱路徑。
+
 ## 正式發行
 
-正式套件識別為 `io.github.xiangwang2000.dnsshield`，版本從 `1.0.0`、`versionCode 1` 開始。公開第一版後不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
+正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前發行版本為 `1.1.0`、`versionCode 2`；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
 
 第一次建立本機發行金鑰：
 
