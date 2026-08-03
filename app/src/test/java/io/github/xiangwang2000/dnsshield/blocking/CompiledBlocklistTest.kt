@@ -54,6 +54,19 @@ class CompiledBlocklistTest {
         assertFailsWith<IllegalArgumentException> {
             CompiledBlocklist.fromByteBuffer(truncated)
         }
+
+        val negativeEntryCount = ByteBuffer.allocate(HEADER_SIZE)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .apply {
+                put(MAGIC.toByteArray(StandardCharsets.US_ASCII))
+                putInt(FORMAT_VERSION)
+                putInt(HASH_ALGORITHM_FNV1A_64)
+                putLong(Long.MIN_VALUE / 4)
+                flip()
+            }
+        assertFailsWith<IllegalArgumentException> {
+            CompiledBlocklist.fromByteBuffer(negativeEntryCount)
+        }
     }
 
     @Test
