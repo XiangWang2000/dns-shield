@@ -1,6 +1,6 @@
 # Blocklist binary format
 
-`tools/build_blocklist.py` converts a local text blocklist into a deterministic binary artifact. `CompiledBlocklist` can validate and query this artifact from Kotlin, but the reader is not wired into the VPN yet.
+`tools/build_blocklist.py` converts a local text blocklist into a deterministic binary artifact. `CompiledBlocklist` can validate and query this artifact from Kotlin, and `CompiledBlocklistLoader` can open a local artifact through a read-only memory mapping. Neither component is wired into the VPN yet.
 
 ## Input normalization
 
@@ -26,7 +26,9 @@ The output size is `24 + entryCount × 8` bytes. The artifact contains hashes on
 
 The compiler fails if distinct normalized domains produce the same 64-bit hash. It reports the output SHA-256 so builds can be reproduced and compared.
 
-The Kotlin reader validates magic, format version, hash algorithm, entry count, and exact file size before accepting the artifact. Lookup uses unsigned `Long` comparison and absolute little-endian reads. `validateSorted()` is available for tests and build-time validation, but is intentionally not called during construction because scanning a future memory-mapped production list would eagerly touch every file page at startup.
+The Kotlin reader validates magic, format version, hash algorithm, entry count, and exact file size before accepting the artifact. Lookup uses unsigned `Long` comparison and absolute little-endian reads. `validateSorted()` is available for tests and build-time validation, but is intentionally not called during construction because scanning a memory-mapped production list would eagerly touch every file page at startup.
+
+`CompiledBlocklistLoader.fromFile()` requires an existing non-empty regular file, opens it read-only, memory maps the complete artifact, and then delegates all format validation to `CompiledBlocklist`. The loader does not download, replace, or select blocklists and does not modify VPN policy.
 
 ## Usage
 
@@ -36,4 +38,4 @@ python tools/build_blocklist.py --input tools/tests/fixtures/blocklist.txt --out
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 
-Do not add remote downloads, production-scale source lists, memory mapping, parent-domain policy, or VPN integration until the reader and compiler remain compatible under the shared golden vectors and fixtures.
+Do not add remote downloads, production-scale source lists, parent-domain policy, or VPN integration until the loader, reader, and compiler remain compatible under the shared golden vectors and fixtures.
