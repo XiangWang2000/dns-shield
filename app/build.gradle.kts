@@ -104,6 +104,11 @@ android {
   buildFeatures {
     compose = true
   }
+  packaging {
+    jniLibs {
+      keepDebugSymbols.add("**/libandroidx.graphics.path.so")
+    }
+  }
 }
 
 dependencies {
