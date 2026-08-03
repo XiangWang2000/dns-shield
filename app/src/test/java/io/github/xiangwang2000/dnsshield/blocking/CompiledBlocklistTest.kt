@@ -3,6 +3,10 @@ package io.github.xiangwang2000.dnsshield.blocking
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.util.Base64
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -34,6 +38,22 @@ class CompiledBlocklistTest {
         assertTrue(matcher.shouldBlock(" DOUBLECLICK.NET "))
         assertFalse(matcher.shouldBlock("github.com"))
         assertFalse(matcher.shouldBlock("Unknown"))
+    }
+
+    @Test
+    fun readsSharedPythonCompilerFixture() {
+        val encodedFixture = Files.readString(findRepositoryFixture(), StandardCharsets.US_ASCII)
+        val artifact = Base64.getDecoder().decode(encodedFixture.trim())
+        val blocklist = CompiledBlocklist.fromByteBuffer(ByteBuffer.wrap(artifact))
+        val matcher = CompiledBlocklistMatcher(blocklist)
+
+        assertEquals(4, blocklist.entryCount)
+        blocklist.validateSorted()
+        assertTrue(matcher.shouldBlock("doubleclick.net"))
+        assertTrue(matcher.shouldBlock("PAGEAD2.GOOGLESYNDICATION.COM"))
+        assertTrue(matcher.shouldBlock("telemetry.example"))
+        assertTrue(matcher.shouldBlock("github.com"))
+        assertFalse(matcher.shouldBlock("example.com"))
     }
 
     @Test
@@ -78,6 +98,18 @@ class CompiledBlocklistTest {
             buildArtifact(longArrayOf(Long.MIN_VALUE, Long.MAX_VALUE))
         )
         assertFailsWith<IllegalArgumentException> { unsortedUnsigned.validateSorted() }
+    }
+
+    private fun findRepositoryFixture(): Path {
+        val relative = Paths.get("tools", "tests", "fixtures", "blocklist.bin.base64")
+        var directory: Path? = Paths.get(System.getProperty("user.dir")).toAbsolutePath()
+        repeat(4) {
+            val current = directory ?: return@repeat
+            val candidate = current.resolve(relative)
+            if (Files.isRegularFile(candidate)) return candidate
+            directory = current.parent
+        }
+        error("Unable to locate repository fixture: $relative")
     }
 
     private fun buildArtifact(hashes: LongArray): ByteBuffer {
