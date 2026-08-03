@@ -15,6 +15,13 @@ if (-not $env:JAVA_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:JAVA_HO
 }
 
 Set-Location $Root
+
+Write-Host "==> Python blocklist compiler tests"
+& python -m unittest discover tools/tests
+if ($LASTEXITCODE -ne 0) {
+    throw "Python verification failed with exit code $LASTEXITCODE."
+}
+
 Write-Host "==> Gradle build and tests"
 & .\gradlew.bat --no-daemon --console=plain :app:assembleDebug :app:testDebugUnitTest :app:compileDebugKotlin
 if ($LASTEXITCODE -ne 0) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import struct
 import sys
@@ -8,6 +9,7 @@ import unittest
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 sys.path.insert(0, str(TOOLS_DIR))
 
 from build_blocklist import (  # noqa: E402
@@ -79,6 +81,25 @@ class BuildBlocklistTest(unittest.TestCase):
             self.assertEqual(2, entry_count)
             self.assertEqual(sorted(hashes), hashes)
             self.assertEqual(HEADER_SIZE + entry_count * 8, len(artifact))
+
+    def test_matches_shared_cross_language_fixture(self) -> None:
+        input_path = FIXTURES_DIR / "blocklist.txt"
+        expected_artifact = base64.b64decode(
+            (FIXTURES_DIR / "blocklist.bin.base64").read_text(encoding="ascii").strip()
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "blocklist.bin"
+            stats = build_blocklist(input_path, output_path)
+            artifact = output_path.read_bytes()
+
+        self.assertEqual(expected_artifact, artifact)
+        self.assertEqual(4, stats.unique_domains)
+        self.assertEqual(56, stats.output_size)
+        self.assertEqual(
+            "dae905100c800afcb6c48ec3e452db9cd8aee8fc55af86a10308f34a4d839bc2",
+            stats.sha256,
+        )
 
 
 if __name__ == "__main__":
