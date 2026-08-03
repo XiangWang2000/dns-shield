@@ -85,6 +85,9 @@ class CompiledBlocklist private constructor(
             }
 
             val entryCountLong = header.long
+            require(entryCountLong >= 0) {
+                "Blocklist entry count must be non-negative: $entryCountLong"
+            }
             require(entryCountLong <= Int.MAX_VALUE.toLong()) {
                 "Blocklist contains too many entries: $entryCountLong"
             }
