@@ -20,6 +20,18 @@ The service-level `blockDecisionCache` is intentionally outside this composition
 
 This conservative behavior is intentional. Parent-domain traversal, Public Suffix safeguards, user-managed persistence, and policy-generation invalidation must be designed and tested separately before runtime integration.
 
+## Policy assembly and fallback
+
+`DomainPolicyAssembler` always includes `BuiltInDomainMatcher`. When a compiled blocklist file is configured, the assembler loads and validates it before adding `CompiledBlocklistMatcher` after the built-in matcher.
+
+The assembly result exposes one of three states:
+
+- `NotConfigured`: no compiled blocklist was requested; built-in rules remain active.
+- `Loaded(entryCount)`: the compiled blocklist was validated and joined to the policy.
+- `Rejected(reason)`: loading or validation failed; the optional compiled matcher is omitted and built-in rules remain active.
+
+The assembler catches recoverable `Exception` failures only. Fatal JVM errors are not converted into fallback states. Runtime callers may record the status for diagnostics, but must not treat a rejected optional list as a reason to disable built-in DNS protection.
+
 ## Current scope
 
-The policy components are pure Kotlin and are not wired into `DnsVpnService` yet. This document does not introduce a production blocklist, bundled asset, remote update flow, UI, or Room schema change.
+The policy components and assembler are pure Kotlin and are not wired into `DnsVpnService` yet. This document does not introduce a production blocklist, bundled asset, remote update flow, UI, or Room schema change.
