@@ -48,6 +48,7 @@ object DomainPolicyAssembler {
 
         val status = try {
             val compiledBlocklist = loadCompiledBlocklist(compiledBlocklistFile)
+            compiledBlocklist.validateSorted()
             blockers += CompiledBlocklistMatcher(compiledBlocklist)
             CompiledBlocklistStatus.Loaded(compiledBlocklist.entryCount)
         } catch (exception: Exception) {
