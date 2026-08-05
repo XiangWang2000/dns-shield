@@ -49,7 +49,7 @@ def _validate_domain(value: str) -> None:
         raise ValueError("Public Suffix rule must not be blank or unknown")
     if value.startswith(".") or value.endswith(".") or ".." in value:
         raise ValueError(f"Malformed Public Suffix rule: {value!r}")
-    if any(character.isspace() or character == "/" for character in value):
+    if any(character.isspace() or character in "/*!" for character in value):
         raise ValueError(f"Malformed Public Suffix rule: {value!r}")
     for label in value.split("."):
         if not label or label.startswith("-") or label.endswith("-"):
