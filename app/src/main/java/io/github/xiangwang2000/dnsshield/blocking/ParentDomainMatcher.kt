@@ -55,5 +55,6 @@ private fun isUsableDomain(domain: String): Boolean =
 
 private fun isRegistrableDomain(domain: String): Boolean =
     isUsableDomain(domain) && '.' in domain
+
 private fun isSameDomainOrSubdomain(domain: String, boundary: String): Boolean =
     domain == boundary || domain.endsWith(".$boundary")
