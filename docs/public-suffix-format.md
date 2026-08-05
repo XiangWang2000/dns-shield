@@ -17,6 +17,8 @@ The input must contain both standard PSL section markers:
 
 Exact rules, wildcard rules such as `*.ck`, and exception rules such as `!www.ck` are normalized with `lowercase().trim()`. Wildcards are stored without `*.` and exceptions without `!`. Rules are sorted by their UTF-8 bytes before encoding.
 
+Format version 1 accepts ASCII and punycode rules only. Raw Unicode rules are rejected rather than being encoded with a platform-dependent IDNA implementation. A future production pipeline must add one reviewed, reproducible Unicode-to-punycode normalization step before compiling the complete upstream PSL. The Kotlin reader likewise treats non-ASCII query names and encoded rules as unusable.
+
 The shared compatibility fixture pins its source revision, source SHA-256, artifact SHA-256, rule counts, and size in `tools/tests/fixtures/public_suffix.metadata.json`. A future production source must provide equivalent pinned metadata and must include both ICANN and PRIVATE sections.
 
 ## Binary layout
@@ -41,7 +43,7 @@ uint16 UTF-8 byte length
 N bytes UTF-8 rule
 ```
 
-Every table must be strictly sorted by unsigned UTF-8 bytes. The reader rejects missing PRIVATE coverage, unsupported flags, malformed UTF-8, invalid domains, duplicates, unsorted tables, truncation, and trailing bytes.
+Every table must be strictly sorted by unsigned UTF-8 bytes. The reader rejects missing PRIVATE coverage, unsupported flags, malformed UTF-8, non-ASCII rules, invalid domains, duplicates, unsorted tables, truncation, and trailing bytes.
 
 ## Resolution behavior
 
@@ -63,4 +65,4 @@ python tools/build_public_suffix.py `
   --output build/test-public-suffix.bin
 ```
 
-This format and resolver are not yet wired into `DomainPolicyAssembler` or `DnsVpnService`. Do not activate parent-domain matching until a reviewed production PSL source, artifact loading strategy, startup cost, and memory measurements are available.
+This format and resolver are not yet wired into `DomainPolicyAssembler` or `DnsVpnService`. Do not activate parent-domain matching until a reviewed production PSL source, deterministic IDNA policy, artifact loading strategy, startup cost, and memory measurements are available.
