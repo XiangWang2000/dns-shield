@@ -14,6 +14,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.xiangwang2000.dnsshield.MainActivity
 import io.github.xiangwang2000.dnsshield.blocking.CompiledBlocklistStatus
+import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
 import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
 import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
@@ -87,13 +88,13 @@ class DnsVpnService : VpnService() {
         class DnsQueryKey(
             val bytes: ByteArray,
             private val resolverGeneration: Int,
-            private val policyGeneration: Int
+            private val policyAssembly: DomainPolicyAssembly
         ) {
             override fun equals(other: Any?): Boolean {
                 if (this === other) return true
                 if (other !is DnsQueryKey) return false
                 if (resolverGeneration != other.resolverGeneration) return false
-                if (policyGeneration != other.policyGeneration) return false
+                if (policyAssembly !== other.policyAssembly) return false
                 if (bytes.size != other.bytes.size) return false
                 for (i in 2 until bytes.size) {
                     if (bytes[i] != other.bytes[i]) return false
@@ -102,7 +103,7 @@ class DnsVpnService : VpnService() {
             }
 
             override fun hashCode(): Int {
-                var result = 31 * resolverGeneration + policyGeneration
+                var result = 31 * resolverGeneration + System.identityHashCode(policyAssembly)
                 for (i in 2 until bytes.size) {
                     result = 31 * result + bytes[i]
                 }
@@ -112,7 +113,7 @@ class DnsVpnService : VpnService() {
             fun copyForStorage() = DnsQueryKey(
                 bytes = bytes.copyOf(),
                 resolverGeneration = resolverGeneration,
-                policyGeneration = policyGeneration
+                policyAssembly = policyAssembly
             )
         }
 
@@ -400,15 +401,17 @@ class DnsVpnService : VpnService() {
             return if (sb.isEmpty()) "Unknown" else sb.toString()
         }
 
-        fun isAdOrTracker(domain: String): Boolean {
+        fun isAdOrTracker(
+            domain: String,
+            policyAssembly: DomainPolicyAssembly = domainPolicy.snapshot()
+        ): Boolean {
             val normalized = domain.lowercase().trim()
             if (normalized.isEmpty() || normalized == "unknown") return false
 
-            val assembly = domainPolicy.snapshot()
-            val cacheKey = DomainPolicyCacheKey(normalized, assembly)
+            val cacheKey = DomainPolicyCacheKey(normalized, policyAssembly)
             blockDecisionCache.get(cacheKey)?.let { return it }
 
-            return assembly.matcher.shouldBlock(normalized).also {
+            return policyAssembly.matcher.shouldBlock(normalized).also {
                 blockDecisionCache.put(cacheKey, it)
             }
         }
@@ -480,12 +483,11 @@ class DnsVpnService : VpnService() {
         val primary: String,
         val secondary: String?,
         val resolverGeneration: Int,
-        val policyGeneration: Int
+        val policyAssembly: DomainPolicyAssembly
     )
 
     private val dnsStateLock = Any()
     private var resolverGeneration = 0
-    private var policyGeneration = 0
     private val inFlightQueries = ConcurrentHashMap<DnsQueryKey, CompletableDeferred<ByteArray?>>()
 
     // Explicit, clean separation of VPN active running components from the general ServiceScope
@@ -511,7 +513,6 @@ class DnsVpnService : VpnService() {
 
     private fun invalidatePolicyState() {
         synchronized(dnsStateLock) {
-            policyGeneration++
             clearDnsStateLocked()
         }
     }
@@ -553,12 +554,13 @@ class DnsVpnService : VpnService() {
             primary = upstreamDnsPrimary,
             secondary = upstreamDnsSecondary,
             resolverGeneration = resolverGeneration,
-            policyGeneration = policyGeneration
+            policyAssembly = domainPolicy.snapshot()
         )
     }
 
     private fun isCurrentDnsState(state: DnsStateSnapshot): Boolean = synchronized(dnsStateLock) {
-        resolverGeneration == state.resolverGeneration && policyGeneration == state.policyGeneration
+        resolverGeneration == state.resolverGeneration &&
+            domainPolicy.snapshot() === state.policyAssembly
     }
 
     override fun onCreate() {
@@ -882,7 +884,7 @@ class DnsVpnService : VpnService() {
         val queryKey = DnsQueryKey(
             bytes = dnsPayload,
             resolverGeneration = dnsState.resolverGeneration,
-            policyGeneration = dnsState.policyGeneration
+            policyAssembly = dnsState.policyAssembly
         )
 
         // 1. Return known-good cached responses before doing domain parsing or block matching.
@@ -902,7 +904,7 @@ class DnsVpnService : VpnService() {
         val domain = parseDomainName(dnsPayload)
 
         // 2. Check if ad domain / tracker - BLOCK IMMEDIATELY with genuine NXDOMAIN synthesis
-        val isAd = isAdOrTracker(domain)
+        val isAd = isAdOrTracker(domain, dnsState.policyAssembly)
         if (isAd) {
             val blockedResponse = buildNxDomainResponse(dnsPayload)
             sendResponsePacket(blockedResponse, clientIp, mockDnsIp, clientPort, outputStream)
