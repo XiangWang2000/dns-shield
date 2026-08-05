@@ -163,6 +163,8 @@ class ParentDomainMatcherTest {
         assertFalse(matcher.shouldBlock("ads.example.com"))
         assertEquals(listOf("ads.example.com"), candidates)
     }
+
+    @Test
     fun unusableDomainsDoNotInvokeDependencies() {
         var calls = 0
         val matcher = ParentDomainMatcher(
