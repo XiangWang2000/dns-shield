@@ -32,7 +32,7 @@ class DomainPolicyDiagnosticsTest {
     fun logsLoadedCountAndKeepsBuiltInBlockingForFourEntryArtifact() {
         val filesDirectory = Files.createTempDirectory("dns-shield-diagnostics-loaded-").toFile()
         val activeFile = RuntimeDomainPolicy.activeBlocklistFile(filesDirectory)
-        activeFile.parentFile.mkdirs()
+        prepareParentDirectory(activeFile)
         activeFile.writeBytes(Base64.getDecoder().decode(
             Files.readString(findRepositoryFixture(), StandardCharsets.US_ASCII).trim()
         ))
@@ -53,7 +53,7 @@ class DomainPolicyDiagnosticsTest {
     fun logsRejectedReasonAndKeepsBuiltInBlockingForMalformedArtifact() {
         val filesDirectory = Files.createTempDirectory("dns-shield-diagnostics-rejected-").toFile()
         val activeFile = RuntimeDomainPolicy.activeBlocklistFile(filesDirectory)
-        activeFile.parentFile.mkdirs()
+        prepareParentDirectory(activeFile)
         activeFile.writeText("not a compiled blocklist")
 
         val assembly = RuntimeDomainPolicy.assemble(filesDirectory)
@@ -64,6 +64,11 @@ class DomainPolicyDiagnosticsTest {
         assertTrue(log.endsWith(rejected.reason))
         assertTrue(assembly.matcher.shouldBlock("admob.com"))
         assertFalse(assembly.matcher.shouldBlock("github.com"))
+    }
+
+    private fun prepareParentDirectory(file: File) {
+        val parent = requireNotNull(file.parentFile)
+        check(parent.mkdirs() || parent.isDirectory)
     }
 
     private fun findRepositoryFixture(): Path {
