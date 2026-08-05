@@ -1,0 +1,19 @@
+// DNS Shield PSL compatibility fixture.
+// ===BEGIN ICANN DOMAINS===
+com
+org
+uk
+co.uk
+jp
+*.kawasaki.jp
+!city.kawasaki.jp
+ck
+*.ck
+!www.ck
+io
+// ===END ICANN DOMAINS===
+
+// ===BEGIN PRIVATE DOMAINS===
+github.io
+blogspot.com
+// ===END PRIVATE DOMAINS===
