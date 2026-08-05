@@ -32,6 +32,18 @@ The assembly result exposes one of three states:
 
 The assembler catches recoverable `Exception` failures only. Fatal JVM errors are not converted into fallback states. Runtime callers may record the status for diagnostics, but must not treat a rejected optional list as a reason to disable built-in DNS protection.
 
+## Runtime blocklist source
+
+`RuntimeDomainPolicy` reserves one app-private candidate path:
+
+```text
+<filesDir>/blocklists/active.bin
+```
+
+When that path does not exist, the optional compiled blocklist is treated as `NotConfigured` and the file loader is not called. When the path exists, it is passed to `DomainPolicyAssembler`; empty, malformed, unreadable, non-file, and unsorted artifacts are therefore surfaced as `Rejected` rather than silently ignored.
+
+The runtime source does not create directories, copy a bundled asset, download a list, replace files, or install policy into the VPN service. Those lifecycle operations remain separate reviewed changes.
+
 ## Current scope
 
-The policy components and assembler are pure Kotlin and are not wired into `DnsVpnService` yet. This document does not introduce a production blocklist, bundled asset, remote update flow, UI, or Room schema change.
+The policy components, assembler, and runtime file resolver are pure Kotlin and are not wired into `DnsVpnService` yet. This document does not introduce a production blocklist, bundled asset, remote update flow, UI, or Room schema change.
