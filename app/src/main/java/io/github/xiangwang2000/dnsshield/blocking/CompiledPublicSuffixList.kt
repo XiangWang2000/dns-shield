@@ -188,7 +188,9 @@ class CompiledPublicSuffixList private constructor(
                 !domain.startsWith('.') &&
                 !domain.endsWith('.') &&
                 ".." !in domain &&
-                domain.none { it.isWhitespace() || it == '/' } &&
+                domain.none {
+                    it.isWhitespace() || it == '/' || it == '*' || it == '!'
+                } &&
                 domain.split('.').all { label ->
                     label.isNotEmpty() && !label.startsWith('-') && !label.endsWith('-')
                 }
