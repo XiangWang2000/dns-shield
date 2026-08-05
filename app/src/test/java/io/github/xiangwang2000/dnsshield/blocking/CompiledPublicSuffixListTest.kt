@@ -125,6 +125,28 @@ class CompiledPublicSuffixListTest {
     }
 
     @Test
+    fun rejectsRuleMarkersInsideEncodedRules() {
+        val sourceHash = ByteArray(32)
+        val malformedRule = "bad.*.rule".toByteArray(StandardCharsets.UTF_8)
+        val artifact = ByteBuffer.allocate(60 + 2 + malformedRule.size)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .put("DNSHPS01".toByteArray(StandardCharsets.US_ASCII))
+            .putInt(1)
+            .putInt(1)
+            .putInt(1)
+            .putInt(0)
+            .putInt(0)
+            .put(sourceHash)
+            .putShort(malformedRule.size.toShort())
+            .put(malformedRule)
+            .array()
+
+        assertFailsWith<IllegalArgumentException> {
+            CompiledPublicSuffixList.fromByteBuffer(ByteBuffer.wrap(artifact))
+        }
+    }
+
+    @Test
     fun rejectsUnsortedRuleTables() {
         val sourceHash = ByteArray(32)
         val artifact = ByteBuffer.allocate(60 + 2 + 3 + 2 + 2)
