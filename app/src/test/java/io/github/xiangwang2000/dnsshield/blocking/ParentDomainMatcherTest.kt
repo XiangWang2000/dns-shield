@@ -150,7 +150,6 @@ class ParentDomainMatcherTest {
     }
 
     @Test
-    @Test
     fun singleLabelBoundaryKeepsMatchingExactOnly() {
         val candidates = mutableListOf<String>()
         val matcher = ParentDomainMatcher(
