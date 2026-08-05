@@ -13,8 +13,12 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.xiangwang2000.dnsshield.MainActivity
-import io.github.xiangwang2000.dnsshield.blocking.BuiltInDomainMatcher
-import io.github.xiangwang2000.dnsshield.blocking.DomainMatcher
+import io.github.xiangwang2000.dnsshield.blocking.CompiledBlocklistStatus
+import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
+import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
+import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
+import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
+import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import kotlin.coroutines.resume
 import kotlinx.coroutines.*
@@ -85,13 +89,13 @@ class DnsVpnService : VpnService() {
         class DnsQueryKey(
             val bytes: ByteArray,
             private val resolverGeneration: Int,
-            private val policyGeneration: Int
+            private val policyAssembly: DomainPolicyAssembly
         ) {
             override fun equals(other: Any?): Boolean {
                 if (this === other) return true
                 if (other !is DnsQueryKey) return false
                 if (resolverGeneration != other.resolverGeneration) return false
-                if (policyGeneration != other.policyGeneration) return false
+                if (policyAssembly !== other.policyAssembly) return false
                 if (bytes.size != other.bytes.size) return false
                 for (i in 2 until bytes.size) {
                     if (bytes[i] != other.bytes[i]) return false
@@ -100,7 +104,7 @@ class DnsVpnService : VpnService() {
             }
 
             override fun hashCode(): Int {
-                var result = 31 * resolverGeneration + policyGeneration
+                var result = 31 * resolverGeneration + System.identityHashCode(policyAssembly)
                 for (i in 2 until bytes.size) {
                     result = 31 * result + bytes[i]
                 }
@@ -110,14 +114,14 @@ class DnsVpnService : VpnService() {
             fun copyForStorage() = DnsQueryKey(
                 bytes = bytes.copyOf(),
                 resolverGeneration = resolverGeneration,
-                policyGeneration = policyGeneration
+                policyAssembly = policyAssembly
             )
         }
 
         class CachedDnsRecord(val responseData: ByteArray, val expireAt: Long)
         private val dnsCache = LruCache<DnsQueryKey, CachedDnsRecord>(500)
-        private val blockDecisionCache = LruCache<String, Boolean>(1024)
-        private val domainMatcher: DomainMatcher = BuiltInDomainMatcher()
+        private val blockDecisionCache = LruCache<DomainPolicyCacheKey, Boolean>(1024)
+        private val domainPolicy = ReloadableDomainPolicy()
 
         // Thread-safe singleton lock for OkHttpClient
         @Volatile private var okHttpClientInstance: OkHttpClient? = null
@@ -398,13 +402,18 @@ class DnsVpnService : VpnService() {
             return if (sb.isEmpty()) "Unknown" else sb.toString()
         }
 
-        fun isAdOrTracker(domain: String): Boolean {
+        fun isAdOrTracker(
+            domain: String,
+            policyAssembly: DomainPolicyAssembly = domainPolicy.snapshot()
+        ): Boolean {
             val normalized = domain.lowercase().trim()
             if (normalized.isEmpty() || normalized == "unknown") return false
-            blockDecisionCache.get(normalized)?.let { return it }
 
-            return domainMatcher.shouldBlock(normalized).also {
-                blockDecisionCache.put(normalized, it)
+            val cacheKey = DomainPolicyCacheKey(normalized, policyAssembly)
+            blockDecisionCache.get(cacheKey)?.let { return it }
+
+            return policyAssembly.matcher.shouldBlock(normalized).also {
+                blockDecisionCache.put(cacheKey, it)
             }
         }
 
@@ -475,12 +484,11 @@ class DnsVpnService : VpnService() {
         val primary: String,
         val secondary: String?,
         val resolverGeneration: Int,
-        val policyGeneration: Int
+        val policyAssembly: DomainPolicyAssembly
     )
 
     private val dnsStateLock = Any()
     private var resolverGeneration = 0
-    private var policyGeneration = 0
     private val inFlightQueries = ConcurrentHashMap<DnsQueryKey, CompletableDeferred<ByteArray?>>()
 
     // Explicit, clean separation of VPN active running components from the general ServiceScope
@@ -506,9 +514,25 @@ class DnsVpnService : VpnService() {
 
     private fun invalidatePolicyState() {
         synchronized(dnsStateLock) {
-            policyGeneration++
             clearDnsStateLocked()
         }
+    }
+
+    private fun reloadDomainPolicy() {
+        val status = try {
+            val assembly = RuntimeDomainPolicy.assemble(filesDir)
+            domainPolicy.install(assembly) {
+                invalidatePolicyState()
+            }
+        } catch (exception: Exception) {
+            val reason = exception.message?.takeIf(String::isNotBlank)
+                ?: exception.javaClass.simpleName
+            Log.e(TAG, "Failed to reload domain policy", exception)
+            addLog("[攔截規則] 重新載入失敗，保留目前規則：$reason")
+            return
+        }
+
+        addLog(DomainPolicyDiagnostics.message(status))
     }
 
     private fun clearDnsStateLocked() {
@@ -522,12 +546,13 @@ class DnsVpnService : VpnService() {
             primary = upstreamDnsPrimary,
             secondary = upstreamDnsSecondary,
             resolverGeneration = resolverGeneration,
-            policyGeneration = policyGeneration
+            policyAssembly = domainPolicy.snapshot()
         )
     }
 
     private fun isCurrentDnsState(state: DnsStateSnapshot): Boolean = synchronized(dnsStateLock) {
-        resolverGeneration == state.resolverGeneration && policyGeneration == state.policyGeneration
+        resolverGeneration == state.resolverGeneration &&
+            domainPolicy.snapshot() === state.policyAssembly
     }
 
     override fun onCreate() {
@@ -548,7 +573,6 @@ class DnsVpnService : VpnService() {
             }
             ACTION_RESTART -> {
                 addLog("Restarting service command received")
-                invalidatePolicyState()
                 restartTunnel()
             }
             ACTION_UPDATE_DNS -> {
@@ -609,6 +633,8 @@ class DnsVpnService : VpnService() {
 
         activeTunnelScope.launch {
             try {
+                reloadDomainPolicy()
+
                 // Read active DNS from Room Database
                 val db = AppDatabase.getDatabase(this@DnsVpnService)
                 val activeServer = db.dnsDao().getActiveDnsServer()
@@ -850,7 +876,7 @@ class DnsVpnService : VpnService() {
         val queryKey = DnsQueryKey(
             bytes = dnsPayload,
             resolverGeneration = dnsState.resolverGeneration,
-            policyGeneration = dnsState.policyGeneration
+            policyAssembly = dnsState.policyAssembly
         )
 
         // 1. Return known-good cached responses before doing domain parsing or block matching.
@@ -870,7 +896,7 @@ class DnsVpnService : VpnService() {
         val domain = parseDomainName(dnsPayload)
 
         // 2. Check if ad domain / tracker - BLOCK IMMEDIATELY with genuine NXDOMAIN synthesis
-        val isAd = isAdOrTracker(domain)
+        val isAd = isAdOrTracker(domain, dnsState.policyAssembly)
         if (isAd) {
             val blockedResponse = buildNxDomainResponse(dnsPayload)
             sendResponsePacket(blockedResponse, clientIp, mockDnsIp, clientPort, outputStream)
@@ -1045,7 +1071,7 @@ class DnsVpnService : VpnService() {
 
         val udpLen = udpHeaderLength + payload.size
         packet[udpOffset + 4] = ((udpLen shr 8) and 0xFF).toByte()  // UDP Length MSB
-        packet[udpOffset + 5] = (udpLen and 0xFF).toByte()          // UDP Length LSB
+        packet[udpOffset + 5] = (udpLen and 0xFF).toByte()         // UDP Length LSB
 
         packet[udpOffset + 6] = 0x00.toByte() // UDP Checksum (can be omitted in IPv4 UDP)
         packet[udpOffset + 7] = 0x00.toByte()
