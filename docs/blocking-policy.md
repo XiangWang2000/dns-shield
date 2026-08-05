@@ -18,7 +18,25 @@ The service-level `blockDecisionCache` remains outside this composition and cach
 
 `ExactDomainAllowlist` matches only the normalized domain stored in the set. Allowing `example.com` does not allow `sub.example.com`, `lookalike-example.com`, or any parent domain.
 
-This conservative behavior is intentional. Parent-domain traversal, Public Suffix safeguards, user-managed persistence, and policy replacement must be designed and tested separately.
+This conservative behavior is intentional. User-managed persistence and any future parent-aware allowlist semantics remain separate reviewed policy changes.
+
+## Bounded parent-domain matching
+
+`ParentDomainMatcher` extends an exact matcher without blindly walking to the top-level domain. It checks the queried name first, then asks a required `RegistrableDomainResolver` for the effective TLD plus one boundary and checks parents only through that boundary.
+
+For `ads.api.example.co.uk`, a resolver result of `example.co.uk` permits these candidates:
+
+```text
+ads.api.example.co.uk
+api.example.co.uk
+example.co.uk
+```
+
+It never asks the exact matcher about `co.uk` or `uk`. The resolver contract must apply both the ICANN and PRIVATE sections of the Public Suffix List so private suffixes such as `github.io` also remain protected.
+
+A missing, blank, malformed, or unrelated resolver result keeps matching exact-only. `ParentDomainMatcher` has no unsafe fallback that assumes the last two labels are registrable.
+
+The bounded matcher is not yet added to `DomainPolicyAssembler`; compiled blocklist decisions therefore remain exact-domain only until a reviewed Public Suffix resolver is available.
 
 ## Policy assembly and fallback
 
@@ -56,4 +74,4 @@ Installers are serialized, while domain lookups remain lock-free and delegate th
 
 ## Current scope
 
-Runtime policy is now wired into `DnsVpnService`, but the repository still does not include a production blocklist, bundled asset, remote update flow, atomic file replacement, UI, user-managed allowlist, or Room schema change. With no `active.bin` present, shipped behavior remains the existing built-in matcher only.
+Runtime policy is wired into `DnsVpnService`, and a bounded parent-domain matcher now exists as a pure Kotlin component. The repository still does not include a Public Suffix resolver, production blocklist, bundled asset, remote update flow, atomic file replacement, UI, user-managed allowlist, or Room schema change. With no `active.bin` present, shipped behavior remains the existing built-in matcher only.
