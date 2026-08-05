@@ -51,6 +51,10 @@ def _validate_domain(value: str) -> None:
         raise ValueError(f"Malformed Public Suffix rule: {value!r}")
     if any(character.isspace() or character in "/*!" for character in value):
         raise ValueError(f"Malformed Public Suffix rule: {value!r}")
+    if not value.isascii():
+        raise ValueError(
+            f"Public Suffix rule must be ASCII or punycode in format v1: {value!r}"
+        )
     for label in value.split("."):
         if not label or label.startswith("-") or label.endswith("-"):
             raise ValueError(f"Malformed Public Suffix rule: {value!r}")
