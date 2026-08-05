@@ -67,6 +67,18 @@ github.io
 """
             )
 
+        with self.assertRaisesRegex(ValueError, "Malformed Public Suffix rule"):
+            parse_public_suffix_list(
+                """
+// ===BEGIN ICANN DOMAINS===
+bad.*.rule
+// ===END ICANN DOMAINS===
+// ===BEGIN PRIVATE DOMAINS===
+github.io
+// ===END PRIVATE DOMAINS===
+"""
+            )
+
     def test_matches_shared_cross_language_fixture_and_pinned_metadata(self) -> None:
         input_path = FIXTURES_DIR / "public_suffix_list.dat"
         metadata = json.loads(
