@@ -29,7 +29,7 @@ class ParentDomainMatcher(
         val registrableDomain = registrableDomainResolver
             .registrableDomain(normalized)
             ?.let(::normalizeDomain)
-            ?.takeIf(::isUsableDomain)
+            ?.takeIf(::isRegistrableDomain)
             ?.takeIf { boundary -> isSameDomainOrSubdomain(normalized, boundary) }
             ?: return false
 
@@ -53,5 +53,7 @@ private fun isUsableDomain(domain: String): Boolean =
         !domain.endsWith('.') &&
         ".." !in domain
 
+private fun isRegistrableDomain(domain: String): Boolean =
+    isUsableDomain(domain) && '.' in domain
 private fun isSameDomainOrSubdomain(domain: String, boundary: String): Boolean =
     domain == boundary || domain.endsWith(".$boundary")
