@@ -44,6 +44,14 @@ When that path does not exist, the optional compiled blocklist is treated as `No
 
 The runtime source does not create directories, copy a bundled asset, download a list, replace files, or install policy into the VPN service. Those lifecycle operations remain separate reviewed changes.
 
+## Atomic policy publication
+
+`ReloadableDomainPolicy` stores one complete `DomainPolicyAssembly` in an atomic reference. DNS readers therefore observe either the previous matcher and status or the replacement matcher and status; they never observe a partially updated policy.
+
+`install()` accepts a `beforePublish` callback. Runtime integration must use that callback to increment the service policy generation and clear DNS, in-flight, and block-decision caches before the replacement matcher becomes visible. If invalidation throws, the previous assembly remains installed and the failure is propagated.
+
+Installers are serialized, while domain lookups remain lock-free and delegate through the currently published matcher.
+
 ## Current scope
 
-The policy components, assembler, and runtime file resolver are pure Kotlin and are not wired into `DnsVpnService` yet. This document does not introduce a production blocklist, bundled asset, remote update flow, UI, or Room schema change.
+The policy components, assembler, runtime file resolver, and reloadable publisher are pure Kotlin and are not wired into `DnsVpnService` yet. This document does not introduce a production blocklist, bundled asset, remote update flow, UI, or Room schema change.
