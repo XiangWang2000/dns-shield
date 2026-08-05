@@ -87,6 +87,7 @@ class CompiledPublicSuffixListTest {
         assertNull(resolver.registrableDomain("-bad.example.com"))
         assertNull(resolver.registrableDomain("bad-.example.com"))
         assertNull(resolver.registrableDomain("bad domain.example"))
+        assertNull(resolver.registrableDomain("公司.cn"))
     }
 
     @Test
