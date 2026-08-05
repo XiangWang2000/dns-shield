@@ -16,6 +16,7 @@ import io.github.xiangwang2000.dnsshield.MainActivity
 import io.github.xiangwang2000.dnsshield.blocking.CompiledBlocklistStatus
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
+import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
 import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
 import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
@@ -531,16 +532,7 @@ class DnsVpnService : VpnService() {
             return
         }
 
-        when (status) {
-            CompiledBlocklistStatus.NotConfigured ->
-                addLog("[攔截規則] 未設定 compiled blocklist，使用內建規則")
-
-            is CompiledBlocklistStatus.Loaded ->
-                addLog("[攔截規則] 已載入 compiled blocklist：${status.entryCount} 筆")
-
-            is CompiledBlocklistStatus.Rejected ->
-                addLog("[攔截規則] compiled blocklist 無法載入，已回退內建規則：${status.reason}")
-        }
+        addLog(DomainPolicyDiagnostics.message(status))
     }
 
     private fun clearDnsStateLocked() {
