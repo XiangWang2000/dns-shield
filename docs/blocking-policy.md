@@ -36,7 +36,9 @@ It never asks the exact matcher about `co.uk` or `uk`. The resolver contract mus
 
 A missing, blank, malformed, or unrelated resolver result keeps matching exact-only. `ParentDomainMatcher` has no unsafe fallback that assumes the last two labels are registrable.
 
-The bounded matcher is not yet added to `DomainPolicyAssembler`; compiled blocklist decisions therefore remain exact-domain only until a reviewed Public Suffix resolver is available.
+`CompiledPublicSuffixList` now implements the resolver contract from a deterministic compact artifact. Its cross-language compatibility fixture covers exact, wildcard, exception, ICANN, PRIVATE, and default-rule behavior, while embedding the exact source SHA-256.
+
+The bounded matcher is not yet added to `DomainPolicyAssembler`; compiled blocklist decisions therefore remain exact-domain only. Runtime activation still requires a reviewed production PSL source, artifact loading strategy, and startup memory and latency measurements.
 
 ## Policy assembly and fallback
 
@@ -74,4 +76,4 @@ Installers are serialized, while domain lookups remain lock-free and delegate th
 
 ## Current scope
 
-Runtime policy is wired into `DnsVpnService`, and a bounded parent-domain matcher now exists as a pure Kotlin component. The repository still does not include a Public Suffix resolver, production blocklist, bundled asset, remote update flow, atomic file replacement, UI, user-managed allowlist, or Room schema change. With no `active.bin` present, shipped behavior remains the existing built-in matcher only.
+Runtime policy is wired into `DnsVpnService`; bounded parent matching and a compact Public Suffix resolver exist as pure Kotlin components. The repository still does not include a production PSL artifact, production blocklist, bundled asset, remote update flow, atomic file replacement, UI, user-managed allowlist, or Room schema change. With no `active.bin` present, shipped behavior remains the existing built-in matcher only.
