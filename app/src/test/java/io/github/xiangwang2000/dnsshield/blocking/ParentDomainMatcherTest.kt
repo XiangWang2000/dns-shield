@@ -150,6 +150,20 @@ class ParentDomainMatcherTest {
     }
 
     @Test
+    @Test
+    fun singleLabelBoundaryKeepsMatchingExactOnly() {
+        val candidates = mutableListOf<String>()
+        val matcher = ParentDomainMatcher(
+            exactMatcher = DomainMatcher { candidate ->
+                candidates += candidate
+                candidate == "com"
+            },
+            registrableDomainResolver = RegistrableDomainResolver { "com" }
+        )
+
+        assertFalse(matcher.shouldBlock("ads.example.com"))
+        assertEquals(listOf("ads.example.com"), candidates)
+    }
     fun unusableDomainsDoNotInvokeDependencies() {
         var calls = 0
         val matcher = ParentDomainMatcher(
