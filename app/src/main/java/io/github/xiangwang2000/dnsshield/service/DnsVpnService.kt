@@ -13,8 +13,10 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.xiangwang2000.dnsshield.MainActivity
-import io.github.xiangwang2000.dnsshield.blocking.BuiltInDomainMatcher
-import io.github.xiangwang2000.dnsshield.blocking.DomainMatcher
+import io.github.xiangwang2000.dnsshield.blocking.CompiledBlocklistStatus
+import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
+import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
+import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import kotlin.coroutines.resume
 import kotlinx.coroutines.*
@@ -116,8 +118,8 @@ class DnsVpnService : VpnService() {
 
         class CachedDnsRecord(val responseData: ByteArray, val expireAt: Long)
         private val dnsCache = LruCache<DnsQueryKey, CachedDnsRecord>(500)
-        private val blockDecisionCache = LruCache<String, Boolean>(1024)
-        private val domainMatcher: DomainMatcher = BuiltInDomainMatcher()
+        private val blockDecisionCache = LruCache<DomainPolicyCacheKey, Boolean>(1024)
+        private val domainPolicy = ReloadableDomainPolicy()
 
         // Thread-safe singleton lock for OkHttpClient
         @Volatile private var okHttpClientInstance: OkHttpClient? = null
@@ -401,10 +403,13 @@ class DnsVpnService : VpnService() {
         fun isAdOrTracker(domain: String): Boolean {
             val normalized = domain.lowercase().trim()
             if (normalized.isEmpty() || normalized == "unknown") return false
-            blockDecisionCache.get(normalized)?.let { return it }
 
-            return domainMatcher.shouldBlock(normalized).also {
-                blockDecisionCache.put(normalized, it)
+            val assembly = domainPolicy.snapshot()
+            val cacheKey = DomainPolicyCacheKey(normalized, assembly)
+            blockDecisionCache.get(cacheKey)?.let { return it }
+
+            return assembly.matcher.shouldBlock(normalized).also {
+                blockDecisionCache.put(cacheKey, it)
             }
         }
 
@@ -511,6 +516,32 @@ class DnsVpnService : VpnService() {
         }
     }
 
+    private fun reloadDomainPolicy() {
+        val status = try {
+            val assembly = RuntimeDomainPolicy.assemble(filesDir)
+            domainPolicy.install(assembly) {
+                invalidatePolicyState()
+            }
+        } catch (exception: Exception) {
+            val reason = exception.message?.takeIf(String::isNotBlank)
+                ?: exception.javaClass.simpleName
+            Log.e(TAG, "Failed to reload domain policy", exception)
+            addLog("[攔截規則] 重新載入失敗，保留目前規則：$reason")
+            return
+        }
+
+        when (status) {
+            CompiledBlocklistStatus.NotConfigured ->
+                addLog("[攔截規則] 未設定 compiled blocklist，使用內建規則")
+
+            is CompiledBlocklistStatus.Loaded ->
+                addLog("[攔截規則] 已載入 compiled blocklist：${status.entryCount} 筆")
+
+            is CompiledBlocklistStatus.Rejected ->
+                addLog("[攔截規則] compiled blocklist 無法載入，已回退內建規則：${status.reason}")
+        }
+    }
+
     private fun clearDnsStateLocked() {
         dnsCache.evictAll()
         inFlightQueries.clear()
@@ -548,7 +579,6 @@ class DnsVpnService : VpnService() {
             }
             ACTION_RESTART -> {
                 addLog("Restarting service command received")
-                invalidatePolicyState()
                 restartTunnel()
             }
             ACTION_UPDATE_DNS -> {
@@ -609,6 +639,8 @@ class DnsVpnService : VpnService() {
 
         activeTunnelScope.launch {
             try {
+                reloadDomainPolicy()
+
                 // Read active DNS from Room Database
                 val db = AppDatabase.getDatabase(this@DnsVpnService)
                 val activeServer = db.dnsDao().getActiveDnsServer()
@@ -1045,7 +1077,7 @@ class DnsVpnService : VpnService() {
 
         val udpLen = udpHeaderLength + payload.size
         packet[udpOffset + 4] = ((udpLen shr 8) and 0xFF).toByte()  // UDP Length MSB
-        packet[udpOffset + 5] = (udpLen and 0xFF).toByte()          // UDP Length LSB
+        packet[udpOffset + 5] = (udpLen and 0xFF).toByte()         // UDP Length LSB
 
         packet[udpOffset + 6] = 0x00.toByte() // UDP Checksum (can be omitted in IPv4 UDP)
         packet[udpOffset + 7] = 0x00.toByte()
