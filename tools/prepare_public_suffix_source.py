@@ -18,6 +18,9 @@ BEGIN_PRIVATE = "// ===BEGIN PRIVATE DOMAINS==="
 END_PRIVATE = "// ===END PRIVATE DOMAINS==="
 MAX_SOURCE_BYTES = 5 * 1024 * 1024
 
+VERSION_METADATA_PREFIX = "// VERSION: "
+COMMIT_METADATA_PREFIX = "// COMMIT: "
+
 
 @dataclass(frozen=True)
 class SourceManifest:
@@ -87,8 +90,48 @@ def git_blob_sha1(source: bytes) -> str:
     return hashlib.sha1(header + source).hexdigest()
 
 
+
+def upstream_blob_source(source: bytes, manifest: SourceManifest) -> bytes:
+    """Remove only the metadata added by publicsuffix.org around the Git blob."""
+    text = source.decode("utf-8")
+    lines: list[str] = []
+    version: str | None = None
+    commit: str | None = None
+    section_started = False
+
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        if line.startswith(VERSION_METADATA_PREFIX):
+            if section_started or version is not None:
+                raise ValueError("Unexpected or duplicate Public Suffix VERSION metadata")
+            version = line[len(VERSION_METADATA_PREFIX):]
+            if not version:
+                raise ValueError("Public Suffix VERSION metadata must not be empty")
+            continue
+        if line.startswith(COMMIT_METADATA_PREFIX):
+            if section_started or commit is not None:
+                raise ValueError("Unexpected or duplicate Public Suffix COMMIT metadata")
+            commit = line[len(COMMIT_METADATA_PREFIX):]
+            if commit != manifest.source_revision:
+                raise ValueError(
+                    "Public Suffix mirror commit mismatch: "
+                    f"expected {manifest.source_revision}, found {commit}"
+                )
+            continue
+        lines.append(raw_line)
+        if line == BEGIN_ICANN:
+            section_started = True
+
+    if (version is None) != (commit is None):
+        raise ValueError(
+            "Public Suffix mirror metadata must contain both VERSION and COMMIT"
+        )
+    return "".join(lines).encode("utf-8")
+
+
 def verify_source(source: bytes, manifest: SourceManifest) -> None:
-    actual_blob = git_blob_sha1(source)
+    canonical_source = upstream_blob_source(source, manifest)
+    actual_blob = git_blob_sha1(canonical_source)
     if actual_blob != manifest.git_blob_sha1:
         raise ValueError(
             "Public Suffix source blob mismatch: "
