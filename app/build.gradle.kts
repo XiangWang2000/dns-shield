@@ -49,6 +49,7 @@ android {
     targetSdk = 37
     versionCode = 2
     versionName = "1.1.0"
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
   signingConfigs {
@@ -104,6 +105,11 @@ android {
   buildFeatures {
     compose = true
   }
+  sourceSets {
+    getByName("androidTest") {
+      assets.srcDir(layout.buildDirectory.dir("generated/publicSuffixAndroidTestAssets"))
+    }
+  }
   packaging {
     jniLibs {
       keepDebugSymbols.add("**/libandroidx.graphics.path.so")
@@ -130,6 +136,8 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.okhttp)
   testImplementation(libs.kotlin.test)
+  androidTestImplementation(libs.androidx.test.ext.junit)
+  androidTestImplementation(libs.androidx.test.runner)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
 }
