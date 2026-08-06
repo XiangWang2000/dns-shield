@@ -1,5 +1,8 @@
 package io.github.xiangwang2000.dnsshield.blocking
 
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.concurrent.Callable
@@ -91,20 +94,41 @@ class PublicSuffixAssetLoaderTest {
     @Test
     fun productionContractMatchesReviewedManifest() {
         val contract = ProductionPublicSuffixArtifact.contract
+        val manifest = Files.readString(findProductionManifest())
 
-        assertEquals(153_740, contract.artifactSize)
+        assertEquals(jsonInt(manifest, "artifact_size"), contract.artifactSize)
+        assertEquals(jsonString(manifest, "artifact_sha256"), contract.artifactSha256)
         assertEquals(
-            "401b3ed16ed28eb9a8362a93f8f054462fa16bdce26a0e7eaa6c5a3cb5a6eb70",
-            contract.artifactSha256
-        )
-        assertEquals(
-            "72d07fea544b74d920be2394d4c5fbb38dd3f5f3ccac299e27809009bac1c550",
+            jsonString(manifest, "normalized_sha256"),
             contract.normalizedSourceSha256
         )
-        assertEquals(9_950, contract.exactRules)
-        assertEquals(281, contract.wildcardRules)
-        assertEquals(8, contract.exceptionRules)
+        assertEquals(jsonInt(manifest, "exact_rules"), contract.exactRules)
+        assertEquals(jsonInt(manifest, "wildcard_rules"), contract.wildcardRules)
+        assertEquals(jsonInt(manifest, "exception_rules"), contract.exceptionRules)
     }
+
+    private fun findProductionManifest(): Path =
+        generateSequence(Paths.get("").toAbsolutePath().normalize()) { current ->
+            current.parent
+        }
+            .map { root -> root.resolve("tools/public_suffix_production.json") }
+            .firstOrNull { candidate -> Files.isRegularFile(candidate) }
+            ?: error("Unable to locate tools/public_suffix_production.json")
+
+    private fun jsonString(document: String, key: String): String =
+        Regex("\"${Regex.escape(key)}\"\\s*:\\s*\"([^\"]+)\"")
+            .find(document)
+            ?.groupValues
+            ?.get(1)
+            ?: error("Missing JSON string field: $key")
+
+    private fun jsonInt(document: String, key: String): Int =
+        Regex("\"${Regex.escape(key)}\"\\s*:\\s*(\\d+)")
+            .find(document)
+            ?.groupValues
+            ?.get(1)
+            ?.toInt()
+            ?: error("Missing JSON integer field: $key")
 
     private val fixtureArtifact: ByteArray
         get() = Base64.getDecoder().decode(
