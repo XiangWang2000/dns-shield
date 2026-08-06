@@ -38,16 +38,19 @@ The instrumented test records:
 
 - Android model, release, API level, and primary ABI;
 - artifact size, rule counts, and embedded normalized-source SHA-256;
-- median and p95 asset-read-plus-resolver-load time across 12 samples;
+- `first_load_nanos`: the first asset-read, validation, parsing and resolver construction in the instrumentation process, before any loader warm-up;
+- `warm_load_median_nanos` and `warm_load_p95_nanos`: repeated resolver construction across 12 later samples after classes and the artifact have already been touched;
+- `cached_load_nanos`: a second `load()` call through the same loader instance, which must return the identical cached resolver;
 - approximate retained Java heap for one held resolver;
-- median and p95 lookup time across 12 batches of 20,000 representative lookups;
-- successful repeated calls through one loader instance returning the same cached resolver.
+- median and p95 lookup time across 12 batches of 20,000 representative lookups.
 
 The lookup set covers ordinary ICANN rules, `co.uk`, PRIVATE suffixes, wildcard rules, exception rules, and a punycode suffix.
 
 ## Interpretation
 
 Timing and heap values are observations, not universal test limits. Compare results only when the device, Android build, power state, generated artifact, and command are held constant. The heap value is a GC-assisted before/after approximation rather than an exact object graph size.
+
+`first_load_nanos` is the first resolver load inside an already-running instrumentation process. It intentionally runs before any `PublicSuffixAssetLoader.load()` warm-up, but it is not a complete cold application-process or VPN-service startup measurement. The warm-load values should not be presented as first-start latency, and cached-load timing should only be used to verify that lifecycle-scoped reuse is inexpensive.
 
 The initial ad hoc ASUS_Z01RD result can be used only as a rough reference because it predates this committed runner:
 
@@ -58,7 +61,7 @@ lookup median 11.23 us, p95 14.00 us
 approximate heap 690,000 bytes
 ```
 
-Run the committed benchmark multiple times before using that comparison. The current loader is suitable for later packaging only when it remains a once-per-service-lifecycle cost and does not cause repeated parsing during DNS queries, network changes, Activity recreation, or duplicate service starts.
+Run the committed benchmark multiple times before using that comparison. Give the first-load value from each independent instrumentation run its own sample set; do not calculate a first-load p95 from warm samples in one process. The current loader is suitable for later packaging only when it remains a once-per-service-lifecycle cost and does not cause repeated parsing during DNS queries, network changes, Activity recreation, or duplicate service starts.
 
 ## Current boundary
 
