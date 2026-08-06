@@ -23,7 +23,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "==> Gradle build and tests"
-& .\gradlew.bat --no-daemon --console=plain :app:assembleDebug :app:testDebugUnitTest :app:compileDebugKotlin
+& .\gradlew.bat --no-daemon --console=plain `
+    :app:assembleDebug `
+    :app:assembleDebugAndroidTest `
+    :app:testDebugUnitTest `
+    :app:compileDebugKotlin
 if ($LASTEXITCODE -ne 0) {
     throw "Gradle verification failed with exit code $LASTEXITCODE."
 }
