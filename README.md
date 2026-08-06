@@ -62,7 +62,7 @@ DNS Shield 不包含帳號、分析 SDK、廣告 SDK或開發者營運的後端�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 
-驗證入口會執行 Debug APK 建置、單元測試 task 與 Kotlin 編譯。
+驗證入口會執行離線 Python 工具測試、Debug APK 建置、Android 單元測試與 Kotlin 編譯。
 
 離線 blocklist 編譯器及其測試可獨立執行：
 
@@ -72,6 +72,21 @@ python tools/build_blocklist.py --input tools/tests/fixtures/blocklist.txt --out
 ```
 
 二進位格式請參閱 [docs/blocklist-format.md](docs/blocklist-format.md)。第一版只接受本機文字清單，不會下載遠端來源，也尚未接入 VPN 熱路徑。
+
+Public Suffix 來源更新是獨立且明確的維護操作。先安裝鎖定且帶雜湊的 IDNA 依賴，再取得並正規化 manifest 指定的來源：
+
+```powershell
+python -m pip install --require-hashes -r tools/requirements-public-suffix.txt
+python tools/prepare_public_suffix_source.py `
+  --manifest tools/public_suffix_source.json `
+  --output build/public-suffix.normalized.dat `
+  --metadata-output build/public-suffix.source.json
+python tools/build_public_suffix.py `
+  --input build/public-suffix.normalized.dat `
+  --output build/public-suffix.bin
+```
+
+準備器只接受 `publicsuffix.org` 的 pinned 來源，會驗證並移除官方 URL 加入的 `VERSION`/`COMMIT` 前導註解，再以指定 upstream Git blob 驗證其餘完整位元組；日常 `verify.ps1` 不會下載來源或安裝套件。格式與供應鏈邊界請參閱 [docs/public-suffix-format.md](docs/public-suffix-format.md)。完整 PSL 產物目前仍未接入 VPN。
 
 ## 正式發行
 
