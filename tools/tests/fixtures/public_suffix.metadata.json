@@ -1,0 +1,13 @@
+{
+  "source_name": "DNS Shield Public Suffix compatibility fixture",
+  "source_revision": "fixture-v1",
+  "source_path": "tools/tests/fixtures/public_suffix_list.dat",
+  "source_sha256": "73eccadbfd06a1e7e5ca4cbb001fcdb39d65f04766588281e2fa4c677cf5a72b",
+  "artifact_sha256": "28d6e87d6e24f00c3cb07dc4b4652dd6ad36580474d05b75e9615beced9365e0",
+  "includes_icann": true,
+  "includes_private": true,
+  "exact_rules": 9,
+  "wildcard_rules": 2,
+  "exception_rules": 2,
+  "artifact_size": 161
+}

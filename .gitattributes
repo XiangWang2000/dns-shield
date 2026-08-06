@@ -13,6 +13,8 @@
 *.xml text eol=crlf
 LICENSE text eol=crlf
 
+tools/tests/fixtures/public_suffix_list.dat text eol=lf
+
 gradlew text eol=lf
 
 *.jar binary
