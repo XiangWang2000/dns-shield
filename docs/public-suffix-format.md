@@ -2,9 +2,24 @@
 
 `tools/build_public_suffix.py` converts a local Public Suffix List text file into a deterministic compact artifact for `CompiledPublicSuffixList`. The compiler never downloads a source; callers must provide a locally pinned input.
 
+## Pinned upstream preparation
+
+`tools/public_suffix_source.json` pins the upstream list by repository commit and Git blob identity while retaining the supported download URL on `publicsuffix.org`. The manifest also records the MPL-2.0 license and the exact IDNA dependency used for Unicode normalization.
+
+`tools/prepare_public_suffix_source.py` performs these steps:
+
+1. Download from the pinned HTTPS URL, or read bytes supplied with `--input` for an offline run.
+2. Recompute the standard Git blob SHA-1 and require it to equal the manifest value.
+3. Require the MPL-2.0 notice and one complete ICANN section followed by one complete PRIVATE section.
+4. Remove non-semantic upstream comments.
+5. Convert each exact, wildcard, and exception rule to lowercase ASCII using `idna==3.18`, UTS #46 mapping, STD3 rules, and non-transitional processing.
+6. Write deterministic normalized source plus JSON metadata containing the upstream and normalized SHA-256 values, rule counts, toolchain version, and pinned source identity.
+
+The IDNA dependency is locked with wheel and source-distribution hashes in `tools/requirements-public-suffix.txt`. Routine `verify.ps1` remains offline and does not install this dependency or download the production list; its unit tests inject a deterministic encoder. Source refresh is an explicit maintainer operation.
+
 ## Source requirements
 
-The input must contain both standard PSL section markers:
+The normalized input must contain both standard PSL section markers:
 
 ```text
 // ===BEGIN ICANN DOMAINS===
@@ -17,9 +32,9 @@ The input must contain both standard PSL section markers:
 
 Exact rules, wildcard rules such as `*.ck`, and exception rules such as `!www.ck` are normalized with `lowercase().trim()`. Wildcards are stored without `*.` and exceptions without `!`. Rules are sorted by their UTF-8 bytes before encoding.
 
-Format version 1 accepts ASCII and punycode rules only. Raw Unicode rules are rejected rather than being encoded with a platform-dependent IDNA implementation. A future production pipeline must add one reviewed, reproducible Unicode-to-punycode normalization step before compiling the complete upstream PSL. The Kotlin reader likewise treats non-ASCII query names and encoded rules as unusable.
+Format version 1 accepts ASCII and punycode rules only. Raw Unicode upstream rules must pass through the pinned preparation step before compilation. The Kotlin reader likewise treats non-ASCII query names and encoded rules as unusable.
 
-The shared compatibility fixture pins its source revision, source SHA-256, artifact SHA-256, rule counts, and size in `tools/tests/fixtures/public_suffix.metadata.json`. A future production source must provide equivalent pinned metadata and must include both ICANN and PRIVATE sections.
+The shared compatibility fixture pins its source revision, source SHA-256, artifact SHA-256, rule counts, and size in `tools/tests/fixtures/public_suffix.metadata.json`. It proves format and resolver interoperability but is not the complete production dataset.
 
 ## Binary layout
 
@@ -33,7 +48,7 @@ All integer fields are little-endian.
 | 16 | 4 | Exact-rule count |
 | 20 | 4 | Wildcard-suffix count |
 | 24 | 4 | Exception-rule count |
-| 28 | 32 | SHA-256 of the exact source bytes |
+| 28 | 32 | SHA-256 of the exact normalized source bytes |
 | 60 | variable | Exact, wildcard, then exception rule tables |
 
 Each rule table entry is:
@@ -58,11 +73,25 @@ The compatibility fixture covers multi-label ICANN suffixes (`co.uk`), PRIVATE s
 
 ## Usage
 
+Run the offline repository tests normally:
+
 ```powershell
 python -m unittest discover tools/tests
-python tools/build_public_suffix.py `
-  --input tools/tests/fixtures/public_suffix_list.dat `
-  --output build/test-public-suffix.bin
 ```
 
-This format and resolver are not yet wired into `DomainPolicyAssembler` or `DnsVpnService`. Do not activate parent-domain matching until a reviewed production PSL source, deterministic IDNA policy, artifact loading strategy, startup cost, and memory measurements are available.
+Perform an explicit pinned source refresh in an isolated environment:
+
+```powershell
+python -m pip install --require-hashes -r tools/requirements-public-suffix.txt
+python tools/prepare_public_suffix_source.py `
+  --manifest tools/public_suffix_source.json `
+  --output build/public-suffix.normalized.dat `
+  --metadata-output build/public-suffix.source.json
+python tools/build_public_suffix.py `
+  --input build/public-suffix.normalized.dat `
+  --output build/public-suffix.bin
+```
+
+Pass `--input <downloaded-file>` to the preparation command to reproduce normalization without network access; the supplied bytes must still match the pinned Git blob.
+
+The complete normalized list and production artifact are not committed or wired into `DomainPolicyAssembler` or `DnsVpnService` in this change. Measure production artifact size, startup time, retained memory, and lookup latency before activating parent-domain matching.
