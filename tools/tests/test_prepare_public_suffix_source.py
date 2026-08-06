@@ -122,7 +122,7 @@ GITHUB.IO
             b"// ===BEGIN ICANN DOMAINS===",
             b"// VERSION: 2026-07-25_14-20-03_UTC\n"
             b"// COMMIT: e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20\n"
-            b"// Instructions on pulling",
+            b"// ===BEGIN ICANN DOMAINS===",
         )
 
         verify_source(mirror_source, manifest)
