@@ -9,7 +9,7 @@
 `tools/prepare_public_suffix_source.py` performs these steps:
 
 1. Download from the pinned HTTPS URL, or read bytes supplied with `--input` for an offline run.
-2. Recompute the standard Git blob SHA-1 and require it to equal the manifest value.
+2. Validate and remove the official URL's `// VERSION` and `// COMMIT` metadata when present, then recompute the standard Git blob SHA-1 over the remaining upstream bytes and require it to equal the manifest value.
 3. Require the MPL-2.0 notice and one complete ICANN section followed by one complete PRIVATE section.
 4. Remove non-semantic upstream comments.
 5. Convert each exact, wildcard, and exception rule to lowercase ASCII using `idna==3.18`, UTS #46 mapping, STD3 rules, and non-transitional processing.
@@ -92,6 +92,6 @@ python tools/build_public_suffix.py `
   --output build/public-suffix.bin
 ```
 
-Pass `--input <downloaded-file>` to the preparation command to reproduce normalization without network access; the supplied bytes must still match the pinned Git blob.
+Pass `--input <downloaded-file>` to reproduce normalization without network access; the preparer accepts either the raw Git source or the official URL bytes, validating and removing only the official `VERSION`/`COMMIT` metadata before checking the pinned Git blob.
 
 The complete normalized list and production artifact are not committed or wired into `DomainPolicyAssembler` or `DnsVpnService` in this change. Measure production artifact size, startup time, retained memory, and lookup latency before activating parent-domain matching.
