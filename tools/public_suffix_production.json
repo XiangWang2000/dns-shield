@@ -1,0 +1,13 @@
+{
+  "artifact_sha256": "401b3ed16ed28eb9a8362a93f8f054462fa16bdce26a0e7eaa6c5a3cb5a6eb70",
+  "artifact_size": 153740,
+  "exact_rules": 9950,
+  "exception_rules": 8,
+  "git_blob_sha1": "52b981034da22eb87ee6cc719cba4d5561a7d351",
+  "idna_version": "3.18",
+  "normalized_sha256": "72d07fea544b74d920be2394d4c5fbb38dd3f5f3ccac299e27809009bac1c550",
+  "normalized_size": 144382,
+  "schema_version": 1,
+  "source_revision": "e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20",
+  "wildcard_rules": 281
+}

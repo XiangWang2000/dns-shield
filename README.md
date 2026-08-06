@@ -86,7 +86,15 @@ python tools/build_public_suffix.py `
   --output build/public-suffix.bin
 ```
 
-準備器只接受 `publicsuffix.org` 的 pinned 來源，會驗證並移除官方 URL 加入的 `VERSION`/`COMMIT` 前導註解，再以指定 upstream Git blob 驗證其餘完整位元組；日常 `verify.ps1` 不會下載來源或安裝套件。格式與供應鏈邊界請參閱 [docs/public-suffix-format.md](docs/public-suffix-format.md)。完整 PSL 產物目前仍未接入 VPN。
+準備器只接受 `publicsuffix.org` 的 pinned 來源，會驗證並移除官方 URL 加入的 `VERSION`/`COMMIT` 前導註解，再以指定 upstream Git blob 驗證其餘完整位元組；日常 `verify.ps1` 不會下載來源或安裝套件。格式與供應鏈邊界請參閱 [docs/public-suffix-format.md](docs/public-suffix-format.md)。
+
+產生完整 normalized source 與 artifact 後，可用固定的 production manifest 驗證輸出並執行 opt-in JVM characterization：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix.ps1
+```
+
+腳本會先確認來源 revision、IDNA 版本、SHA-256、檔案大小、規則數與 deterministic regeneration，再輸出 `build/public-suffix.validation.json` 與 `build/public-suffix.benchmark.json`。benchmark 記錄載入時間、估算常駐 heap 與 lookup latency，但不設定跨裝置的效能通過門檻，也不會由日常 `verify.ps1` 自動執行。完整 PSL 仍未打包進 APK或接入 VPN。
 
 ## 正式發行
 

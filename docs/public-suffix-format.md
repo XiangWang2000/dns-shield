@@ -71,6 +71,31 @@ Every table must be strictly sorted by unsigned UTF-8 bytes. The reader rejects 
 
 The compatibility fixture covers multi-label ICANN suffixes (`co.uk`), PRIVATE suffixes (`github.io`, `blogspot.com`), wildcard rules (`*.ck`, `*.kawasaki.jp`), and exceptions (`!www.ck`, `!city.kawasaki.jp`).
 
+## Production output contract
+
+`tools/public_suffix_production.json` pins the reviewed complete-list output without committing the generated files or packaging them in the APK. It records:
+
+- upstream revision and Git blob identity;
+- the IDNA version used during preparation;
+- normalized-source SHA-256 and byte size;
+- compact-artifact SHA-256 and byte size;
+- exact, wildcard, and exception rule counts.
+
+For the currently pinned source, the expected output is 9,950 exact rules, 281 wildcard rules, 8 exception rules, a 144,382-byte normalized source, and a 153,740-byte compact artifact.
+
+`tools/verify_public_suffix_production.py` validates both generated files against this manifest and the source manifest. It also rebuilds the compact artifact from the normalized source and requires byte-for-byte equality, verifies the artifact header and embedded normalized-source SHA-256, and can write a machine-readable JSON report.
+
+## JVM characterization
+
+`benchmark-public-suffix.ps1` first runs production verification and then invokes the opt-in `ProductionPublicSuffixBenchmarkTest`. The benchmark records:
+
+- median and p95 resolver load time;
+- approximate retained JVM heap after one resolver is held;
+- median and p95 lookup time over representative ICANN, PRIVATE, wildcard, exception, and punycode domains;
+- artifact size, rule counts, source SHA, JBR version, and operating system.
+
+These values are characterization data rather than test thresholds. JVM garbage collection, JIT state, hardware, and background activity make retained-heap and timing results unsuitable as universal pass/fail gates. Compare runs using the same JBR, machine, power state, and command. Android on-device measurements remain a separate step before runtime activation.
+
 ## Usage
 
 Run the offline repository tests normally:
@@ -92,6 +117,12 @@ python tools/build_public_suffix.py `
   --output build/public-suffix.bin
 ```
 
+Validate and characterize those generated outputs:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix.ps1
+```
+
 Pass `--input <downloaded-file>` to reproduce normalization without network access; the preparer accepts either the raw Git source or the official URL bytes, validating and removing only the official `VERSION`/`COMMIT` metadata before checking the pinned Git blob.
 
-The complete normalized list and production artifact are not committed or wired into `DomainPolicyAssembler` or `DnsVpnService` in this change. Measure production artifact size, startup time, retained memory, and lookup latency before activating parent-domain matching.
+The complete normalized list and production artifact remain build outputs and are not packaged or wired into `DomainPolicyAssembler` or `DnsVpnService`. Complete Android startup, retained-memory, and lookup measurements before activating parent-domain matching.
