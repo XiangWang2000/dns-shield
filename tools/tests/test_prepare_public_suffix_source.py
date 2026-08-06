@@ -112,6 +112,28 @@ GITHUB.IO
                 ),
             )
 
+    def test_verifies_publicsuffix_org_mirror_metadata_before_blob_check(self) -> None:
+        source = self.source()
+        manifest = replace(
+            BASE_MANIFEST,
+            git_blob_sha1=git_blob_sha1(source),
+        )
+        mirror_source = source.replace(
+            b"// Instructions on pulling",
+            b"// VERSION: 2026-07-25_14-20-03_UTC\n"
+            b"// COMMIT: e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20\n"
+            b"// Instructions on pulling",
+        )
+
+        verify_source(mirror_source, manifest)
+
+        changed_commit = mirror_source.replace(
+            b"// COMMIT: e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20",
+            b"// COMMIT: " + b"0" * 40,
+        )
+        with self.assertRaisesRegex(ValueError, "mirror commit mismatch"):
+            verify_source(changed_commit, manifest)
+
     def test_normalizes_unicode_rules_deterministically(self) -> None:
         normalized, stats = normalize_source(
             self.source(),
