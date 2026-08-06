@@ -1,0 +1,12 @@
+{
+  "git_blob_sha1": "52b981034da22eb87ee6cc719cba4d5561a7d351",
+  "idna_package": "idna",
+  "idna_version": "3.18",
+  "idna_wheel_sha256": "7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2",
+  "license": "MPL-2.0",
+  "license_url": "https://mozilla.org/MPL/2.0/",
+  "schema_version": 1,
+  "source_name": "publicsuffix/list",
+  "source_revision": "e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20",
+  "source_url": "https://publicsuffix.org/list/public_suffix_list.dat"
+}
