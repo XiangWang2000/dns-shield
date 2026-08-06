@@ -25,15 +25,29 @@ class ProductionPublicSuffixInstrumentedBenchmarkTest {
         val testAssets = instrumentation.context.assets
         val targetContext = instrumentation.targetContext
 
-        val cachedLoader = PublicSuffixAssetLoader.fromAssets(testAssets)
-        val cachedFirst = cachedLoader.load()
-        val cachedSecond = cachedLoader.load()
-        assertSame(cachedFirst, cachedSecond)
-        exerciseKnownBoundaries(cachedFirst)
-        benchmarkSink = cachedFirst
+        // Measure the first resolver construction in this instrumentation process before any
+        // loader warm-up. This is not full application-process startup time.
+        val firstLoader = PublicSuffixAssetLoader.fromAssets(testAssets)
+        var firstResolver: CompiledPublicSuffixList? = null
+        val firstLoadNanos = measureNanoTime {
+            firstResolver = firstLoader.load()
+        }
+        val firstLoadedResolver = checkNotNull(firstResolver)
+        exerciseKnownBoundaries(firstLoadedResolver)
+        benchmarkSink = firstLoadedResolver
+
+        var cachedResolver: CompiledPublicSuffixList? = null
+        val cachedLoadNanos = measureNanoTime {
+            cachedResolver = firstLoader.load()
+        }
+        val cachedLoadedResolver = checkNotNull(cachedResolver)
+        assertSame(firstLoadedResolver, cachedLoadedResolver)
+        benchmarkSink = cachedLoadedResolver
         forceGc()
 
-        val loadSamples = LongArray(LOAD_ITERATIONS) {
+        // Later samples intentionally characterize repeated asset read, validation and resolver
+        // construction after classes and the artifact have already been touched in this process.
+        val warmLoadSamples = LongArray(WARM_LOAD_ITERATIONS) {
             val loader = PublicSuffixAssetLoader.fromAssets(testAssets)
             measureNanoTime {
                 benchmarkSink = loader.load()
@@ -74,9 +88,11 @@ class ProductionPublicSuffixInstrumentedBenchmarkTest {
             wildcardRules = retainedResolver.wildcardRuleCount,
             exceptionRules = retainedResolver.exceptionRuleCount,
             sourceSha256 = retainedResolver.sourceSha256Hex,
-            loadIterations = LOAD_ITERATIONS,
-            loadMedianNanos = percentile(loadSamples, 0.50),
-            loadP95Nanos = percentile(loadSamples, 0.95),
+            firstLoadNanos = firstLoadNanos,
+            warmLoadIterations = WARM_LOAD_ITERATIONS,
+            warmLoadMedianNanos = percentile(warmLoadSamples, 0.50),
+            warmLoadP95Nanos = percentile(warmLoadSamples, 0.95),
+            cachedLoadNanos = cachedLoadNanos,
             approximateRetainedHeapBytes = approximateRetainedHeapBytes,
             lookupBatches = LOOKUP_BATCHES,
             lookupsPerBatch = LOOKUPS_PER_BATCH,
@@ -148,9 +164,11 @@ class ProductionPublicSuffixInstrumentedBenchmarkTest {
         val wildcardRules: Int,
         val exceptionRules: Int,
         val sourceSha256: String,
-        val loadIterations: Int,
-        val loadMedianNanos: Long,
-        val loadP95Nanos: Long,
+        val firstLoadNanos: Long,
+        val warmLoadIterations: Int,
+        val warmLoadMedianNanos: Long,
+        val warmLoadP95Nanos: Long,
+        val cachedLoadNanos: Long,
         val approximateRetainedHeapBytes: Long,
         val lookupBatches: Int,
         val lookupsPerBatch: Int,
@@ -168,9 +186,11 @@ class ProductionPublicSuffixInstrumentedBenchmarkTest {
               "wildcard_rules": $wildcardRules,
               "exception_rules": $exceptionRules,
               "source_sha256": ${sourceSha256.jsonString()},
-              "load_iterations": $loadIterations,
-              "load_median_nanos": $loadMedianNanos,
-              "load_p95_nanos": $loadP95Nanos,
+              "first_load_nanos": $firstLoadNanos,
+              "warm_load_iterations": $warmLoadIterations,
+              "warm_load_median_nanos": $warmLoadMedianNanos,
+              "warm_load_p95_nanos": $warmLoadP95Nanos,
+              "cached_load_nanos": $cachedLoadNanos,
               "approximate_retained_heap_bytes": $approximateRetainedHeapBytes,
               "lookup_batches": $lookupBatches,
               "lookups_per_batch": $lookupsPerBatch,
@@ -182,7 +202,7 @@ class ProductionPublicSuffixInstrumentedBenchmarkTest {
 
     companion object {
         const val REPORT_FILE_NAME = "public-suffix.android-benchmark.json"
-        private const val LOAD_ITERATIONS = 12
+        private const val WARM_LOAD_ITERATIONS = 12
         private const val LOOKUP_BATCHES = 12
         private const val LOOKUPS_PER_BATCH = 20_000
 
