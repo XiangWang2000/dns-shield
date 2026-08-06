@@ -98,9 +98,14 @@ def upstream_blob_source(source: bytes, manifest: SourceManifest) -> bytes:
     version: str | None = None
     commit: str | None = None
     section_started = False
+    remove_metadata_blank = False
 
     for raw_line in text.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")
+        if remove_metadata_blank:
+            remove_metadata_blank = False
+            if line == "":
+                continue
         if line.startswith(VERSION_METADATA_PREFIX):
             if section_started or version is not None:
                 raise ValueError("Unexpected or duplicate Public Suffix VERSION metadata")
@@ -117,6 +122,7 @@ def upstream_blob_source(source: bytes, manifest: SourceManifest) -> bytes:
                     "Public Suffix mirror commit mismatch: "
                     f"expected {manifest.source_revision}, found {commit}"
                 )
+            remove_metadata_blank = True
             continue
         lines.append(raw_line)
         if line == BEGIN_ICANN:
