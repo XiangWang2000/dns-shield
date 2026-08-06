@@ -86,7 +86,7 @@ python tools/build_public_suffix.py `
   --output build/public-suffix.bin
 ```
 
-準備器只接受 `publicsuffix.org` 的 pinned 來源，並以指定 upstream Git blob 驗證完整位元組；日常 `verify.ps1` 不會下載來源或安裝套件。格式與供應鏈邊界請參閱 [docs/public-suffix-format.md](docs/public-suffix-format.md)。完整 PSL 產物目前仍未接入 VPN。
+準備器只接受 `publicsuffix.org` 的 pinned 來源，會驗證並移除官方 URL 加入的 `VERSION`/`COMMIT` 前導註解，再以指定 upstream Git blob 驗證其餘完整位元組；日常 `verify.ps1` 不會下載來源或安裝套件。格式與供應鏈邊界請參閱 [docs/public-suffix-format.md](docs/public-suffix-format.md)。完整 PSL 產物目前仍未接入 VPN。
 
 ## 正式發行
 
