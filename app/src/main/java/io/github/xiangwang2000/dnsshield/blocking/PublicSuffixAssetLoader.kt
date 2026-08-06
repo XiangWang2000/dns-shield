@@ -1,6 +1,8 @@
 package io.github.xiangwang2000.dnsshield.blocking
 
 import android.content.res.AssetManager
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 
@@ -32,7 +34,7 @@ class PublicSuffixAssetLoader internal constructor(
         ): PublicSuffixAssetLoader = PublicSuffixAssetLoader(
             readArtifact = {
                 assets.open(assetName, AssetManager.ACCESS_BUFFER).use { input ->
-                    input.readBytes()
+                    input.readAtMost(ProductionPublicSuffixArtifact.contract.artifactSize + 1)
                 }
             }
         )
@@ -95,6 +97,18 @@ internal object ProductionPublicSuffixArtifact {
         }
         return resolver
     }
+}
+
+private fun InputStream.readAtMost(maxBytes: Int): ByteArray {
+    require(maxBytes > 0)
+    val output = ByteArrayOutputStream(minOf(maxBytes, DEFAULT_BUFFER_SIZE))
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    while (output.size() < maxBytes) {
+        val read = read(buffer, 0, minOf(buffer.size, maxBytes - output.size()))
+        if (read < 0) break
+        output.write(buffer, 0, read)
+    }
+    return output.toByteArray()
 }
 
 private fun ByteArray.toHexString(): String {
