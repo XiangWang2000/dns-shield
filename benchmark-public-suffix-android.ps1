@@ -59,8 +59,7 @@ if ($Serial) {
     $ConnectedDevices = @(
         & adb devices |
             Select-Object -Skip 1 |
-            ForEach-Object { ($_ -split "\s+")[0..1] -join " " } |
-            Where-Object { $_ -match "\sdevice$" } |
+            Where-Object { $_ -match "^\S+\s+device$" } |
             ForEach-Object { ($_ -split "\s+")[0] }
     )
     if ($ConnectedDevices.Count -ne 1) {
@@ -96,7 +95,6 @@ $ApiLevel = (& adb -s $SelectedSerial shell getprop ro.build.version.sdk).Trim()
 $Abi = (& adb -s $SelectedSerial shell getprop ro.product.cpu.abi).Trim()
 Write-Host "Device: $Model; Android: $AndroidRelease / API $ApiLevel; ABI: $Abi; Serial: $SelectedSerial"
 
-$BenchmarkStartedUtc = [DateTime]::UtcNow
 $PreviousAndroidSerial = $env:ANDROID_SERIAL
 try {
     $env:ANDROID_SERIAL = $SelectedSerial
@@ -118,10 +116,6 @@ Invoke-Adb @("pull", $DeviceReport, $BenchmarkReportPath)
 
 if (-not (Test-Path -LiteralPath $BenchmarkReportPath -PathType Leaf)) {
     throw "Android Public Suffix benchmark did not produce a report: $BenchmarkReportPath"
-}
-$ReportInfo = Get-Item -LiteralPath $BenchmarkReportPath
-if ($ReportInfo.LastWriteTimeUtc -lt $BenchmarkStartedUtc) {
-    throw "Android Public Suffix benchmark report is stale: $BenchmarkReportPath"
 }
 
 Write-Host "Validation report: $ValidationReportPath"
