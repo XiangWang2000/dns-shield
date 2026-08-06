@@ -50,6 +50,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Public Suffix production verification failed with exit code $LASTEXITCODE."
 }
 
+$BenchmarkStartedUtc = [DateTime]::UtcNow
 $PreviousArtifact = $env:DNS_SHIELD_PSL_BENCHMARK_ARTIFACT
 $PreviousReport = $env:DNS_SHIELD_PSL_BENCHMARK_REPORT
 try {
@@ -57,7 +58,9 @@ try {
     $env:DNS_SHIELD_PSL_BENCHMARK_REPORT = $BenchmarkReportPath
 
     Write-Host "==> Run opt-in JVM Public Suffix benchmark"
-    & .\gradlew.bat --no-daemon --console=plain `
+    # The benchmark inputs are environment variables, which Gradle does not track as task inputs.
+    # Force the test task to run so a cached result cannot suppress report generation.
+    & .\gradlew.bat --no-daemon --rerun-tasks --console=plain `
         :app:testDebugUnitTest `
         --tests "io.github.xiangwang2000.dnsshield.blocking.ProductionPublicSuffixBenchmarkTest"
     if ($LASTEXITCODE -ne 0) {
@@ -70,6 +73,10 @@ try {
 
 if (-not (Test-Path -LiteralPath $BenchmarkReportPath -PathType Leaf)) {
     throw "Public Suffix benchmark did not produce a report: $BenchmarkReportPath"
+}
+$BenchmarkReportInfo = Get-Item -LiteralPath $BenchmarkReportPath
+if ($BenchmarkReportInfo.LastWriteTimeUtc -lt $BenchmarkStartedUtc) {
+    throw "Public Suffix benchmark did not update its report: $BenchmarkReportPath"
 }
 
 Write-Host "Validation report: $ValidationReportPath"
