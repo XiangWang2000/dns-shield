@@ -13,8 +13,7 @@
 *.xml text eol=crlf
 LICENSE text eol=crlf
 
-# Byte-sensitive PSL source fixtures must be identical on every platform.
-*.dat text eol=lf
+tools/tests/fixtures/public_suffix_list.dat text eol=lf
 
 gradlew text eol=lf
 
