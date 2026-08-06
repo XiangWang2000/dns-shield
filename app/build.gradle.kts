@@ -49,6 +49,7 @@ android {
     targetSdk = 37
     versionCode = 2
     versionName = "1.1.0"
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
   signingConfigs {
@@ -130,6 +131,9 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.okhttp)
   testImplementation(libs.kotlin.test)
+  androidTestImplementation(libs.androidx.test.core)
+  androidTestImplementation(libs.androidx.test.runner)
+  androidTestImplementation(libs.androidx.test.ext.junit)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
 }
