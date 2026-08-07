@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 0.5 seconds
-Output:
 [CmdletBinding()]
 param(
     [string]$Normalized = "build/public-suffix.normalized.dat",
