@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 0.5 seconds
+Output:
 [CmdletBinding()]
 param(
     [string]$Normalized = "build/public-suffix.normalized.dat",
@@ -14,6 +17,7 @@ $AssetName = "public_suffix.bin"
 $GeneratedAssetDirectory = Join-Path $Root "app/build/generated/publicSuffixAndroidTestAssets"
 $DeviceReport = "/sdcard/Android/data/io.github.xiangwang2000.dnsshield/files/public-suffix.android-benchmark.json"
 $BenchmarkClass = "io.github.xiangwang2000.dnsshield.blocking.ProductionPublicSuffixInstrumentedBenchmarkTest"
+$TestRunner = "io.github.xiangwang2000.dnsshield.test/androidx.test.runner.AndroidJUnitRunner"
 
 if ((-not $env:JAVA_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME "bin\java.exe"))) -and
     (Test-Path -LiteralPath (Join-Path $AndroidStudioJbr "bin\java.exe"))) {
@@ -98,13 +102,20 @@ Write-Host "Device: $Model; Android: $AndroidRelease / API $ApiLevel; ABI: $Abi;
 $PreviousAndroidSerial = $env:ANDROID_SERIAL
 try {
     $env:ANDROID_SERIAL = $SelectedSerial
-    Write-Host "==> Run Android Public Suffix benchmark"
-    & .\gradlew.bat --no-daemon --rerun-tasks --console=plain `
-        :app:connectedDebugAndroidTest `
-        "-Pandroid.testInstrumentationRunnerArguments.class=$BenchmarkClass"
+    Write-Host "==> Build and install Android benchmark APKs"
+    & .\gradlew.bat --no-daemon --no-configuration-cache --rerun-tasks --console=plain `
+        :app:installDebug `
+        :app:installDebugAndroidTest
     if ($LASTEXITCODE -ne 0) {
-        throw "Android Public Suffix benchmark failed with exit code $LASTEXITCODE."
+        throw "Android benchmark APK installation failed with exit code $LASTEXITCODE."
     }
+
+    Write-Host "==> Run Android Public Suffix benchmark via adb"
+    Invoke-Adb @(
+        "shell", "am", "instrument", "-w", "-r",
+        "-e", "class", $BenchmarkClass,
+        $TestRunner
+    )
 } finally {
     $env:ANDROID_SERIAL = $PreviousAndroidSerial
 }
@@ -120,3 +131,4 @@ if (-not (Test-Path -LiteralPath $BenchmarkReportPath -PathType Leaf)) {
 
 Write-Host "Validation report: $ValidationReportPath"
 Write-Host "Android benchmark report: $BenchmarkReportPath"
+
