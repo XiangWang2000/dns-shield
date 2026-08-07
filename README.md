@@ -94,7 +94,15 @@ python tools/build_public_suffix.py `
 powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix.ps1
 ```
 
-腳本會先確認來源 revision、IDNA 版本、SHA-256、檔案大小、規則數與 deterministic regeneration，再輸出 `build/public-suffix.validation.json` 與 `build/public-suffix.benchmark.json`。benchmark 記錄載入時間、估算常駐 heap 與 lookup latency，但不設定跨裝置的效能通過門檻，也不會由日常 `verify.ps1` 自動執行。完整 PSL 仍未打包進 APK或接入 VPN。
+腳本會先確認來源 revision、IDNA 版本、SHA-256、檔案大小、規則數與 deterministic regeneration，再輸出 `build/public-suffix.validation.json` 與 `build/public-suffix.benchmark.json`。benchmark 記錄載入時間、估算常駐 heap 與 lookup latency，但不設定跨裝置的效能通過門檻，也不會由日常 `verify.ps1` 自動執行。
+
+連接 adb 實機後，可使用同一份已驗證 artifact 執行測試 APK 專用的 instrumented characterization：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix-android.ps1
+```
+
+腳本只把 artifact 複製到 `app/build/generated` 的 androidTest asset，不會打包進正式 APK；結果會拉回 `build/public-suffix.android-benchmark.json`。測試流程、指標解讀與先前 ASUS_Z01RD 粗略 baseline 請參閱 [docs/public-suffix-android-benchmark.md](docs/public-suffix-android-benchmark.md)。完整 PSL 仍未接入 VPN。
 
 ## 正式發行
 
