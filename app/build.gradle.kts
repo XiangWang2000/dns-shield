@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 0.5 seconds
+Output:
 import java.util.Base64
 import java.util.Properties
 
@@ -107,7 +110,7 @@ android {
   }
   sourceSets {
     getByName("androidTest") {
-      assets.srcDir(layout.buildDirectory.dir("generated/publicSuffixAndroidTestAssets"))
+      assets.directories.add(layout.buildDirectory.dir("generated/publicSuffixAndroidTestAssets").get().asFile.absolutePath)
     }
   }
   packaging {
@@ -141,3 +144,4 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
 }
+
