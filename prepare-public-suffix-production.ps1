@@ -31,13 +31,15 @@ $productionManifestPath = Join-Path $repoRoot "tools/public_suffix_production.js
 $prepareScript = Join-Path $repoRoot "tools/prepare_public_suffix_source.py"
 $buildScript = Join-Path $repoRoot "tools/build_public_suffix.py"
 $verifyScript = Join-Path $repoRoot "tools/verify_public_suffix_production.py"
+$downloadScript = Join-Path $repoRoot "tools/download_public_suffix_source.py"
 
 foreach ($requiredPath in @(
     $sourceManifestPath,
     $productionManifestPath,
     $prepareScript,
     $buildScript,
-    $verifyScript
+    $verifyScript,
+    $downloadScript
 )) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Required Public Suffix file not found: $requiredPath"
@@ -62,12 +64,11 @@ New-Item -ItemType Directory -Force -Path $stageDirectory | Out-Null
 try {
     if ([string]::IsNullOrWhiteSpace($Source)) {
         $sourcePath = Join-Path $stageDirectory "public_suffix_list.dat"
-        $sourceUrl = "https://raw.githubusercontent.com/$($sourceManifest.source_name)/$($sourceManifest.source_revision)/public_suffix_list.dat"
-        Write-Host "Downloading pinned Public Suffix source revision $($sourceManifest.source_revision)..."
-        Invoke-WebRequest `
-            -Uri $sourceUrl `
-            -Headers @{ "User-Agent" = "dns-shield-public-suffix-rebuilder/1" } `
-            -OutFile $sourcePath
+        Invoke-PythonStep "Downloading pinned Public Suffix source revision $($sourceManifest.source_revision)..." @(
+            $downloadScript,
+            "--manifest", $sourceManifestPath,
+            "--output", $sourcePath
+        )
     } else {
         $sourcePath = Resolve-RepoPath $Source
         if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
