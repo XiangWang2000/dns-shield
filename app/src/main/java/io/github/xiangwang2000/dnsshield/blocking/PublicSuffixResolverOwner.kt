@@ -51,7 +51,8 @@ class PublicSuffixResolverOwner internal constructor(
                     } catch (exception: Exception) {
                         State.Rejected(
                             exception.message?.takeIf(String::isNotBlank)
-                                ?: exception.javaClass.simpleName
+                                ?: exception.javaClass.simpleName.takeIf(String::isNotBlank)
+                                ?: "Unknown Public Suffix load failure"
                         )
                     }
                     (state as? State.Loaded)?.resolver
