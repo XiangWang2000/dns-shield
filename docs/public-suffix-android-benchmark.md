@@ -61,6 +61,20 @@ lookup median 11.23 us, p95 14.00 us
 approximate heap 690,000 bytes
 ```
 
+The first committed post-merge run on the same ASUS_Z01RD established the baseline for storage-layout changes:
+
+```text
+Android 10 / API 29 / arm64-v8a
+artifact 153,740 bytes; rules 9,950 / 281 / 8
+first load 273.81 ms
+warm load median 163.59 ms, p95 169.59 ms
+cached load 1.666 us
+approximate retained heap 4,221,200 bytes
+lookup median 8.733 us, p95 11.282 us
+```
+
+The large difference between the old ad hoc heap estimate and the committed benchmark means the absolute heap number should still be treated as approximate. However, use the committed 4,221,200-byte result as the A/B baseline when evaluating resolver storage changes because it was produced by the repository-owned runner.
+
 Run the committed benchmark multiple times before using that comparison. Give the first-load value from each independent instrumentation run its own sample set; do not calculate a first-load p95 from warm samples in one process. The current loader is suitable for later packaging only when it remains a once-per-service-lifecycle cost and does not cause repeated parsing during DNS queries, network changes, Activity recreation, or duplicate service starts.
 
 ## Current boundary
