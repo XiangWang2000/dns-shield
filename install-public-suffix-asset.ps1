@@ -1,0 +1,71 @@
+param(
+    [string]$Python = "python",
+    [string]$Normalized = "build/public-suffix.normalized.dat",
+    [string]$Artifact = "build/public-suffix.bin",
+    [string]$Destination = "app/src/main/assets/public_suffix.bin"
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+function Resolve-RepoPath([string]$Path) {
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
+}
+
+$manifest = Join-Path $repoRoot "tools/public_suffix_production.json"
+$sourceManifest = Join-Path $repoRoot "tools/public_suffix_source.json"
+$fullVerifier = Join-Path $repoRoot "tools/verify_public_suffix_production.py"
+$assetVerifier = Join-Path $repoRoot "tools/verify_public_suffix_asset.py"
+$normalizedPath = Resolve-RepoPath $Normalized
+$artifactPath = Resolve-RepoPath $Artifact
+$destinationPath = Resolve-RepoPath $Destination
+
+foreach ($requiredPath in @(
+    $manifest,
+    $sourceManifest,
+    $fullVerifier,
+    $assetVerifier,
+    $normalizedPath,
+    $artifactPath
+)) {
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        throw "Required Public Suffix file not found: $requiredPath"
+    }
+}
+
+Write-Host "Verifying deterministic production Public Suffix outputs..."
+& $Python $fullVerifier `
+    --manifest $manifest `
+    --source-manifest $sourceManifest `
+    --normalized $normalizedPath `
+    --artifact $artifactPath
+if ($LASTEXITCODE -ne 0) {
+    throw "Production Public Suffix verification failed with exit code $LASTEXITCODE"
+}
+
+$destinationDirectory = Split-Path -Parent $destinationPath
+New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
+$temporaryPath = "$destinationPath.tmp.$PID"
+
+try {
+    Copy-Item -LiteralPath $artifactPath -Destination $temporaryPath -Force
+
+    Write-Host "Verifying staged APK asset..."
+    & $Python $assetVerifier --manifest $manifest --asset $temporaryPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Staged Public Suffix asset verification failed with exit code $LASTEXITCODE"
+    }
+
+    Move-Item -LiteralPath $temporaryPath -Destination $destinationPath -Force
+} finally {
+    if (Test-Path -LiteralPath $temporaryPath) {
+        Remove-Item -LiteralPath $temporaryPath -Force
+    }
+}
+
+Write-Host "Installed verified Public Suffix asset: $destinationPath"
