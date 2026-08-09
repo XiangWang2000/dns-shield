@@ -1,0 +1,59 @@
+name: Patch PSL runtime policy wiring
+
+on:
+  push:
+    branches:
+      - agent/wire-psl-parent-domain-policy
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'Wire packaged PSL into runtime policy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/wire-psl-parent-domain-policy
+
+      - name: Patch service lifecycle wiring
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('app/src/main/java/io/github/xiangwang2000/dnsshield/service/DnsVpnService.kt')
+          text = path.read_text(encoding='utf-8')
+
+          old_import = 'import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy\nimport io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy\n'
+          new_import = 'import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverOwner\nimport io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy\nimport io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy\n'
+          if old_import not in text and new_import not in text:
+              raise SystemExit('Expected blocking import anchor not found')
+          text = text.replace(old_import, new_import, 1)
+
+          old_owner_anchor = '    // Robust local concurrency throttle to reduce background burst pressure on CPU and radio.\n    private val querySemaphore = Semaphore(MAX_CONCURRENT_DNS_QUERIES)\n\n    @Volatile private var isVpnRunning = false\n'
+          new_owner_anchor = '    // Robust local concurrency throttle to reduce background burst pressure on CPU and radio.\n    private val querySemaphore = Semaphore(MAX_CONCURRENT_DNS_QUERIES)\n\n    // One verified Public Suffix resolver owner per service lifecycle. The lazy is only touched when\n    // a validated compiled blocklist actually needs parent-domain matching.\n    private val publicSuffixResolverOwner by lazy {\n        PublicSuffixResolverOwner.fromAssets(assets)\n    }\n\n    @Volatile private var isVpnRunning = false\n'
+          if old_owner_anchor not in text and new_owner_anchor not in text:
+              raise SystemExit('Expected service-owner anchor not found')
+          text = text.replace(old_owner_anchor, new_owner_anchor, 1)
+
+          old_reload = '            val assembly = RuntimeDomainPolicy.assemble(filesDir)\n'
+          new_reload = '            val assembly = RuntimeDomainPolicy.assemble(\n                filesDirectory = filesDir,\n                registrableDomainResolverProvider = publicSuffixResolverOwner::resolverOrNull\n            )\n'
+          if old_reload not in text and new_reload not in text:
+              raise SystemExit('Expected runtime-policy reload anchor not found')
+          text = text.replace(old_reload, new_reload, 1)
+
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+      - name: Commit service wiring
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "Service wiring already applied."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/io/github/xiangwang2000/dnsshield/service/DnsVpnService.kt
+          git commit -m "Wire packaged PSL into runtime policy"
+          git push origin HEAD:agent/wire-psl-parent-domain-policy
