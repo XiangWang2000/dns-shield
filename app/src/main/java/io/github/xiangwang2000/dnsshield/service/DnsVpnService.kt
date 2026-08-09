@@ -529,7 +529,9 @@ class DnsVpnService : VpnService() {
         val status = try {
             val assembly = RuntimeDomainPolicy.assemble(
                 filesDirectory = filesDir,
-                registrableDomainResolverProvider = publicSuffixResolverOwner::resolverOrNull
+                registrableDomainResolverProvider = {
+                    publicSuffixResolverOwner.resolverOrNull()
+                }
             )
             domainPolicy.install(assembly) {
                 invalidatePolicyState()
