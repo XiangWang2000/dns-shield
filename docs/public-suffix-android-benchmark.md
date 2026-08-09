@@ -75,10 +75,32 @@ lookup median 8.733 us, p95 11.282 us
 
 The large difference between the old ad hoc heap estimate and the committed benchmark means the absolute heap number should still be treated as approximate. However, use the committed 4,221,200-byte result as the A/B baseline when evaluating resolver storage changes because it was produced by the repository-owned runner.
 
-Run the committed benchmark multiple times before using that comparison. Give the first-load value from each independent instrumentation run its own sample set; do not calculate a first-load p95 from warm samples in one process. The current loader is suitable for later packaging only when it remains a once-per-service-lifecycle cost and does not cause repeated parsing during DNS queries, network changes, Activity recreation, or duplicate service starts.
+## Post-PR20 sorted-array baseline
+
+After PR #20 replaced the three `LinkedHashSet<String>` rule tables with sorted `Array<String>` tables and binary search, the same ASUS_Z01RD produced two post-merge runs with the validated 153,740-byte production artifact (`9950 / 281 / 8` rules):
+
+```text
+Run 1
+first load 261.69 ms
+warm load median 158.80 ms, p95 171.81 ms
+cached load 1.615 us
+approximate retained heap 1,311,520 bytes
+lookup median 10.065 us, p95 13.287 us
+
+Run 2
+first load 259.66 ms
+warm load median 159.95 ms, p95 175.05 ms
+cached load 1.875 us
+approximate retained heap 0 bytes
+lookup median 10.327 us, p95 15.244 us
+```
+
+Run 1 shows a large retained-heap reduction relative to the 4,221,200-byte A/B baseline while lookup remains comfortably below the 50 us review budget. Run 2's zero-byte heap delta must not be interpreted as zero resolver memory; it demonstrates that the GC-assisted before/after metric is noisy enough that relative trends across repeated same-device runs are more trustworthy than one absolute value. First/warm load time changed much less than retained memory, so further representation work is not justified solely to chase load latency on this older device.
+
+Run the committed benchmark multiple times before using these comparisons. Give the first-load value from each independent instrumentation run its own sample set; do not calculate a first-load p95 from warm samples in one process. The resolver is suitable for later packaging only when loading remains a once-per-service-lifecycle cost and does not cause repeated parsing during DNS queries, network changes, Activity recreation, or duplicate service starts.
 
 ## Current boundary
 
 `PublicSuffixAssetLoader` validates the artifact size, artifact SHA-256, embedded normalized-source SHA-256, and all three rule counts before exposing a resolver. It also caches one successfully loaded resolver per loader instance. The production artifact itself is still not checked into `app/src/main/assets`, and the loader is not used by runtime policy.
 
-A later PR may package the reviewed artifact as a main APK asset after repeated device measurements are reviewed. Runtime parent-domain blocking remains a separate change after asset loading and lifecycle ownership are independently verified.
+A lifecycle-scoped runtime owner may be added before production packaging so successful and rejected loads both become one-shot decisions for that service or policy lifecycle. Runtime parent-domain blocking remains a separate change after asset packaging and lifecycle ownership are independently verified.
