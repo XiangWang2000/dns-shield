@@ -15,9 +15,9 @@ import kotlin.math.max
  * are reviewed separately.
  */
 class CompiledPublicSuffixList private constructor(
-    private val exactRules: Set<String>,
-    private val wildcardSuffixes: Set<String>,
-    private val exceptionRules: Set<String>,
+    private val exactRules: Array<String>,
+    private val wildcardSuffixes: Array<String>,
+    private val exceptionRules: Array<String>,
     sourceSha256: ByteArray
 ) : RegistrableDomainResolver {
     val exactRuleCount: Int = exactRules.size
@@ -39,13 +39,13 @@ class CompiledPublicSuffixList private constructor(
             val suffix = labels.subList(index, labels.size).joinToString(".")
             val suffixLabelCount = labels.size - index
 
-            if (suffix in exceptionRules) {
+            if (exceptionRules.containsSorted(suffix)) {
                 exceptionRuleLabels = max(exceptionRuleLabels, suffixLabelCount)
             }
-            if (suffix in exactRules) {
+            if (exactRules.containsSorted(suffix)) {
                 prevailingRuleLabels = max(prevailingRuleLabels, suffixLabelCount)
             }
-            if (index > 0 && suffix in wildcardSuffixes) {
+            if (index > 0 && wildcardSuffixes.containsSorted(suffix)) {
                 prevailingRuleLabels = max(prevailingRuleLabels, suffixLabelCount + 1)
             }
         }
@@ -127,14 +127,13 @@ class CompiledPublicSuffixList private constructor(
             data: ByteBuffer,
             count: Int,
             category: String
-        ): Set<String> {
+        ): Array<String> {
             require(count <= data.remaining() / MIN_ENCODED_RULE_SIZE) {
                 "Public Suffix $category rule count exceeds remaining artifact bytes"
             }
 
-            val rules = LinkedHashSet<String>(count)
             var previousBytes: ByteArray? = null
-            repeat(count) {
+            return Array(count) {
                 require(data.remaining() >= Short.SIZE_BYTES) {
                     "Public Suffix $category rule length is truncated"
                 }
@@ -157,11 +156,8 @@ class CompiledPublicSuffixList private constructor(
                 require(rule == rule.lowercase().trim() && isUsableDomain(rule)) {
                     "Malformed Public Suffix $category rule: $rule"
                 }
-                require(rules.add(rule)) {
-                    "Duplicate Public Suffix $category rule: $rule"
-                }
+                rule
             }
-            return rules
         }
 
         private fun decodeUtf8(bytes: ByteArray): String =
@@ -195,6 +191,9 @@ class CompiledPublicSuffixList private constructor(
                 }
     }
 }
+
+private fun Array<String>.containsSorted(value: String): Boolean =
+    binarySearch(value) >= 0
 
 private fun ByteArray.toHexString(): String {
     val digits = "0123456789abcdef"
