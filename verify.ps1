@@ -40,6 +40,18 @@ if ($LASTEXITCODE -ne 0) {
     throw "Python verification failed with exit code $LASTEXITCODE."
 }
 
+Write-Host "==> Packaged production Public Suffix asset"
+$ProductionPublicSuffixAsset = Join-Path $Root "app\src\main\assets\public_suffix.bin"
+if (-not (Test-Path -LiteralPath $ProductionPublicSuffixAsset -PathType Leaf)) {
+    throw "Packaged production Public Suffix asset is missing: $ProductionPublicSuffixAsset"
+}
+& python .\tools\verify_public_suffix_asset.py `
+    --manifest .\tools\public_suffix_production.json `
+    --asset $ProductionPublicSuffixAsset
+if ($LASTEXITCODE -ne 0) {
+    throw "Packaged production Public Suffix asset verification failed with exit code $LASTEXITCODE."
+}
+
 Write-Host "==> Gradle build and tests"
 & .\gradlew.bat --no-daemon --console=plain `
     :app:assembleDebug `
