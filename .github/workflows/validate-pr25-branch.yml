@@ -1,21 +1,16 @@
 name: Validate PR25 branch
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/add-runtime-policy-android-benchmark
-
-permissions:
-  contents: write
+      - main
 
 jobs:
   validate:
-    if: github.event.head_commit.message != 'Record PR25 branch validation'
+    if: github.head_ref == 'agent/add-runtime-policy-android-benchmark'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: agent/add-runtime-policy-android-benchmark
 
       - uses: actions/setup-java@v4
         with:
@@ -58,17 +53,3 @@ jobs:
             :app:assembleDebugAndroidTest \
             :app:testDebugUnitTest \
             :app:compileDebugKotlin
-
-      - name: Record successful validation
-        shell: bash
-        run: |
-          printf '%s\n' \
-            'powershell_syntax=success' \
-            'python_tests=success' \
-            'asset_contract=success' \
-            'gradle=success' > .github/pr25-validation-passed
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/pr25-validation-passed
-          git commit -m "Record PR25 branch validation"
-          git push origin HEAD:agent/add-runtime-policy-android-benchmark
