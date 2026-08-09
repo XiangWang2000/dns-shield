@@ -53,7 +53,9 @@ object DomainPolicyAssembler {
         }
 
         val compiledBlocklist = try {
-            loadCompiledBlocklist(compiledBlocklistFile).also(CompiledBlocklist::validateSorted)
+            val loaded = loadCompiledBlocklist(compiledBlocklistFile)
+            loaded.validateSorted()
+            loaded
         } catch (exception: Exception) {
             return DomainPolicyAssembly(
                 matcher = CompositeDomainMatcher(allowlist, blockers),
