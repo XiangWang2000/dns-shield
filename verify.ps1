@@ -16,6 +16,24 @@ if (-not $env:JAVA_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:JAVA_HO
 
 Set-Location $Root
 
+Write-Host "==> PowerShell packaging script syntax"
+foreach ($scriptName in @(
+    "prepare-public-suffix-production.ps1",
+    "install-public-suffix-asset.ps1"
+)) {
+    $tokens = $null
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Root $scriptName),
+        [ref]$tokens,
+        [ref]$parseErrors
+    ) | Out-Null
+    if ($parseErrors.Count -ne 0) {
+        $messages = ($parseErrors | ForEach-Object { $_.Message }) -join "; "
+        throw "PowerShell syntax verification failed for $scriptName`: $messages"
+    }
+}
+
 Write-Host "==> Python blocklist compiler tests"
 & python -m unittest discover tools/tests
 if ($LASTEXITCODE -ne 0) {
