@@ -17,6 +17,7 @@ import io.github.xiangwang2000.dnsshield.blocking.CompiledBlocklistStatus
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
+import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverOwner
 import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
 import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
@@ -498,6 +499,12 @@ class DnsVpnService : VpnService() {
     // Robust local concurrency throttle to reduce background burst pressure on CPU and radio.
     private val querySemaphore = Semaphore(MAX_CONCURRENT_DNS_QUERIES)
 
+    // One verified Public Suffix resolver owner per service lifecycle. The lazy is only touched when
+    // a validated compiled blocklist actually needs parent-domain matching.
+    private val publicSuffixResolverOwner by lazy {
+        PublicSuffixResolverOwner.fromAssets(assets)
+    }
+
     @Volatile private var isVpnRunning = false
 
     private var upstreamDnsPrimary: String = "8.8.8.8"
@@ -520,7 +527,10 @@ class DnsVpnService : VpnService() {
 
     private fun reloadDomainPolicy() {
         val status = try {
-            val assembly = RuntimeDomainPolicy.assemble(filesDir)
+            val assembly = RuntimeDomainPolicy.assemble(
+                filesDirectory = filesDir,
+                registrableDomainResolverProvider = publicSuffixResolverOwner::resolverOrNull
+            )
             domainPolicy.install(assembly) {
                 invalidatePolicyState()
             }
