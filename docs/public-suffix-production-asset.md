@@ -1,6 +1,6 @@
 # Production Public Suffix asset packaging
 
-The production Public Suffix resolver is still not connected to DNS blocking policy. This document describes the guarded step used to move the already reviewed compact artifact from `build/` into the Android main asset source set without changing resolver behavior.
+The production Public Suffix resolver is still not connected to DNS blocking policy. This document describes the guarded step used to reconstruct the reviewed compact artifact and move it into the Android main asset source set without changing resolver behavior.
 
 ## Pinned production identity
 
@@ -15,22 +15,52 @@ rules: 9,950 exact / 281 wildcard / 8 exception
 source revision: e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20
 ```
 
-Do not copy a similarly named binary into `app/src/main/assets` by hand. Hashes or benchmark JSON are evidence of identity, not substitutes for the reviewed binary bytes.
+Do not copy a similarly named binary into `app/src/main/assets` by hand. Hashes or benchmark JSON are evidence of identity, not substitutes for verified bytes.
 
-## Install a verified candidate
+## Fresh-clone rebuild
 
-Generate or restore the pinned outputs first so these files exist:
+The production outputs under `build/` are intentionally reproducible and do not need to be preserved between machines or clean builds.
+
+Install the pinned IDNA dependency when needed:
+
+```powershell
+python -m pip install --require-hashes -r .\tools\requirements-public-suffix.txt
+```
+
+To rebuild the reviewed outputs without installing an APK asset, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\prepare-public-suffix-production.ps1
+```
+
+When no `-Source` is supplied, the script obtains `public_suffix_list.dat` from the exact `publicsuffix/list` commit recorded in `tools/public_suffix_source.json`, not from the moving repository head. The existing source preparer then verifies the pinned Git blob before normalization, and the final production verifier requires the normalized bytes and generated artifact to match the reviewed production manifest exactly.
+
+For an offline or pre-fetched source candidate, pass it explicitly:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\prepare-public-suffix-production.ps1 `
+  -Source .\path\to\public_suffix_list.dat
+```
+
+A wrong revision or modified source fails the existing Git-blob/source checks and cannot produce accepted production outputs.
+
+Successful reconstruction creates:
 
 ```text
 build/public-suffix.normalized.dat
 build/public-suffix.bin
+build/public-suffix.source-preparation.json
 ```
 
-Then run:
+## Install a verified candidate
+
+Run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install-public-suffix-asset.ps1
 ```
+
+If `build/public-suffix.normalized.dat` or `build/public-suffix.bin` is missing, the installer automatically invokes `prepare-public-suffix-production.ps1` first. This makes a fresh clone work without restoring earlier benchmark artifacts. `-Source` can also be passed through the installer when an offline pinned source file should be used.
 
 The installer performs two gates before creating the destination:
 
@@ -45,7 +75,7 @@ app/src/main/assets/public_suffix.bin
 
 The command is safe to rerun. If the destination already exists and matches the production contract, the installer exits successfully without rewriting it. If an existing destination does not match the contract, the installer refuses to overwrite it so an unknown binary cannot be silently replaced.
 
-Custom input/output paths are available through `-Normalized`, `-Artifact`, and `-Destination`, but the default path is the one expected by `PublicSuffixAssetLoader.ASSET_NAME`.
+Custom paths are available through `-Source`, `-Normalized`, `-Artifact`, and `-Destination`, but the default destination is the one expected by `PublicSuffixAssetLoader.ASSET_NAME`.
 
 ## Why installation is separate from runtime wiring
 
