@@ -86,13 +86,59 @@ def _require_equal(actual: object, expected: object, description: str) -> None:
         )
 
 
+def verify_artifact_contract(
+    production_manifest_path: Path,
+    artifact_path: Path,
+) -> tuple[ProductionManifest, bytes]:
+    """Verify one artifact without requiring the normalized source beside it."""
+    expected = load_production_manifest(production_manifest_path)
+    artifact = artifact_path.read_bytes()
+    artifact_sha256 = hashlib.sha256(artifact).hexdigest()
+
+    _require_equal(len(artifact), expected.artifact_size, "Artifact size")
+    _require_equal(artifact_sha256, expected.artifact_sha256, "Artifact SHA-256")
+
+    header_size = struct.calcsize(HEADER_FORMAT)
+    if len(artifact) < header_size:
+        raise ValueError(
+            f"Artifact is smaller than its {header_size}-byte production header"
+        )
+
+    (
+        magic,
+        version,
+        flags,
+        exact_count,
+        wildcard_count,
+        exception_count,
+        embedded_source_sha256,
+    ) = struct.unpack_from(HEADER_FORMAT, artifact)
+    _require_equal(magic, MAGIC, "Artifact magic")
+    _require_equal(version, FORMAT_VERSION, "Artifact format version")
+    _require_equal(flags, FLAG_INCLUDES_PRIVATE, "Artifact flags")
+    _require_equal(
+        embedded_source_sha256.hex(),
+        expected.normalized_sha256,
+        "Embedded source SHA-256",
+    )
+    _require_equal(
+        (exact_count, wildcard_count, exception_count),
+        (expected.exact_rules, expected.wildcard_rules, expected.exception_rules),
+        "Artifact header rule counts",
+    )
+    return expected, artifact
+
+
 def verify_production_outputs(
     production_manifest_path: Path,
     source_manifest_path: Path,
     normalized_path: Path,
     artifact_path: Path,
 ) -> VerificationReport:
-    expected = load_production_manifest(production_manifest_path)
+    expected, artifact = verify_artifact_contract(
+        production_manifest_path,
+        artifact_path,
+    )
     source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
 
     _require_equal(
@@ -112,9 +158,7 @@ def verify_production_outputs(
     )
 
     normalized = normalized_path.read_bytes()
-    artifact = artifact_path.read_bytes()
     normalized_sha256 = hashlib.sha256(normalized).hexdigest()
-    artifact_sha256 = hashlib.sha256(artifact).hexdigest()
 
     _require_equal(len(normalized), expected.normalized_size, "Normalized source size")
     _require_equal(
@@ -122,8 +166,6 @@ def verify_production_outputs(
         expected.normalized_sha256,
         "Normalized source SHA-256",
     )
-    _require_equal(len(artifact), expected.artifact_size, "Artifact size")
-    _require_equal(artifact_sha256, expected.artifact_sha256, "Artifact SHA-256")
 
     regenerated_artifact, rules = build_artifact(normalized)
     if regenerated_artifact != artifact:
@@ -131,43 +173,23 @@ def verify_production_outputs(
             "Production Public Suffix artifact does not exactly match deterministic regeneration"
         )
 
-    (
-        magic,
-        version,
-        flags,
-        exact_count,
-        wildcard_count,
-        exception_count,
-        embedded_source_sha256,
-    ) = struct.unpack_from(HEADER_FORMAT, artifact)
-    _require_equal(magic, MAGIC, "Artifact magic")
-    _require_equal(version, FORMAT_VERSION, "Artifact format version")
-    _require_equal(flags, FLAG_INCLUDES_PRIVATE, "Artifact flags")
-    _require_equal(
-        embedded_source_sha256.hex(),
-        normalized_sha256,
-        "Embedded source SHA-256",
-    )
-
     actual_counts = (
         len(rules.exact),
         len(rules.wildcard_suffixes),
         len(rules.exceptions),
     )
-    header_counts = (exact_count, wildcard_count, exception_count)
     expected_counts = (
         expected.exact_rules,
         expected.wildcard_rules,
         expected.exception_rules,
     )
-    _require_equal(header_counts, actual_counts, "Artifact header rule counts")
     _require_equal(actual_counts, expected_counts, "Production rule counts")
 
     return VerificationReport(
         source_revision=expected.source_revision,
         normalized_sha256=normalized_sha256,
         normalized_size=len(normalized),
-        artifact_sha256=artifact_sha256,
+        artifact_sha256=hashlib.sha256(artifact).hexdigest(),
         artifact_size=len(artifact),
         exact_rules=actual_counts[0],
         wildcard_rules=actual_counts[1],
