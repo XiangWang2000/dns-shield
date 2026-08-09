@@ -48,6 +48,16 @@ if ($LASTEXITCODE -ne 0) {
     throw "Production Public Suffix verification failed with exit code $LASTEXITCODE"
 }
 
+if (Test-Path -LiteralPath $destinationPath) {
+    Write-Host "Destination already exists; verifying it before doing anything..."
+    & $Python $assetVerifier --manifest $manifest --asset $destinationPath
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Verified Public Suffix asset is already installed: $destinationPath"
+        exit 0
+    }
+    throw "Destination contains an unverified Public Suffix asset; refusing to overwrite it: $destinationPath"
+}
+
 $destinationDirectory = Split-Path -Parent $destinationPath
 New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
 $temporaryPath = "$destinationPath.tmp.$PID"
@@ -61,7 +71,7 @@ try {
         throw "Staged Public Suffix asset verification failed with exit code $LASTEXITCODE"
     }
 
-    Move-Item -LiteralPath $temporaryPath -Destination $destinationPath -Force
+    Move-Item -LiteralPath $temporaryPath -Destination $destinationPath
 } finally {
     if (Test-Path -LiteralPath $temporaryPath) {
         Remove-Item -LiteralPath $temporaryPath -Force
