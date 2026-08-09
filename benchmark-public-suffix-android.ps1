@@ -37,7 +37,7 @@ function Get-FullPath([string]$Value) {
 function Invoke-Adb([string[]]$Arguments) {
     & adb -s $script:SelectedSerial @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "adb failed with exit code $LASTEXITCODE: $($Arguments -join ' ')"
+        throw "adb failed with exit code ${LASTEXITCODE}: $($Arguments -join ' ')"
     }
 }
 
