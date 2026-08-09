@@ -91,6 +91,17 @@ class PublicSuffixResolverOwnerTest {
         assertEquals("IllegalStateException", status.reason)
     }
 
+    @Test
+    fun failedLoadUsesStableFallbackForAnonymousException() {
+        val owner = PublicSuffixResolverOwner {
+            throw object : Exception() {}
+        }
+
+        assertNull(owner.resolverOrNull())
+        val status = assertIs<PublicSuffixResolverStatus.Rejected>(owner.status())
+        assertEquals("Unknown Public Suffix load failure", status.reason)
+    }
+
     private fun fixtureResolver(): CompiledPublicSuffixList =
         CompiledPublicSuffixList.fromByteBuffer(ByteBuffer.wrap(fixtureArtifact))
 
