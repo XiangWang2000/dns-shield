@@ -32,7 +32,7 @@ Then run:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install-public-suffix-asset.ps1
 ```
 
-The installer performs two gates before replacing the destination:
+The installer performs two gates before creating the destination:
 
 1. `verify_public_suffix_production.py` validates the pinned source identity, normalized bytes, artifact size/SHA, deterministic regeneration, artifact header and production rule counts.
 2. The candidate copy is staged beside the final destination and `verify_public_suffix_asset.py` independently verifies the exact artifact contract that an APK-packaged asset must satisfy: size, SHA-256, format header, embedded normalized-source SHA-256 and rule counts.
@@ -42,6 +42,8 @@ Only a candidate that passes both gates is moved to:
 ```text
 app/src/main/assets/public_suffix.bin
 ```
+
+The command is safe to rerun. If the destination already exists and matches the production contract, the installer exits successfully without rewriting it. If an existing destination does not match the contract, the installer refuses to overwrite it so an unknown binary cannot be silently replaced.
 
 Custom input/output paths are available through `-Normalized`, `-Artifact`, and `-Destination`, but the default path is the one expected by `PublicSuffixAssetLoader.ASSET_NAME`.
 
