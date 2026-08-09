@@ -1,0 +1,56 @@
+name: Validate PR24 branch
+
+on:
+  push:
+    branches:
+      - agent/wire-psl-parent-domain-policy
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.event.head_commit.message != 'Record PR24 branch validation'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/wire-psl-parent-domain-policy
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Python verification
+        run: python -m unittest discover tools/tests
+
+      - name: Verify packaged production PSL asset
+        run: >-
+          python tools/verify_public_suffix_asset.py
+          --manifest tools/public_suffix_production.json
+          --asset app/src/main/assets/public_suffix.bin
+
+      - name: Gradle build and tests
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --console=plain \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest \
+            :app:testDebugUnitTest \
+            :app:compileDebugKotlin
+
+      - name: Record successful validation
+        shell: bash
+        run: |
+          printf '%s\n' 'PR24 branch validation passed.' > .github/pr24-validation-passed
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/pr24-validation-passed
+          git commit -m "Record PR24 branch validation"
+          git push origin HEAD:agent/wire-psl-parent-domain-policy
