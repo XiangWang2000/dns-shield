@@ -1,5 +1,6 @@
 param(
     [string]$Python = "python",
+    [string]$Source = "",
     [string]$Normalized = "build/public-suffix.normalized.dat",
     [string]$Artifact = "build/public-suffix.bin",
     [string]$Destination = "app/src/main/assets/public_suffix.bin"
@@ -21,6 +22,7 @@ $manifest = Join-Path $repoRoot "tools/public_suffix_production.json"
 $sourceManifest = Join-Path $repoRoot "tools/public_suffix_source.json"
 $fullVerifier = Join-Path $repoRoot "tools/verify_public_suffix_production.py"
 $assetVerifier = Join-Path $repoRoot "tools/verify_public_suffix_asset.py"
+$prepareProduction = Join-Path $repoRoot "prepare-public-suffix-production.ps1"
 $normalizedPath = Resolve-RepoPath $Normalized
 $artifactPath = Resolve-RepoPath $Artifact
 $destinationPath = Resolve-RepoPath $Destination
@@ -30,11 +32,38 @@ foreach ($requiredPath in @(
     $sourceManifest,
     $fullVerifier,
     $assetVerifier,
-    $normalizedPath,
-    $artifactPath
+    $prepareProduction
 )) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-        throw "Required Public Suffix file not found: $requiredPath"
+        throw "Required Public Suffix tooling file not found: $requiredPath"
+    }
+}
+
+if (
+    -not (Test-Path -LiteralPath $normalizedPath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $artifactPath -PathType Leaf)
+) {
+    Write-Host "Production Public Suffix build outputs are missing; rebuilding the pinned artifact..."
+    $prepareArguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $prepareProduction,
+        "-Python", $Python,
+        "-Normalized", $Normalized,
+        "-Artifact", $Artifact
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Source)) {
+        $prepareArguments += @("-Source", $Source)
+    }
+    & powershell @prepareArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Pinned Public Suffix rebuild failed with exit code $LASTEXITCODE"
+    }
+}
+
+foreach ($requiredOutput in @($normalizedPath, $artifactPath)) {
+    if (-not (Test-Path -LiteralPath $requiredOutput -PathType Leaf)) {
+        throw "Required Public Suffix build output not found after rebuild: $requiredOutput"
     }
 }
 
