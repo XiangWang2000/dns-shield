@@ -27,15 +27,21 @@ data class DomainPolicyAssembly(
  * Assembles allowlist-first blocking policy without depending on the VPN lifecycle.
  *
  * Built-in blocking is always present. A configured compiled blocklist is added only after it is
- * loaded and validated successfully. Recoverable loading failures reject the optional blocklist
- * and preserve the built-in matcher instead of disabling DNS protection.
+ * loaded and validated successfully. When a registrable-domain resolver is available, only the
+ * compiled blocklist matcher is extended through [ParentDomainMatcher]; built-in and exact
+ * allowlist semantics remain unchanged.
+ *
+ * The resolver provider is invoked only after a compiled blocklist has loaded and validated. A
+ * recoverable resolver-provider failure keeps the validated compiled matcher exact-only instead of
+ * dropping it or disabling built-in protection.
  */
 object DomainPolicyAssembler {
     fun assemble(
         compiledBlocklistFile: File? = null,
         allowlist: DomainAllowlist = DomainAllowlist.NONE,
         builtInMatcher: DomainMatcher = BuiltInDomainMatcher(),
-        loadCompiledBlocklist: (File) -> CompiledBlocklist = CompiledBlocklistLoader::fromFile
+        loadCompiledBlocklist: (File) -> CompiledBlocklist = CompiledBlocklistLoader::fromFile,
+        registrableDomainResolverProvider: () -> RegistrableDomainResolver? = { null }
     ): DomainPolicyAssembly {
         val blockers = mutableListOf(builtInMatcher)
 
@@ -46,21 +52,33 @@ object DomainPolicyAssembler {
             )
         }
 
-        val status = try {
-            val compiledBlocklist = loadCompiledBlocklist(compiledBlocklistFile)
-            compiledBlocklist.validateSorted()
-            blockers += CompiledBlocklistMatcher(compiledBlocklist)
-            CompiledBlocklistStatus.Loaded(compiledBlocklist.entryCount)
+        val compiledBlocklist = try {
+            val loaded = loadCompiledBlocklist(compiledBlocklistFile)
+            loaded.validateSorted()
+            loaded
         } catch (exception: Exception) {
-            CompiledBlocklistStatus.Rejected(
-                exception.message?.takeIf(String::isNotBlank)
-                    ?: exception.javaClass.simpleName
+            return DomainPolicyAssembly(
+                matcher = CompositeDomainMatcher(allowlist, blockers),
+                compiledBlocklistStatus = CompiledBlocklistStatus.Rejected(
+                    exception.message?.takeIf(String::isNotBlank)
+                        ?: exception.javaClass.simpleName
+                )
             )
         }
 
+        val exactCompiledMatcher = CompiledBlocklistMatcher(compiledBlocklist)
+        val compiledMatcher = try {
+            registrableDomainResolverProvider()?.let { resolver ->
+                ParentDomainMatcher(exactCompiledMatcher, resolver)
+            } ?: exactCompiledMatcher
+        } catch (_: Exception) {
+            exactCompiledMatcher
+        }
+        blockers += compiledMatcher
+
         return DomainPolicyAssembly(
             matcher = CompositeDomainMatcher(allowlist, blockers),
-            compiledBlocklistStatus = status
+            compiledBlocklistStatus = CompiledBlocklistStatus.Loaded(compiledBlocklist.entryCount)
         )
     }
 }

@@ -20,14 +20,16 @@ object RuntimeDomainPolicy {
         filesDirectory: File,
         allowlist: DomainAllowlist = DomainAllowlist.NONE,
         builtInMatcher: DomainMatcher = BuiltInDomainMatcher(),
-        loadCompiledBlocklist: (File) -> CompiledBlocklist = CompiledBlocklistLoader::fromFile
+        loadCompiledBlocklist: (File) -> CompiledBlocklist = CompiledBlocklistLoader::fromFile,
+        registrableDomainResolverProvider: () -> RegistrableDomainResolver? = { null }
     ): DomainPolicyAssembly {
         val activeFile = activeBlocklistFile(filesDirectory)
         return DomainPolicyAssembler.assemble(
             compiledBlocklistFile = activeFile.takeIf { it.exists() },
             allowlist = allowlist,
             builtInMatcher = builtInMatcher,
-            loadCompiledBlocklist = loadCompiledBlocklist
+            loadCompiledBlocklist = loadCompiledBlocklist,
+            registrableDomainResolverProvider = registrableDomainResolverProvider
         )
     }
 }
