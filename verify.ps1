@@ -16,10 +16,11 @@ if (-not $env:JAVA_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:JAVA_HO
 
 Set-Location $Root
 
-Write-Host "==> PowerShell packaging script syntax"
+Write-Host "==> PowerShell script syntax"
 foreach ($scriptName in @(
     "prepare-public-suffix-production.ps1",
-    "install-public-suffix-asset.ps1"
+    "install-public-suffix-asset.ps1",
+    "benchmark-runtime-domain-policy-android.ps1"
 )) {
     $tokens = $null
     $parseErrors = $null
