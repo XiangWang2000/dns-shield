@@ -24,20 +24,26 @@ class RuntimeDomainPolicyTest {
     }
 
     @Test
-    fun missingActiveFileIsNotConfiguredAndDoesNotCallLoader() {
+    fun missingActiveFileIsNotConfiguredAndDoesNotCallLoaderOrResolver() {
         val filesDirectory = createFilesDirectory()
         var loaderCalled = false
+        var resolverProviderCalled = false
 
         val assembly = RuntimeDomainPolicy.assemble(
             filesDirectory = filesDirectory,
             loadCompiledBlocklist = {
                 loaderCalled = true
                 error("Loader must not run for a missing active file")
+            },
+            registrableDomainResolverProvider = {
+                resolverProviderCalled = true
+                error("Resolver must not load for a missing active file")
             }
         )
 
         assertEquals(CompiledBlocklistStatus.NotConfigured, assembly.compiledBlocklistStatus)
         assertFalse(loaderCalled)
+        assertFalse(resolverProviderCalled)
         assertTrue(assembly.matcher.shouldBlock("admob.com"))
         assertFalse(assembly.matcher.shouldBlock("github.com"))
     }
@@ -56,16 +62,48 @@ class RuntimeDomainPolicyTest {
     }
 
     @Test
-    fun malformedActiveFileIsRejectedWithoutDisablingBuiltInProtection() {
+    fun forwardsLazyResolverOnlyForValidatedActiveBlocklist() {
+        val filesDirectory = createFilesDirectory()
+        writeSharedFixture(RuntimeDomainPolicy.activeBlocklistFile(filesDirectory))
+        var resolverProviderCalls = 0
+
+        val assembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            registrableDomainResolverProvider = {
+                resolverProviderCalls++
+                RegistrableDomainResolver { domain ->
+                    when {
+                        domain == "github.com" || domain.endsWith(".github.com") -> "github.com"
+                        else -> null
+                    }
+                }
+            }
+        )
+
+        assertEquals(CompiledBlocklistStatus.Loaded(entryCount = 4), assembly.compiledBlocklistStatus)
+        assertEquals(1, resolverProviderCalls)
+        assertTrue(assembly.matcher.shouldBlock("cdn.github.com"))
+    }
+
+    @Test
+    fun malformedActiveFileIsRejectedWithoutDisablingBuiltInProtectionOrLoadingResolver() {
         val filesDirectory = createFilesDirectory()
         val activeFile = RuntimeDomainPolicy.activeBlocklistFile(filesDirectory)
         prepareParentDirectory(activeFile)
         activeFile.writeText("not a compiled blocklist")
         activeFile.deleteOnExit()
+        var resolverProviderCalled = false
 
-        val assembly = RuntimeDomainPolicy.assemble(filesDirectory)
+        val assembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            registrableDomainResolverProvider = {
+                resolverProviderCalled = true
+                RegistrableDomainResolver { "example.com" }
+            }
+        )
 
         assertIs<CompiledBlocklistStatus.Rejected>(assembly.compiledBlocklistStatus)
+        assertFalse(resolverProviderCalled)
         assertTrue(assembly.matcher.shouldBlock("admob.com"))
         assertFalse(assembly.matcher.shouldBlock("github.com"))
     }
