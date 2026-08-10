@@ -1,0 +1,79 @@
+name: Patch PR26 warm-up lifetime
+
+on:
+  push:
+    branches:
+      - agent/split-runtime-policy-heap-metrics
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'Fix steady heap warm-up lifetime'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/split-runtime-policy-heap-metrics
+
+      - name: Patch benchmark scope
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('app/src/androidTest/java/io/github/xiangwang2000/dnsshield/blocking/RuntimeDomainPolicyInstrumentedBenchmarkTest.kt')
+          text = path.read_text(encoding='utf-8')
+          old = '''        // One unmeasured warm construction ensures provider/AssetManager/SHA/parser/resolver classes
+        // and their static state have already been initialized before steady retained-heap baselines.
+        val warmOwner = PublicSuffixResolverOwner.fromAssets(assets)
+        val warmAssembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            registrableDomainResolverProvider = warmOwner::resolverOrNull
+        )
+        assertActivePolicy(warmAssembly, warmOwner)
+        benchmarkSink = ActivePolicyRetention(warmOwner, warmAssembly)
+        forceGc()
+        benchmarkSink = null
+        forceGc()
+'''
+          new = '''        // Warm in a separate helper scope so the warm owner/assembly are no longer strongly
+        // reachable when the steady-state baseline is taken.
+        warmActivePolicy(filesDirectory, assets)
+        benchmarkSink = null
+        forceGc()
+'''
+          if old not in text:
+              raise SystemExit('Expected warm-up block not found')
+          text = text.replace(old, new, 1)
+
+          anchor = '''    private fun measureSteadyExactPolicyHeap(filesDirectory: File): Long {
+'''
+          helper = '''    private fun warmActivePolicy(
+        filesDirectory: File,
+        assets: android.content.res.AssetManager
+    ) {
+        val warmOwner = PublicSuffixResolverOwner.fromAssets(assets)
+        val warmAssembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            registrableDomainResolverProvider = warmOwner::resolverOrNull
+        )
+        assertActivePolicy(warmAssembly, warmOwner)
+        benchmarkSink = ActivePolicyRetention(warmOwner, warmAssembly)
+        forceGc()
+        benchmarkSink = null
+    }
+
+'''
+          if anchor not in text:
+              raise SystemExit('Expected steady exact helper anchor not found')
+          text = text.replace(anchor, helper + anchor, 1)
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/androidTest/java/io/github/xiangwang2000/dnsshield/blocking/RuntimeDomainPolicyInstrumentedBenchmarkTest.kt
+          git commit -m "Fix steady heap warm-up lifetime"
+          git push origin HEAD:agent/split-runtime-policy-heap-metrics
