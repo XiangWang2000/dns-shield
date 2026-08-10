@@ -4,7 +4,7 @@ import android.os.Build
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
-import java.util.Base64
+import android.util.Base64
 import kotlin.math.ceil
 import kotlin.math.max
 import org.junit.Assert.assertEquals
@@ -147,6 +147,13 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
         assertEquals(expectedBlocked, assembly.matcher.shouldBlock(domain))
         val samples = LongArray(LOOKUP_BATCHES)
         var checksum = 0
+        repeat(WARMUP_BATCHES) {
+            repeat(LOOKUPS_PER_BATCH) {
+                if (assembly.matcher.shouldBlock(domain)) {
+                    checksum = checksum xor domain.hashCode()
+                }
+            }
+        }
         repeat(LOOKUP_BATCHES) { batch ->
             samples[batch] = measureNanos {
                 repeat(LOOKUPS_PER_BATCH) {
@@ -161,8 +168,9 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
     }
 
     private fun writeFixture(activeFile: File) {
-        check(activeFile.parentFile?.mkdirs() != false)
-        activeFile.writeBytes(Base64.getDecoder().decode(ACTIVE_FIXTURE_BASE64))
+        val parentDirectory = requireNotNull(activeFile.parentFile)
+        check(parentDirectory.isDirectory || parentDirectory.mkdirs())
+        activeFile.writeBytes(Base64.decode(ACTIVE_FIXTURE_BASE64, Base64.DEFAULT))
     }
 
     private fun removeActiveFile(activeFile: File) {
@@ -266,9 +274,10 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
 
     companion object {
         const val REPORT_FILE_NAME = "runtime-domain-policy.android-benchmark.json"
-        private const val ASSEMBLY_ITERATIONS = 12
-        private const val LOOKUP_BATCHES = 12
+        private const val ASSEMBLY_ITERATIONS = 20
+        private const val LOOKUP_BATCHES = 20
         private const val LOOKUPS_PER_BATCH = 20_000
+        private const val WARMUP_BATCHES = 2
         private const val ACTIVE_FIXTURE_ENTRIES = 4
         private const val ACTIVE_FIXTURE_BASE64 =
             "RE5TSEJMMDEBAAAAAQAAAAQAAAAAAAAAWV11x9vzG2vNdXcSzQSM3HjfSXkCaJ7dZDit/w2/NO0="
