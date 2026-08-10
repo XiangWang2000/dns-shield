@@ -15,6 +15,8 @@ The benchmark is intentionally an observation tool. It does not enforce device-d
 
 The report separates the important paths instead of collapsing them into one startup number:
 
+Assembly and lookup distributions use 20 measured samples/batches after two unmeasured lookup warm-up batches, so the reported p95 is not simply the maximum of a 12-sample set.
+
 - `missing_assembly_median_nanos` / `missing_assembly_p95_nanos`: policy assembly when `active.bin` is absent. The resolver provider must not be called, so the packaged PSL stays unconstructed.
 - `first_active_assembly_nanos`: first valid active-policy assembly in the instrumentation process. This includes active.bin loading and validation, the first verified production PSL asset load, resolver construction, and policy composition.
 - `cached_active_assembly_median_nanos` / `cached_active_assembly_p95_nanos`: later policy assemblies using the same lifecycle-scoped resolver owner. The active blocklist is loaded again, but the Public Suffix resolver is reused.
