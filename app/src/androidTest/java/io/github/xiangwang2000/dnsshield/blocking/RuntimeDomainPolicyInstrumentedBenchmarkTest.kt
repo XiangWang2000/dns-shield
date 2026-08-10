@@ -163,16 +163,9 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
         filesDirectory: File,
         assets: android.content.res.AssetManager
     ): SteadyHeapMeasurement {
-        // One unmeasured warm construction ensures provider/AssetManager/SHA/parser/resolver classes
-        // and their static state have already been initialized before steady retained-heap baselines.
-        val warmOwner = PublicSuffixResolverOwner.fromAssets(assets)
-        val warmAssembly = RuntimeDomainPolicy.assemble(
-            filesDirectory = filesDirectory,
-            registrableDomainResolverProvider = warmOwner::resolverOrNull
-        )
-        assertActivePolicy(warmAssembly, warmOwner)
-        benchmarkSink = ActivePolicyRetention(warmOwner, warmAssembly)
-        forceGc()
+        // Warm in a separate helper scope so the warm owner/assembly are no longer strongly
+        // reachable when the steady-state baseline is taken.
+        warmActivePolicy(filesDirectory, assets)
         benchmarkSink = null
         forceGc()
 
@@ -192,6 +185,21 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
             parentPolicySamples = parentPolicySamples,
             parentIncrementalSamples = parentIncrementalSamples
         )
+    }
+
+    private fun warmActivePolicy(
+        filesDirectory: File,
+        assets: android.content.res.AssetManager
+    ) {
+        val warmOwner = PublicSuffixResolverOwner.fromAssets(assets)
+        val warmAssembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            registrableDomainResolverProvider = warmOwner::resolverOrNull
+        )
+        assertActivePolicy(warmAssembly, warmOwner)
+        benchmarkSink = ActivePolicyRetention(warmOwner, warmAssembly)
+        forceGc()
+        benchmarkSink = null
     }
 
     private fun measureSteadyExactPolicyHeap(filesDirectory: File): Long {
