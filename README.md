@@ -11,6 +11,7 @@ DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標
 - 已知的內建解析器優先使用 DNS-over-HTTPS；不支援 DoH 的自訂解析器及 DoH 失敗情況會改用標準 UDP DNS。
 - 依內建規則以 NXDOMAIN 回覆部分廣告及追蹤網域。
 - 阻擋規則已由可單元測試的 `DomainMatcher` 元件處理，並保留既有的決策快取與 VPN DNS 熱路徑行為。
+- 若 App 私有 `blocklists/active.bin` 存在且驗證通過，可套用 compiled blocklist；parent-domain matching 受 APK 內已驗證的 Public Suffix List 邊界限制。
 - 支援自訂 DNS、DNS 回應快取及同時重複查詢去重。
 - 支援選擇已安裝的 App，使其略過 DNS Shield VPN。
 - 在 App 開啟時顯示查詢數、阻擋數、估算節省流量與診斷日誌。
@@ -22,7 +23,7 @@ DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆
 - 目前只處理由系統 VPN DNS 路徑送入的 IPv4 UDP/53 查詢。
 - App 自行使用 DoH、DoT、非標準連接埠、直接 IP 連線或其他繞過系統 DNS 的方式，不會被此工具攔截。
 - 內建阻擋規則規模有限，無法涵蓋所有廣告、追蹤或惡意網域。
-- 專案提供本機離線 blocklist 編譯器，但產生的清單目前尚未載入 App；它不會改變現有 APK 的攔截行為。
+- App 可從私有儲存載入經驗證的 `blocklists/active.bin` compiled blocklist；目前不會自動下載或更新遠端規則，檔案缺失或損壞時會安全退回內建規則。
 - 「節省流量」是依被阻擋網域類型推算的參考值，不是實際網路流量量測。
 - 實際解析延遲、耗電與攔截效果會因裝置、Android 版本、網路及 DNS 解析器而異。
 
@@ -71,7 +72,7 @@ python -m unittest discover tools/tests
 python tools/build_blocklist.py --input tools/tests/fixtures/blocklist.txt --output build/test-blocklist.bin
 ```
 
-二進位格式請參閱 [docs/blocklist-format.md](docs/blocklist-format.md)。第一版只接受本機文字清單，不會下載遠端來源，也尚未接入 VPN 熱路徑。
+二進位格式請參閱 [docs/blocklist-format.md](docs/blocklist-format.md)。編譯器仍只接受本機文字清單，不會下載遠端來源；production runtime 只在 App 私有 `blocklists/active.bin` 存在且驗證通過時載入，否則維持內建規則。
 
 Public Suffix 來源更新是獨立且明確的維護操作。先安裝鎖定且帶雜湊的 IDNA 依賴，再取得並正規化 manifest 指定的來源：
 
@@ -102,11 +103,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix-android.ps1
 ```
 
-腳本只把 artifact 複製到 `app/build/generated` 的 androidTest asset，不會打包進正式 APK；結果會拉回 `build/public-suffix.android-benchmark.json`。測試流程、指標解讀與先前 ASUS_Z01RD 粗略 baseline 請參閱 [docs/public-suffix-android-benchmark.md](docs/public-suffix-android-benchmark.md)。完整 PSL 仍未接入 VPN。
+腳本只把 benchmark artifact 複製到 `app/build/generated` 的 androidTest asset；結果會拉回 `build/public-suffix.android-benchmark.json`。Production APK 另包含已釘選且驗證的 PSL asset，只有有效 `active.bin` 需要 parent-domain matching 時才由 service lifecycle lazy 載入；載入失敗時 compiled blocklist 退回 exact-only。測試流程與指標解讀請參閱 [docs/public-suffix-android-benchmark.md](docs/public-suffix-android-benchmark.md)。
 
 ## 正式發行
 
-正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前發行版本為 `1.1.0`、`versionCode 2`；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
+正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前程式版本為 `1.2.0`、`versionCode 3`；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
 
 第一次建立本機發行金鑰：
 
