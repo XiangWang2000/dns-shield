@@ -20,7 +20,8 @@ Write-Host "==> PowerShell script syntax"
 foreach ($scriptName in @(
     "prepare-public-suffix-production.ps1",
     "install-public-suffix-asset.ps1",
-    "benchmark-runtime-domain-policy-android.ps1"
+    "benchmark-runtime-domain-policy-android.ps1",
+    "release.ps1"
 )) {
     $tokens = $null
     $parseErrors = $null

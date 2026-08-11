@@ -25,6 +25,12 @@ if (-not (Test-Path -LiteralPath $PropertiesPath) -and $hasEnvironmentSigning.Co
 }
 
 Set-Location $Root
+Write-Host "==> Running repository verification"
+& .\verify.ps1
+if ($LASTEXITCODE -ne 0) {
+    throw "Repository verification failed with exit code $LASTEXITCODE."
+}
+
 Write-Host "==> Building signed release APK"
 & .\gradlew.bat --no-daemon --console=plain :app:assembleRelease
 if ($LASTEXITCODE -ne 0) {
