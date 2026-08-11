@@ -1,10 +1,10 @@
 package io.github.xiangwang2000.dnsshield.blocking
 
 import android.os.Build
+import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
-import android.util.Base64
 import kotlin.math.ceil
 import kotlin.math.max
 import org.junit.Assert.assertEquals
@@ -51,54 +51,16 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
 
             writeFixture(activeFile)
 
+            val coldMeasurement = measureColdActivePolicy(filesDirectory, targetContext.assets)
+
+            // PR #25 took its heap baseline before the first PSL/asset/parser construction, so that
+            // number also includes one-time class/static initialization. After the cold measurement
+            // has completed and its retained objects have been released, take repeated steady-state
+            // measurements with the same code paths already initialized.
             benchmarkSink = null
             forceGc()
-            val heapBeforeActivePolicy = usedHeapBytes()
+            val steadyHeapMeasurement = measureSteadyStateHeap(filesDirectory, targetContext.assets)
 
-            val resolverOwner = PublicSuffixResolverOwner.fromAssets(targetContext.assets)
-            var firstActiveAssembly: DomainPolicyAssembly? = null
-            val firstActiveAssemblyNanos = measureNanos {
-                firstActiveAssembly = RuntimeDomainPolicy.assemble(
-                    filesDirectory = filesDirectory,
-                    registrableDomainResolverProvider = resolverOwner::resolverOrNull
-                )
-            }
-            val activeAssembly = checkNotNull(firstActiveAssembly)
-            benchmarkSink = ActivePolicyRetention(resolverOwner, activeAssembly)
-            forceGc()
-            val approximateActivePolicyRetainedHeapBytes =
-                max(0L, usedHeapBytes() - heapBeforeActivePolicy)
-
-            assertEquals(
-                CompiledBlocklistStatus.Loaded(entryCount = ACTIVE_FIXTURE_ENTRIES),
-                activeAssembly.compiledBlocklistStatus
-            )
-            assertEquals(
-                PublicSuffixResolverStatus.Loaded(
-                    exactRules = 9_950,
-                    wildcardRules = 281,
-                    exceptionRules = 8
-                ),
-                resolverOwner.status()
-            )
-            assertTrue(activeAssembly.matcher.shouldBlock("github.com"))
-            assertTrue(activeAssembly.matcher.shouldBlock("cdn.github.com"))
-            assertFalse(activeAssembly.matcher.shouldBlock("example.com"))
-
-            val cachedActiveAssemblySamples = LongArray(ASSEMBLY_ITERATIONS) {
-                measureNanos {
-                    benchmarkSink = RuntimeDomainPolicy.assemble(
-                        filesDirectory = filesDirectory,
-                        registrableDomainResolverProvider = resolverOwner::resolverOrNull
-                    )
-                }
-            }
-
-            val exactLookupSamples = benchmarkLookups(activeAssembly, "github.com", expectedBlocked = true)
-            val parentLookupSamples = benchmarkLookups(activeAssembly, "cdn.github.com", expectedBlocked = true)
-            val unrelatedLookupSamples = benchmarkLookups(activeAssembly, "example.com", expectedBlocked = false)
-
-            val resolverStatus = resolverOwner.status() as PublicSuffixResolverStatus.Loaded
             val report = BenchmarkReport(
                 model = Build.MODEL ?: "unknown",
                 androidRelease = Build.VERSION.RELEASE ?: "unknown",
@@ -108,22 +70,31 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
                 missingAssemblyIterations = ASSEMBLY_ITERATIONS,
                 missingAssemblyMedianNanos = percentile(missingAssemblySamples, 0.50),
                 missingAssemblyP95Nanos = percentile(missingAssemblySamples, 0.95),
-                firstActiveAssemblyNanos = firstActiveAssemblyNanos,
+                firstActiveAssemblyNanos = coldMeasurement.firstActiveAssemblyNanos,
                 cachedActiveAssemblyIterations = ASSEMBLY_ITERATIONS,
-                cachedActiveAssemblyMedianNanos = percentile(cachedActiveAssemblySamples, 0.50),
-                cachedActiveAssemblyP95Nanos = percentile(cachedActiveAssemblySamples, 0.95),
-                approximateActivePolicyRetainedHeapBytes = approximateActivePolicyRetainedHeapBytes,
+                cachedActiveAssemblyMedianNanos = percentile(coldMeasurement.cachedAssemblySamples, 0.50),
+                cachedActiveAssemblyP95Nanos = percentile(coldMeasurement.cachedAssemblySamples, 0.95),
+                // Preserve the PR #25 field for report compatibility. It is intentionally the
+                // cold-inclusive delta and must not be treated as steady retained object size.
+                approximateActivePolicyRetainedHeapBytes = coldMeasurement.coldInclusiveHeapDeltaBytes,
+                steadyHeapIterations = HEAP_ITERATIONS,
+                steadyExactPolicyRetainedHeapMedianBytes =
+                    percentile(steadyHeapMeasurement.exactPolicySamples, 0.50),
+                steadyParentPolicyRetainedHeapMedianBytes =
+                    percentile(steadyHeapMeasurement.parentPolicySamples, 0.50),
+                steadyParentIncrementalHeapMedianBytes =
+                    percentile(steadyHeapMeasurement.parentIncrementalSamples, 0.50),
                 lookupBatches = LOOKUP_BATCHES,
                 lookupsPerBatch = LOOKUPS_PER_BATCH,
-                exactLookupMedianNanos = percentile(exactLookupSamples, 0.50),
-                exactLookupP95Nanos = percentile(exactLookupSamples, 0.95),
-                parentLookupMedianNanos = percentile(parentLookupSamples, 0.50),
-                parentLookupP95Nanos = percentile(parentLookupSamples, 0.95),
-                unrelatedLookupMedianNanos = percentile(unrelatedLookupSamples, 0.50),
-                unrelatedLookupP95Nanos = percentile(unrelatedLookupSamples, 0.95),
-                publicSuffixExactRules = resolverStatus.exactRules,
-                publicSuffixWildcardRules = resolverStatus.wildcardRules,
-                publicSuffixExceptionRules = resolverStatus.exceptionRules
+                exactLookupMedianNanos = percentile(coldMeasurement.exactLookupSamples, 0.50),
+                exactLookupP95Nanos = percentile(coldMeasurement.exactLookupSamples, 0.95),
+                parentLookupMedianNanos = percentile(coldMeasurement.parentLookupSamples, 0.50),
+                parentLookupP95Nanos = percentile(coldMeasurement.parentLookupSamples, 0.95),
+                unrelatedLookupMedianNanos = percentile(coldMeasurement.unrelatedLookupSamples, 0.50),
+                unrelatedLookupP95Nanos = percentile(coldMeasurement.unrelatedLookupSamples, 0.95),
+                publicSuffixExactRules = coldMeasurement.resolverStatus.exactRules,
+                publicSuffixWildcardRules = coldMeasurement.resolverStatus.wildcardRules,
+                publicSuffixExceptionRules = coldMeasurement.resolverStatus.exceptionRules
             )
 
             val reportDirectory = checkNotNull(targetContext.getExternalFilesDir(null)) {
@@ -137,6 +108,160 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
             benchmarkSink = null
             removeActiveFile(activeFile)
         }
+    }
+
+    private fun measureColdActivePolicy(
+        filesDirectory: File,
+        assets: android.content.res.AssetManager
+    ): ColdActiveMeasurement {
+        benchmarkSink = null
+        forceGc()
+        val heapBeforeActivePolicy = usedHeapBytes()
+
+        val resolverOwner = PublicSuffixResolverOwner.fromAssets(assets)
+        var firstActiveAssembly: DomainPolicyAssembly? = null
+        val firstActiveAssemblyNanos = measureNanos {
+            firstActiveAssembly = RuntimeDomainPolicy.assemble(
+                filesDirectory = filesDirectory,
+                registrableDomainResolverProvider = resolverOwner::resolverOrNull
+            )
+        }
+        val activeAssembly = checkNotNull(firstActiveAssembly)
+        benchmarkSink = ActivePolicyRetention(resolverOwner, activeAssembly)
+        forceGc()
+        val coldInclusiveHeapDeltaBytes = max(0L, usedHeapBytes() - heapBeforeActivePolicy)
+
+        assertActivePolicy(activeAssembly, resolverOwner)
+
+        val cachedActiveAssemblySamples = LongArray(ASSEMBLY_ITERATIONS) {
+            measureNanos {
+                benchmarkSink = RuntimeDomainPolicy.assemble(
+                    filesDirectory = filesDirectory,
+                    registrableDomainResolverProvider = resolverOwner::resolverOrNull
+                )
+            }
+        }
+
+        val exactLookupSamples = benchmarkLookups(activeAssembly, "github.com", expectedBlocked = true)
+        val parentLookupSamples = benchmarkLookups(activeAssembly, "cdn.github.com", expectedBlocked = true)
+        val unrelatedLookupSamples = benchmarkLookups(activeAssembly, "example.com", expectedBlocked = false)
+        val resolverStatus = resolverOwner.status() as PublicSuffixResolverStatus.Loaded
+
+        benchmarkSink = null
+        return ColdActiveMeasurement(
+            firstActiveAssemblyNanos = firstActiveAssemblyNanos,
+            coldInclusiveHeapDeltaBytes = coldInclusiveHeapDeltaBytes,
+            cachedAssemblySamples = cachedActiveAssemblySamples,
+            exactLookupSamples = exactLookupSamples,
+            parentLookupSamples = parentLookupSamples,
+            unrelatedLookupSamples = unrelatedLookupSamples,
+            resolverStatus = resolverStatus
+        )
+    }
+
+    private fun measureSteadyStateHeap(
+        filesDirectory: File,
+        assets: android.content.res.AssetManager
+    ): SteadyHeapMeasurement {
+        // Warm in a separate helper scope so the warm owner/assembly are no longer strongly
+        // reachable when the steady-state baseline is taken.
+        warmActivePolicy(filesDirectory, assets)
+        benchmarkSink = null
+        forceGc()
+
+        val exactPolicySamples = LongArray(HEAP_ITERATIONS)
+        val parentPolicySamples = LongArray(HEAP_ITERATIONS)
+        val parentIncrementalSamples = LongArray(HEAP_ITERATIONS)
+
+        repeat(HEAP_ITERATIONS) { index ->
+            exactPolicySamples[index] = measureSteadyExactPolicyHeap(filesDirectory)
+            parentPolicySamples[index] = measureSteadyParentPolicyHeap(filesDirectory, assets)
+            parentIncrementalSamples[index] =
+                max(0L, parentPolicySamples[index] - exactPolicySamples[index])
+        }
+
+        return SteadyHeapMeasurement(
+            exactPolicySamples = exactPolicySamples,
+            parentPolicySamples = parentPolicySamples,
+            parentIncrementalSamples = parentIncrementalSamples
+        )
+    }
+
+    private fun warmActivePolicy(
+        filesDirectory: File,
+        assets: android.content.res.AssetManager
+    ) {
+        val warmOwner = PublicSuffixResolverOwner.fromAssets(assets)
+        val warmAssembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            registrableDomainResolverProvider = warmOwner::resolverOrNull
+        )
+        assertActivePolicy(warmAssembly, warmOwner)
+        benchmarkSink = ActivePolicyRetention(warmOwner, warmAssembly)
+        forceGc()
+        benchmarkSink = null
+    }
+
+    private fun measureSteadyExactPolicyHeap(filesDirectory: File): Long {
+        benchmarkSink = null
+        forceGc()
+        val heapBefore = usedHeapBytes()
+        val exactAssembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            registrableDomainResolverProvider = { null }
+        )
+        assertEquals(
+            CompiledBlocklistStatus.Loaded(entryCount = ACTIVE_FIXTURE_ENTRIES),
+            exactAssembly.compiledBlocklistStatus
+        )
+        assertTrue(exactAssembly.matcher.shouldBlock("github.com"))
+        assertFalse(exactAssembly.matcher.shouldBlock("cdn.github.com"))
+        benchmarkSink = exactAssembly
+        forceGc()
+        val retainedBytes = max(0L, usedHeapBytes() - heapBefore)
+        benchmarkSink = null
+        return retainedBytes
+    }
+
+    private fun measureSteadyParentPolicyHeap(
+        filesDirectory: File,
+        assets: android.content.res.AssetManager
+    ): Long {
+        benchmarkSink = null
+        forceGc()
+        val heapBefore = usedHeapBytes()
+        val resolverOwner = PublicSuffixResolverOwner.fromAssets(assets)
+        val activeAssembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            registrableDomainResolverProvider = resolverOwner::resolverOrNull
+        )
+        assertActivePolicy(activeAssembly, resolverOwner)
+        benchmarkSink = ActivePolicyRetention(resolverOwner, activeAssembly)
+        forceGc()
+        val retainedBytes = max(0L, usedHeapBytes() - heapBefore)
+        benchmarkSink = null
+        return retainedBytes
+    }
+
+    private fun assertActivePolicy(
+        assembly: DomainPolicyAssembly,
+        resolverOwner: PublicSuffixResolverOwner
+    ) {
+        assertEquals(
+            CompiledBlocklistStatus.Loaded(entryCount = ACTIVE_FIXTURE_ENTRIES),
+            assembly.compiledBlocklistStatus
+        )
+        assertEquals(
+            PublicSuffixResolverStatus.Loaded(
+                exactRules = 9_950,
+                wildcardRules = 281,
+                exceptionRules = 8
+            ),
+            resolverOwner.status()
+        )
+        assertTrue(assembly.matcher.shouldBlock("github.com"))
+        assertTrue(assembly.matcher.shouldBlock("cdn.github.com"))
+        assertFalse(assembly.matcher.shouldBlock("example.com"))
     }
 
     private fun benchmarkLookups(
@@ -216,6 +341,22 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
         val assembly: DomainPolicyAssembly
     )
 
+    private data class ColdActiveMeasurement(
+        val firstActiveAssemblyNanos: Long,
+        val coldInclusiveHeapDeltaBytes: Long,
+        val cachedAssemblySamples: LongArray,
+        val exactLookupSamples: LongArray,
+        val parentLookupSamples: LongArray,
+        val unrelatedLookupSamples: LongArray,
+        val resolverStatus: PublicSuffixResolverStatus.Loaded
+    )
+
+    private data class SteadyHeapMeasurement(
+        val exactPolicySamples: LongArray,
+        val parentPolicySamples: LongArray,
+        val parentIncrementalSamples: LongArray
+    )
+
     private data class BenchmarkReport(
         val model: String,
         val androidRelease: String,
@@ -230,6 +371,10 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
         val cachedActiveAssemblyMedianNanos: Long,
         val cachedActiveAssemblyP95Nanos: Long,
         val approximateActivePolicyRetainedHeapBytes: Long,
+        val steadyHeapIterations: Int,
+        val steadyExactPolicyRetainedHeapMedianBytes: Long,
+        val steadyParentPolicyRetainedHeapMedianBytes: Long,
+        val steadyParentIncrementalHeapMedianBytes: Long,
         val lookupBatches: Int,
         val lookupsPerBatch: Int,
         val exactLookupMedianNanos: Long,
@@ -257,6 +402,10 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
               "cached_active_assembly_median_nanos": $cachedActiveAssemblyMedianNanos,
               "cached_active_assembly_p95_nanos": $cachedActiveAssemblyP95Nanos,
               "approximate_active_policy_retained_heap_bytes": $approximateActivePolicyRetainedHeapBytes,
+              "steady_heap_iterations": $steadyHeapIterations,
+              "steady_exact_policy_retained_heap_median_bytes": $steadyExactPolicyRetainedHeapMedianBytes,
+              "steady_parent_policy_retained_heap_median_bytes": $steadyParentPolicyRetainedHeapMedianBytes,
+              "steady_parent_incremental_heap_median_bytes": $steadyParentIncrementalHeapMedianBytes,
               "lookup_batches": $lookupBatches,
               "lookups_per_batch": $lookupsPerBatch,
               "exact_lookup_median_nanos": $exactLookupMedianNanos,
@@ -275,6 +424,7 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
     companion object {
         const val REPORT_FILE_NAME = "runtime-domain-policy.android-benchmark.json"
         private const val ASSEMBLY_ITERATIONS = 20
+        private const val HEAP_ITERATIONS = 5
         private const val LOOKUP_BATCHES = 20
         private const val LOOKUPS_PER_BATCH = 20_000
         private const val WARMUP_BATCHES = 2
