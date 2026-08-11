@@ -1,0 +1,67 @@
+name: Validate PR27 branch
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    if: github.head_ref == 'agent/prepare-1.2.0-release-candidate'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify release version
+        shell: python
+        run: |
+          from pathlib import Path
+          text = Path('app/build.gradle.kts').read_text(encoding='utf-8')
+          assert 'versionCode = 3' in text
+          assert 'versionName = "1.2.0"' in text
+          release = Path('release.ps1').read_text(encoding='utf-8')
+          assert '& .\\verify.ps1' in release
+
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          foreach ($scriptName in @('verify.ps1', 'release.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD $scriptName),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -ne 0) {
+              throw "$scriptName parser errors: $($errors.Message -join '; ')"
+            }
+          }
+
+      - name: Python verification
+        run: python -m unittest discover tools/tests
+
+      - name: Verify packaged production PSL asset
+        run: >-
+          python tools/verify_public_suffix_asset.py
+          --manifest tools/public_suffix_production.json
+          --asset app/src/main/assets/public_suffix.bin
+
+      - name: Gradle build and tests
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --console=plain \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest \
+            :app:testDebugUnitTest \
+            :app:compileDebugKotlin
