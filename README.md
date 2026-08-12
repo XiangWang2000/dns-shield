@@ -1,6 +1,6 @@
 # DNS Shield
 
-![DNS Shield 應用程式圖示](assets/dns_shield_icon.png)
+![DNS Shield 應用程式圖示](app/src/main/res/drawable/dns_shield_icon_1780828904628.png)
 
 DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標準 IPv4 UDP DNS 查詢導向本機處理，再依規則阻擋或轉送至使用者選擇的 DNS 解析服務。App 不需要 Root，也不會代理一般網頁、影音或即時通訊流量。
 
@@ -13,7 +13,7 @@ DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標
 - 阻擋規則已由可單元測試的 `DomainMatcher` 元件處理，並保留既有的決策快取與 VPN DNS 熱路徑行為。
 - 若 App 私有 `blocklists/active.bin` 存在且驗證通過，可套用 compiled blocklist；parent-domain matching 受 APK 內已驗證的 Public Suffix List 邊界限制。
 - 支援自訂 DNS、DNS 回應快取及同時重複查詢去重。
-- 支援選擇已安裝的 App，使其略過 DNS Shield VPN。
+- 支援選擇具有啟動入口的已安裝 App，使其略過 DNS Shield VPN。
 - 在 App 開啟時顯示查詢數、阻擋數、估算節省流量與診斷日誌。
 
 ## 能力邊界
@@ -41,7 +41,7 @@ DNS Shield 不包含帳號、分析 SDK、廣告 SDK或開發者營運的後端�
 | `FOREGROUND_SERVICE` | 在 VPN 啟用期間維持可見的前景服務通知。 |
 | `FOREGROUND_SERVICE_SYSTEM_EXEMPTED` | Android 14 以上執行持續作用中的 VPN 前景服務。 |
 | `POST_NOTIFICATIONS` | 顯示 VPN 運作中的前景服務通知。 |
-| `QUERY_ALL_PACKAGES` | 顯示完整已安裝 App 清單，讓使用者建立 VPN 排除名單。資料只在裝置上使用。 |
+| `QUERY_ALL_PACKAGES` | 查詢具有啟動入口的已安裝 App，讓使用者建立 VPN 排除名單。資料只在裝置上使用。 |
 | `BIND_VPN_SERVICE` | 由 Android 系統綁定及管理 `VpnService`；此權限只套用於服務元件。 |
 
 `QUERY_ALL_PACKAGES` 提供廣泛的套件可見性，只用於使用者主動開啟的 App 排除功能。
@@ -57,13 +57,13 @@ DNS Shield 不包含帳號、分析 SDK、廣告 SDK或開發者營運的後端�
 
 ## 開發建置
 
-需求：Android Studio JBR、Android SDK，以及可執行的 Gradle Wrapper。
+需求：Python 3、Android Studio JBR、Android SDK，以及可執行的 Gradle Wrapper。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 
-驗證入口會執行離線 Python 工具測試、Debug APK 建置、Android 單元測試與 Kotlin 編譯。
+驗證入口會執行離線 Python 工具測試、production Public Suffix asset 驗證、Debug APK 與 androidTest APK 建置、JVM 單元測試及 Kotlin 編譯；實機 instrumentation test 不會由此腳本自動執行。
 
 離線 blocklist 編譯器及其測試可獨立執行：
 
@@ -107,7 +107,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix-an
 
 ## 正式發行
 
-正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前程式版本為 `1.2.0`、`versionCode 3`；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
+正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前程式版本為 `1.2.1`、`versionCode 4`；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
 
 第一次建立本機發行金鑰：
 
