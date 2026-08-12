@@ -44,6 +44,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 
 class DnsVpnService : VpnService() {
 
@@ -86,12 +87,18 @@ class DnsVpnService : VpnService() {
         @Volatile private var logFlushJob: Job? = null
         @Volatile private var statsFlushJob: Job? = null
 
-        // In-memory DNS cache structure with zero-allocation query keys and parsed response TTLs
-        class DnsQueryKey(
-            val bytes: ByteArray,
+        // In-memory DNS cache with hash-cached query keys and parsed response TTLs.
+        // The query payload is owned by the request coroutine and must not be mutated after use here.
+        internal class DnsQueryKey(
+            bytes: ByteArray,
             private val resolverGeneration: Int,
             private val policyAssembly: DomainPolicyAssembly
         ) {
+            private val bytes = bytes
+            private val cachedHashCode = calculateHashCode()
+            internal val byteCount: Int
+                get() = bytes.size
+
             override fun equals(other: Any?): Boolean {
                 if (this === other) return true
                 if (other !is DnsQueryKey) return false
@@ -104,7 +111,9 @@ class DnsVpnService : VpnService() {
                 return true
             }
 
-            override fun hashCode(): Int {
+            override fun hashCode(): Int = cachedHashCode
+
+            private fun calculateHashCode(): Int {
                 var result = 31 * resolverGeneration + System.identityHashCode(policyAssembly)
                 for (i in 2 until bytes.size) {
                     result = 31 * result + bytes[i]
@@ -130,6 +139,12 @@ class DnsVpnService : VpnService() {
         fun getOkHttpClient(): OkHttpClient {
             return okHttpClientInstance ?: synchronized(this) {
                 okHttpClientInstance ?: OkHttpClient.Builder()
+                    .dns(DohBootstrapDns)
+                    .dispatcher(
+                        Dispatcher().apply {
+                            maxRequestsPerHost = MAX_CONCURRENT_DNS_QUERIES
+                        }
+                    )
                     .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
                     .readTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
                     .writeTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
@@ -214,20 +229,20 @@ class DnsVpnService : VpnService() {
         }
 
         // Defensive copy added to protect LRU cache keys and records from mutable buffer modifications
-        fun putCache(key: DnsQueryKey, responseData: ByteArray) {
-            if (key.bytes.size < 2) return
+        private fun putCache(key: DnsQueryKey, responseData: ByteArray) {
+            if (key.byteCount < 2) return
             val ttlMillis = parseDnsResponseTtl(responseData)
             val expireAt = System.currentTimeMillis() + ttlMillis
             val record = CachedDnsRecord(responseData.copyOf(), expireAt)
             dnsCache.put(key.copyForStorage(), record)
         }
 
-        fun getCache(key: DnsQueryKey, dnsPayload: ByteArray): ByteArray? {
-            if (dnsPayload.size < 2) return null
+        private fun getCache(key: DnsQueryKey): ByteArray? {
+            if (key.byteCount < 2) return null
             val record = dnsCache.get(key)
             if (record != null) {
                 if (System.currentTimeMillis() < record.expireAt) {
-                    return copyResponseWithTxId(record.responseData, dnsPayload)
+                    return record.responseData
                 } else {
                     dnsCache.remove(key)
                 }
@@ -272,7 +287,7 @@ class DnsVpnService : VpnService() {
             addLogInternal(message, writeDebugLog = true)
         }
 
-        fun addDnsQueryLog(important: Boolean = false, message: () -> String) {
+        private inline fun addDnsQueryLog(important: Boolean = false, message: () -> String) {
             if (!important && !isUiForeground) {
                 return
             }
@@ -857,14 +872,16 @@ class DnsVpnService : VpnService() {
         clientIp: ByteArray,
         mockDnsIp: ByteArray,
         clientPort: Int,
-        outputStream: FileOutputStream
+        outputStream: FileOutputStream,
+        transactionIdSource: ByteArray? = null
     ) {
-        val responseIpPacket = buildUdpIpPacket(
+        val responseIpPacket = DnsResponsePacketBuilder.build(
             srcIp = mockDnsIp, // 10.0.0.1
             dstIp = clientIp,   // Client IP
             srcPort = 53,
             dstPort = clientPort,
-            payload = responseData
+            payload = responseData,
+            transactionIdSource = transactionIdSource
         )
 
         try {
@@ -892,9 +909,16 @@ class DnsVpnService : VpnService() {
         )
 
         // 1. Return known-good cached responses before doing domain parsing or block matching.
-        val cachedResponse = getCache(queryKey, dnsPayload)
+        val cachedResponse = getCache(queryKey)
         if (cachedResponse != null) {
-            sendResponsePacket(cachedResponse, clientIp, mockDnsIp, clientPort, outputStream)
+            sendResponsePacket(
+                cachedResponse,
+                clientIp,
+                mockDnsIp,
+                clientPort,
+                outputStream,
+                transactionIdSource = dnsPayload
+            )
 
             recordResolvedQuery()
 
@@ -949,15 +973,21 @@ class DnsVpnService : VpnService() {
             }
         }
 
-        // 4. Every client receives its own response copy and transaction ID.
+        // 4. Every client packet is stamped with its own transaction ID while copying the payload.
         if (sharedResponse != null) {
-            val responseForClient = copyResponseWithTxId(sharedResponse, dnsPayload)
-            sendResponsePacket(responseForClient, clientIp, mockDnsIp, clientPort, outputStream)
+            sendResponsePacket(
+                sharedResponse,
+                clientIp,
+                mockDnsIp,
+                clientPort,
+                outputStream,
+                transactionIdSource = dnsPayload
+            )
 
             recordResolvedQuery()
 
             addDnsQueryLog {
-                "✓ 解析成功 [ID=${formatTxId(dnsPayload)}]: $domain (${responseForClient.size} bytes)"
+                "✓ 解析成功 [ID=${formatTxId(dnsPayload)}]: $domain (${sharedResponse.size} bytes)"
             }
         } else {
             addDnsQueryLog(important = true) {
@@ -1036,81 +1066,6 @@ class DnsVpnService : VpnService() {
             Log.e(TAG, "DNS lookup failed on ${dnsServer.hostAddress}", e)
             return null
         }
-    }
-
-    private fun buildUdpIpPacket(
-        srcIp: ByteArray,
-        dstIp: ByteArray,
-        srcPort: Int,
-        dstPort: Int,
-        payload: ByteArray
-    ): ByteArray {
-        val ipHeaderLength = 20
-        val udpHeaderLength = 8
-        val totalLength = ipHeaderLength + udpHeaderLength + payload.size
-
-        val packet = ByteArray(totalLength)
-
-        // --- IPv4 Header ---
-        packet[0] = 0x45.toByte() // IP Version (4) + IHL (5 words = 20 bytes)
-        packet[1] = 0x00.toByte() // ToS / DSCP
-        packet[2] = ((totalLength shr 8) and 0xFF).toByte() // Total length MSB
-        packet[3] = (totalLength and 0xFF).toByte()        // Total length LSB
-        packet[4] = 0x00.toByte() // Identification MSB
-        packet[5] = 0x00.toByte() // Identification LSB
-        packet[6] = 0x40.toByte() // Flags: Don't Fragment (0x4000)
-        packet[7] = 0x00.toByte() // Fragment Offset LSB
-        packet[8] = 64.toByte()   // TTL
-        packet[9] = 17.toByte()   // Protocol UDP is 17
-        packet[10] = 0x00.toByte() // Checksum placeholder MSB
-        packet[11] = 0x00.toByte() // Checksum placeholder LSB
-
-        // Source & Destination IPs
-        System.arraycopy(srcIp, 0, packet, 12, 4)
-        System.arraycopy(dstIp, 0, packet, 16, 4)
-
-        // Calculate and write IPv4 header Checksum
-        val ipChecksum = calculateChecksum(packet, 0, ipHeaderLength)
-        packet[10] = ((ipChecksum shr 8) and 0xFF).toByte()
-        packet[11] = (ipChecksum and 0xFF).toByte()
-
-        // --- UDP Header ---
-        val udpOffset = ipHeaderLength
-        packet[udpOffset] = ((srcPort shr 8) and 0xFF).toByte()     // Source Port MSB
-        packet[udpOffset + 1] = (srcPort and 0xFF).toByte()         // Source Port LSB
-        packet[udpOffset + 2] = ((dstPort shr 8) and 0xFF).toByte() // Destination Port MSB
-        packet[udpOffset + 3] = (dstPort and 0xFF).toByte()         // Destination Port LSB
-
-        val udpLen = udpHeaderLength + payload.size
-        packet[udpOffset + 4] = ((udpLen shr 8) and 0xFF).toByte()  // UDP Length MSB
-        packet[udpOffset + 5] = (udpLen and 0xFF).toByte()         // UDP Length LSB
-
-        packet[udpOffset + 6] = 0x00.toByte() // UDP Checksum (can be omitted in IPv4 UDP)
-        packet[udpOffset + 7] = 0x00.toByte()
-
-        // --- UDP Payload ---
-        System.arraycopy(payload, 0, packet, udpOffset + udpHeaderLength, payload.size)
-
-        return packet
-    }
-
-    private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Int {
-        var sum = 0
-        var i = offset
-        val end = offset + length
-
-        while (i < end - 1) {
-            val word = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
-            sum += word
-            i += 2
-        }
-        if (i < end) {
-            sum += (data[i].toInt() and 0xFF) shl 8
-        }
-        while (sum shr 16 != 0) {
-            sum = (sum and 0xFFFF) + (sum ushr 16)
-        }
-        return sum.inv() and 0xFFFF
     }
 
     // Gracefully and synchronously shutdown tunnel resources to prevent leakage

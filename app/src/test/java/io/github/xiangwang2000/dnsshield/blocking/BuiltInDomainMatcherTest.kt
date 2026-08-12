@@ -29,6 +29,16 @@ class BuiltInDomainMatcherTest {
     fun blocksExactDomainLabels() {
         assertTrue(matcher.shouldBlock("ads.example.com"))
         assertTrue(matcher.shouldBlock("api.tracker.example.com"))
+        assertTrue(matcher.shouldBlock(".telemetry..example.com"))
+        assertTrue(matcher.shouldBlock("example.com.crashlytics"))
+    }
+
+    @Test
+    fun doesNotBlockPartialLabels() {
+        assertFalse(matcher.shouldBlock("bads.example.com"))
+        assertFalse(matcher.shouldBlock("trackerx.example.com"))
+        assertFalse(matcher.shouldBlock("myanalytics.example.com"))
+        assertFalse(matcher.shouldBlock("crashlytics2.example.com"))
     }
 
     @Test

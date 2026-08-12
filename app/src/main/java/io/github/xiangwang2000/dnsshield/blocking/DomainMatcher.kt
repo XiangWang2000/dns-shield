@@ -63,12 +63,35 @@ class BuiltInDomainMatcher : DomainMatcher {
         if (normalized.isEmpty() || normalized == "unknown") return false
 
         if (normalized in exactBlocks) return true
-        if (suffixBlocks.any(normalized::endsWith)) return true
-        if (containsBlocks.any(normalized::contains)) return true
+        for (suffix in suffixBlocks) {
+            if (normalized.endsWith(suffix)) return true
+        }
+        for (fragment in containsBlocks) {
+            if (normalized.contains(fragment)) return true
+        }
 
-        return normalized
-            .split('.')
-            .any(exactBlockedLabels::contains)
+        return containsExactBlockedLabel(normalized)
+    }
+
+    private fun containsExactBlockedLabel(domain: String): Boolean {
+        var labelStart = 0
+        while (labelStart < domain.length) {
+            val separator = domain.indexOf('.', labelStart)
+            val labelEnd = if (separator >= 0) separator else domain.length
+            val labelLength = labelEnd - labelStart
+
+            for (blockedLabel in exactBlockedLabels) {
+                if (blockedLabel.length == labelLength &&
+                    domain.regionMatches(labelStart, blockedLabel, 0, labelLength)
+                ) {
+                    return true
+                }
+            }
+
+            if (separator < 0) break
+            labelStart = separator + 1
+        }
+        return false
     }
 
     internal fun normalize(domain: String): String = domain.lowercase().trim()
