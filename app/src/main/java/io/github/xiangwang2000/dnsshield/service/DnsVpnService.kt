@@ -309,6 +309,15 @@ class DnsVpnService : VpnService() {
             scheduleLogFlush()
         }
 
+        private fun logDnsTransportFailure(message: String, error: Throwable? = null) {
+            if (!isUiForeground) return
+            if (error == null) {
+                Log.e(TAG, message)
+            } else {
+                Log.e(TAG, message, error)
+            }
+        }
+
         fun clearLogs() {
             synchronized(logList) {
                 logList.clear()
@@ -513,6 +522,7 @@ class DnsVpnService : VpnService() {
 
     // Robust local concurrency throttle to reduce background burst pressure on CPU and radio.
     private val querySemaphore = Semaphore(MAX_CONCURRENT_DNS_QUERIES)
+    private val dohFailureBackoff = DohFailureBackoff()
 
     // One verified Public Suffix resolver owner per service lifecycle. The lazy is only touched when
     // a validated compiled blocklist actually needs parent-domain matching.
@@ -836,7 +846,7 @@ class DnsVpnService : VpnService() {
             call.enqueue(object : okhttp3.Callback {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                     if (continuation.isActive) {
-                        Log.e(TAG, "DoH resolution failed for $dohUrl", e)
+                        logDnsTransportFailure("DoH resolution failed for $dohUrl", e)
                         continuation.resume(null)
                     }
                 }
@@ -848,14 +858,14 @@ class DnsVpnService : VpnService() {
                                 val bytes = response.body.bytes()
                                 continuation.resume(bytes)
                             } else {
-                                Log.e(TAG, "DoH resolution error: HTTP ${response.code} for $dohUrl")
+                                logDnsTransportFailure("DoH resolution error: HTTP ${response.code} for $dohUrl")
                                 continuation.resume(null)
                             }
                         } else {
                             response.close()
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed reading DoH body bytes", e)
+                        logDnsTransportFailure("Failed reading DoH body bytes", e)
                         if (continuation.isActive) {
                             continuation.resume(null)
                         }
@@ -942,7 +952,7 @@ class DnsVpnService : VpnService() {
             val savedInBytes = estimateSavedBytes(domain)
             recordBlockedQuery(savedInBytes)
 
-            addDnsQueryLog(important = true) {
+            addDnsQueryLog {
                 "🛡️ [真正攔截] $domain -> NXDOMAIN"
             }
             return
@@ -1006,12 +1016,24 @@ class DnsVpnService : VpnService() {
         var responseData: ByteArray? = null
         val primaryDoHUrl = getDoHUrl(dnsState.primary)
 
-        if (primaryDoHUrl != null) {
-            responseData = performDohLookup(primaryDoHUrl, dnsPayload)
+        if (primaryDoHUrl != null && dohFailureBackoff.tryAcquire(primaryDoHUrl)) {
+            try {
+                responseData = performDohLookup(primaryDoHUrl, dnsPayload)
+            } catch (e: CancellationException) {
+                dohFailureBackoff.cancelAttempt(primaryDoHUrl)
+                throw e
+            } catch (e: Exception) {
+                dohFailureBackoff.recordFailure(primaryDoHUrl)
+                throw e
+            }
+
             if (responseData != null) {
+                dohFailureBackoff.recordSuccess(primaryDoHUrl)
                 addDnsQueryLog {
                     "🌐 [DoH 解析] [ID=${formatTxId(dnsPayload)}]: 透過安全 HTTPS 連線成功解析 $domain"
                 }
+            } else {
+                dohFailureBackoff.recordFailure(primaryDoHUrl)
             }
         }
 
@@ -1035,7 +1057,7 @@ class DnsVpnService : VpnService() {
                     responseData = responsePacket.data.copyOf(responsePacket.length)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Standard UDP resolution fallback exception", e)
+                logDnsTransportFailure("Standard UDP resolution fallback exception", e)
             } finally {
                 socket?.close()
             }
@@ -1065,7 +1087,7 @@ class DnsVpnService : VpnService() {
             socket.receive(recvPacket)
             return recvPacket
         } catch (e: Exception) {
-            Log.e(TAG, "DNS lookup failed on ${dnsServer.hostAddress}", e)
+            logDnsTransportFailure("DNS lookup failed on ${dnsServer.hostAddress}", e)
             return null
         }
     }
