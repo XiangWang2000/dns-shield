@@ -523,6 +523,7 @@ class DnsVpnService : VpnService() {
     // Robust local concurrency throttle to reduce background burst pressure on CPU and radio.
     private val querySemaphore = Semaphore(MAX_CONCURRENT_DNS_QUERIES)
     private val dohFailureBackoff = DohFailureBackoff()
+    private val backgroundFailureLogLimiter = MonotonicIntervalGate(intervalMillis = 5_000)
 
     // One verified Public Suffix resolver owner per service lifecycle. The lazy is only touched when
     // a validated compiled blocklist actually needs parent-domain matching.
@@ -1002,8 +1003,10 @@ class DnsVpnService : VpnService() {
                 "✓ 解析成功 [ID=${formatTxId(dnsPayload)}]: $domain (${sharedResponse.size} bytes)"
             }
         } else {
-            addDnsQueryLog(important = true) {
-                "✗ 請求失敗 [ID=${formatTxId(dnsPayload)}]: $domain 伺服器逾時或無回應"
+            if (isUiForeground || backgroundFailureLogLimiter.tryAcquire()) {
+                addDnsQueryLog(important = true) {
+                    "✗ 請求失敗 [ID=${formatTxId(dnsPayload)}]: $domain 伺服器逾時或無回應"
+                }
             }
         }
     }
