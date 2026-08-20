@@ -107,7 +107,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix-an
 
 ## 正式發行
 
-正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前程式版本為 `1.2.1`、`versionCode 4`；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
+正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前程式版本為 `1.2.2`、`versionCode 5`；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
 
 第一次建立本機發行金鑰：
 
