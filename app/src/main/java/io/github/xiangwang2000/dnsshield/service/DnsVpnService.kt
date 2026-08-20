@@ -62,6 +62,7 @@ class DnsVpnService : VpnService() {
         private const val FOREGROUND_LOG_FLUSH_MS = 300L
         private const val FOREGROUND_STATS_FLUSH_MS = 500L
         private const val MEMORY_TRIM_CLEAR_CACHE_LEVEL = 60
+        private const val UDP_RESPONSE_BUFFER_SIZE = 4096
 
         const val VPN_IP = "10.0.0.2"
         const val DUMMY_DNS_IP = "10.0.0.1"
@@ -1047,13 +1048,14 @@ class DnsVpnService : VpnService() {
                 socket = DatagramSocket()
                 protect(socket)
                 socket.soTimeout = 3000
+                val recvBuffer = ByteArray(UDP_RESPONSE_BUFFER_SIZE)
 
                 val primaryAddress = InetAddress.getByName(dnsState.primary)
-                var responsePacket = resolveQuery(socket, dnsPayload, primaryAddress)
+                var responsePacket = resolveQuery(socket, dnsPayload, primaryAddress, recvBuffer)
 
                 if (responsePacket == null && dnsState.secondary != null) {
                     val secondaryAddress = InetAddress.getByName(dnsState.secondary)
-                    responsePacket = resolveQuery(socket, dnsPayload, secondaryAddress)
+                    responsePacket = resolveQuery(socket, dnsPayload, secondaryAddress, recvBuffer)
                 }
 
                 if (responsePacket != null) {
@@ -1079,9 +1081,9 @@ class DnsVpnService : VpnService() {
     private fun resolveQuery(
         socket: DatagramSocket,
         dnsPayload: ByteArray,
-        dnsServer: InetAddress
+        dnsServer: InetAddress,
+        recvBuffer: ByteArray
     ): DatagramPacket? {
-        val recvBuffer = ByteArray(4096)
         try {
             val sendPacket = DatagramPacket(dnsPayload, dnsPayload.size, dnsServer, 53)
             socket.send(sendPacket)
