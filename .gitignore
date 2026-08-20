@@ -19,3 +19,5 @@ debug.keystore
 *.keystore
 *.p12
 keystore.properties
+__pycache__/
+*.py[cod]
