@@ -62,6 +62,7 @@ class DnsVpnService : VpnService() {
         private const val FOREGROUND_LOG_FLUSH_MS = 300L
         private const val FOREGROUND_STATS_FLUSH_MS = 500L
         private const val MEMORY_TRIM_CLEAR_CACHE_LEVEL = 60
+        private const val UDP_RESPONSE_BUFFER_SIZE = 4096
 
         const val VPN_IP = "10.0.0.2"
         const val DUMMY_DNS_IP = "10.0.0.1"
@@ -309,6 +310,15 @@ class DnsVpnService : VpnService() {
             scheduleLogFlush()
         }
 
+        private fun logDnsTransportFailure(message: String, error: Throwable? = null) {
+            if (!isUiForeground) return
+            if (error == null) {
+                Log.e(TAG, message)
+            } else {
+                Log.e(TAG, message, error)
+            }
+        }
+
         fun clearLogs() {
             synchronized(logList) {
                 logList.clear()
@@ -513,6 +523,8 @@ class DnsVpnService : VpnService() {
 
     // Robust local concurrency throttle to reduce background burst pressure on CPU and radio.
     private val querySemaphore = Semaphore(MAX_CONCURRENT_DNS_QUERIES)
+    private val dohFailureBackoff = DohFailureBackoff()
+    private val backgroundFailureLogLimiter = MonotonicIntervalGate(intervalMillis = 5_000)
 
     // One verified Public Suffix resolver owner per service lifecycle. The lazy is only touched when
     // a validated compiled blocklist actually needs parent-domain matching.
@@ -680,6 +692,8 @@ class DnsVpnService : VpnService() {
                 // Configure VPN interface
                 val builder = Builder()
                     .setSession("DNS Shield")
+                    // The default non-blocking TUN descriptor busy-spins when no packet is ready.
+                    .setBlocking(true)
                     .addAddress(VPN_IP, 32)
                     .addRoute(DUMMY_DNS_IP, 32) // Route dummy DNS requests to TUN interface
                     .addDnsServer(DUMMY_DNS_IP) // Set dummy IP as DNS server
@@ -834,7 +848,7 @@ class DnsVpnService : VpnService() {
             call.enqueue(object : okhttp3.Callback {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                     if (continuation.isActive) {
-                        Log.e(TAG, "DoH resolution failed for $dohUrl", e)
+                        logDnsTransportFailure("DoH resolution failed for $dohUrl", e)
                         continuation.resume(null)
                     }
                 }
@@ -846,14 +860,14 @@ class DnsVpnService : VpnService() {
                                 val bytes = response.body.bytes()
                                 continuation.resume(bytes)
                             } else {
-                                Log.e(TAG, "DoH resolution error: HTTP ${response.code} for $dohUrl")
+                                logDnsTransportFailure("DoH resolution error: HTTP ${response.code} for $dohUrl")
                                 continuation.resume(null)
                             }
                         } else {
                             response.close()
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed reading DoH body bytes", e)
+                        logDnsTransportFailure("Failed reading DoH body bytes", e)
                         if (continuation.isActive) {
                             continuation.resume(null)
                         }
@@ -940,7 +954,7 @@ class DnsVpnService : VpnService() {
             val savedInBytes = estimateSavedBytes(domain)
             recordBlockedQuery(savedInBytes)
 
-            addDnsQueryLog(important = true) {
+            addDnsQueryLog {
                 "🛡️ [真正攔截] $domain -> NXDOMAIN"
             }
             return
@@ -990,8 +1004,10 @@ class DnsVpnService : VpnService() {
                 "✓ 解析成功 [ID=${formatTxId(dnsPayload)}]: $domain (${sharedResponse.size} bytes)"
             }
         } else {
-            addDnsQueryLog(important = true) {
-                "✗ 請求失敗 [ID=${formatTxId(dnsPayload)}]: $domain 伺服器逾時或無回應"
+            if (isUiForeground || backgroundFailureLogLimiter.tryAcquire()) {
+                addDnsQueryLog(important = true) {
+                    "✗ 請求失敗 [ID=${formatTxId(dnsPayload)}]: $domain 伺服器逾時或無回應"
+                }
             }
         }
     }
@@ -1004,12 +1020,24 @@ class DnsVpnService : VpnService() {
         var responseData: ByteArray? = null
         val primaryDoHUrl = getDoHUrl(dnsState.primary)
 
-        if (primaryDoHUrl != null) {
-            responseData = performDohLookup(primaryDoHUrl, dnsPayload)
+        if (primaryDoHUrl != null && dohFailureBackoff.tryAcquire(primaryDoHUrl)) {
+            try {
+                responseData = performDohLookup(primaryDoHUrl, dnsPayload)
+            } catch (e: CancellationException) {
+                dohFailureBackoff.cancelAttempt(primaryDoHUrl)
+                throw e
+            } catch (e: Exception) {
+                dohFailureBackoff.recordFailure(primaryDoHUrl)
+                throw e
+            }
+
             if (responseData != null) {
+                dohFailureBackoff.recordSuccess(primaryDoHUrl)
                 addDnsQueryLog {
                     "🌐 [DoH 解析] [ID=${formatTxId(dnsPayload)}]: 透過安全 HTTPS 連線成功解析 $domain"
                 }
+            } else {
+                dohFailureBackoff.recordFailure(primaryDoHUrl)
             }
         }
 
@@ -1020,20 +1048,21 @@ class DnsVpnService : VpnService() {
                 socket = DatagramSocket()
                 protect(socket)
                 socket.soTimeout = 3000
+                val recvBuffer = ByteArray(UDP_RESPONSE_BUFFER_SIZE)
 
                 val primaryAddress = InetAddress.getByName(dnsState.primary)
-                var responsePacket = resolveQuery(socket, dnsPayload, primaryAddress)
+                var responsePacket = resolveQuery(socket, dnsPayload, primaryAddress, recvBuffer)
 
                 if (responsePacket == null && dnsState.secondary != null) {
                     val secondaryAddress = InetAddress.getByName(dnsState.secondary)
-                    responsePacket = resolveQuery(socket, dnsPayload, secondaryAddress)
+                    responsePacket = resolveQuery(socket, dnsPayload, secondaryAddress, recvBuffer)
                 }
 
                 if (responsePacket != null) {
                     responseData = responsePacket.data.copyOf(responsePacket.length)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Standard UDP resolution fallback exception", e)
+                logDnsTransportFailure("Standard UDP resolution fallback exception", e)
             } finally {
                 socket?.close()
             }
@@ -1052,9 +1081,9 @@ class DnsVpnService : VpnService() {
     private fun resolveQuery(
         socket: DatagramSocket,
         dnsPayload: ByteArray,
-        dnsServer: InetAddress
+        dnsServer: InetAddress,
+        recvBuffer: ByteArray
     ): DatagramPacket? {
-        val recvBuffer = ByteArray(4096)
         try {
             val sendPacket = DatagramPacket(dnsPayload, dnsPayload.size, dnsServer, 53)
             socket.send(sendPacket)
@@ -1063,7 +1092,7 @@ class DnsVpnService : VpnService() {
             socket.receive(recvPacket)
             return recvPacket
         } catch (e: Exception) {
-            Log.e(TAG, "DNS lookup failed on ${dnsServer.hostAddress}", e)
+            logDnsTransportFailure("DNS lookup failed on ${dnsServer.hostAddress}", e)
             return null
         }
     }
