@@ -1,0 +1,12 @@
+{
+  "git_blob_sha1": "267f7bed5fb11393ada63d5698dde76c133fab40",
+  "license": "MPL-2.0",
+  "license_url": "https://www.mozilla.org/MPL/2.0/",
+  "schema_version": 1,
+  "source_name": "badmojr/1Hosts Lite",
+  "source_path": "Lite/domains.wildcards",
+  "source_revision": "273a6bcdcc3585bc47f1ebb6823db05ec5b7b409",
+  "source_sha256": "a3e143b2fcddd38fa5a9095548d176391b1cc791135b4248b3d1c9ebaa253634",
+  "source_size": 2055757,
+  "source_url": "https://raw.githubusercontent.com/badmojr/1Hosts/273a6bcdcc3585bc47f1ebb6823db05ec5b7b409/Lite/domains.wildcards"
+}

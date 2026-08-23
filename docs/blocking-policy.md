@@ -62,15 +62,15 @@ Compiled-blocklist loading catches recoverable `Exception` failures only. Fatal 
 <filesDir>/blocklists/active.bin
 ```
 
-When that path does not exist, the optional compiled blocklist is treated as `NotConfigured`; neither the blocklist loader nor the Public Suffix resolver provider is called. When the path exists, it is passed to `DomainPolicyAssembler`; empty, malformed, unreadable, non-file, and unsorted artifacts are therefore surfaced as `Rejected` rather than silently ignored, and they still do not trigger Public Suffix loading.
+In production, a missing private file selects the verified `active.bin` packaged in the APK. Direct callers that do not provide a bundled loader still receive `NotConfigured`, preserving the policy component's optional-source contract. When the private path exists, it takes precedence and is passed to `DomainPolicyAssembler`; empty, malformed, unreadable, non-file, and unsorted overrides are surfaced as `Rejected` rather than silently ignored, and they do not trigger Public Suffix loading.
 
-The runtime source does not create directories, copy the bundled PSL asset, download a blocklist, or replace files.
+The runtime source does not create directories, download a blocklist, or replace files. Production blocklist updates occur only through a reviewed APK release.
 
 ## Atomic policy publication
 
 `ReloadableDomainPolicy` stores one complete `DomainPolicyAssembly` in an atomic reference. DNS readers therefore observe either the previous matcher and status or the replacement matcher and status; they never observe a partially updated policy.
 
-`DnsVpnService` assembles and installs runtime policy on each tunnel start, including starts reached through `ACTION_RESTART`. One lazy `PublicSuffixResolverOwner` belongs to the service instance and is supplied to runtime policy as a resolver provider. A valid `active.bin` triggers its first verified asset load; later policy reloads in the same service lifecycle reuse the same resolver. With no valid compiled blocklist, the owner is never touched.
+`DnsVpnService` assembles and installs runtime policy on each tunnel start, including starts reached through `ACTION_RESTART`. One lazy `ProductionBlocklistAssetLoader` and one lazy `PublicSuffixResolverOwner` belong to the service instance. The production blocklist bytes and resolver are verified once and reused by later policy reloads in the same service lifecycle. With no valid compiled blocklist, the resolver owner is never touched.
 
 The installation callback clears DNS responses, in-flight requests, and block decisions before the replacement assembly is published. Missing or rejected blocklists still publish a built-in-only fallback assembly. A Public Suffix load rejection keeps a valid compiled blocklist exact-only.
 
@@ -80,4 +80,4 @@ Installers are serialized, while domain lookups remain lock-free and delegate th
 
 ## Current scope
 
-The reviewed Public Suffix artifact is packaged in the production APK and runtime policy can now use it for bounded parent matching when a validated app-private `active.bin` exists. The repository still does not ship a production compiled blocklist, remote update flow, atomic blocklist replacement, user-managed allowlist persistence, blocking-policy UI, or Room schema change. With no `active.bin` present, shipped blocking behavior remains the existing built-in matcher and the packaged Public Suffix resolver is not constructed.
+The production APK packages a pinned, verified 102,972-entry 1Hosts Lite compiled blocklist and the reviewed Public Suffix artifact used for bounded parent matching. The repository still does not ship a runtime remote-update flow, user-managed allowlist persistence, blocking-policy UI, or Room schema change. A private app-files `active.bin` remains an explicit local override; without one, the packaged production list is active by default.

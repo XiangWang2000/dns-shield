@@ -9,9 +9,9 @@ DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標
 - 使用 Android `VpnService` 建立僅涵蓋指定 DNS 位址的本機介面。
 - 內建 Google DNS、Cloudflare DNS、AdGuard DNS 與 Quad9 預設值。
 - 已知的內建解析器優先使用 DNS-over-HTTPS；不支援 DoH 的自訂解析器及 DoH 失敗情況會改用標準 UDP DNS。
-- 依內建規則以 NXDOMAIN 回覆部分廣告及追蹤網域。
+- 依內建規則與 APK 內固定版本的 1Hosts Lite compiled blocklist，以 NXDOMAIN 回覆廣告、追蹤及惡意網域。
 - 阻擋規則已由可單元測試的 `DomainMatcher` 元件處理，並保留既有的決策快取與 VPN DNS 熱路徑行為。
-- 若 App 私有 `blocklists/active.bin` 存在且驗證通過，可套用 compiled blocklist；parent-domain matching 受 APK 內已驗證的 Public Suffix List 邊界限制。
+- APK 內的 `active.bin` 含 102,972 筆固定來源規則；若 App 私有 `blocklists/active.bin` 存在，則作為本機 override。parent-domain matching 受 APK 內已驗證的 Public Suffix List 邊界限制。
 - 支援自訂 DNS、DNS 回應快取及同時重複查詢去重。
 - 支援選擇具有啟動入口的已安裝 App，使其略過 DNS Shield VPN。
 - 在 App 開啟時顯示查詢數、阻擋數、估算節省流量與診斷日誌。
@@ -22,8 +22,8 @@ DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆
 
 - 目前只處理由系統 VPN DNS 路徑送入的 IPv4 UDP/53 查詢。
 - App 自行使用 DoH、DoT、非標準連接埠、直接 IP 連線或其他繞過系統 DNS 的方式，不會被此工具攔截。
-- 內建阻擋規則規模有限，無法涵蓋所有廣告、追蹤或惡意網域。
-- App 可從私有儲存載入經驗證的 `blocklists/active.bin` compiled blocklist；目前不會自動下載或更新遠端規則，檔案缺失或損壞時會安全退回內建規則。
+- DNS 層規則無法阻擋與正常內容共用網域的廣告，也無法保證涵蓋所有廣告、追蹤或惡意網域。
+- App 不會在執行期間下載遠端規則；production blocklist 只會隨經驗證的新 APK 更新。私有 override 缺失時使用 APK 內規則，損壞時則安全退回既有內建規則。
 - 「節省流量」是依被阻擋網域類型推算的參考值，不是實際網路流量量測。
 - 實際解析延遲、耗電與攔截效果會因裝置、Android 版本、網路及 DNS 解析器而異。
 
@@ -72,7 +72,22 @@ python -m unittest discover tools/tests
 python tools/build_blocklist.py --input tools/tests/fixtures/blocklist.txt --output build/test-blocklist.bin
 ```
 
-二進位格式請參閱 [docs/blocklist-format.md](docs/blocklist-format.md)。編譯器仍只接受本機文字清單，不會下載遠端來源；production runtime 只在 App 私有 `blocklists/active.bin` 存在且驗證通過時載入，否則維持內建規則。
+production `active.bin` 使用固定 commit 與 SHA-256 的 1Hosts Lite 來源；準備腳本是明確、opt-in 的維護操作，日常 App 執行不會下載規則：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\prepare-active-blocklist-production.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-active-blocklist-asset.ps1
+```
+
+二進位格式、來源合約與更新方式請參閱 [docs/blocklist-format.md](docs/blocklist-format.md)。第三方資料歸屬請參閱 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+連接 adb 實機後，可比較內建規則與 production blocklist 的組裝及 lookup 成本：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-production-blocklist-android.ps1
+```
+
+測試方法與 ASUS_Z01RD 實測結果請參閱 [docs/production-blocklist-android-benchmark.md](docs/production-blocklist-android-benchmark.md)。
 
 Public Suffix 來源更新是獨立且明確的維護操作。先安裝鎖定且帶雜湊的 IDNA 依賴，再取得並正規化 manifest 指定的來源：
 

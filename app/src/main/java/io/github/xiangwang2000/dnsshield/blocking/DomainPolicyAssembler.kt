@@ -41,11 +41,17 @@ object DomainPolicyAssembler {
         allowlist: DomainAllowlist = DomainAllowlist.NONE,
         builtInMatcher: DomainMatcher = BuiltInDomainMatcher(),
         loadCompiledBlocklist: (File) -> CompiledBlocklist = CompiledBlocklistLoader::fromFile,
+        compiledBlocklistProvider: (() -> CompiledBlocklist)? = null,
         registrableDomainResolverProvider: () -> RegistrableDomainResolver? = { null }
     ): DomainPolicyAssembly {
         val blockers = mutableListOf(builtInMatcher)
+        require(compiledBlocklistFile == null || compiledBlocklistProvider == null) {
+            "Configure either a blocklist file or a blocklist provider, not both"
+        }
+        val blocklistProvider = compiledBlocklistProvider
+            ?: compiledBlocklistFile?.let { file -> { loadCompiledBlocklist(file) } }
 
-        if (compiledBlocklistFile == null) {
+        if (blocklistProvider == null) {
             return DomainPolicyAssembly(
                 matcher = CompositeDomainMatcher(allowlist, blockers),
                 compiledBlocklistStatus = CompiledBlocklistStatus.NotConfigured
@@ -53,7 +59,7 @@ object DomainPolicyAssembler {
         }
 
         val compiledBlocklist = try {
-            val loaded = loadCompiledBlocklist(compiledBlocklistFile)
+            val loaded = blocklistProvider()
             loaded.validateSorted()
             loaded
         } catch (exception: Exception) {

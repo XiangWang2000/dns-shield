@@ -14,6 +14,9 @@ class CompiledBlocklist private constructor(
     private val data: ByteBuffer,
     val entryCount: Int
 ) {
+    @Volatile
+    private var sortedValidated = false
+
     fun containsHash(hash: Long): Boolean {
         var low = 0
         var high = entryCount - 1
@@ -33,10 +36,19 @@ class CompiledBlocklist private constructor(
     /**
      * Performs an optional full scan for build-time and test validation.
      *
-     * This is intentionally not run by [fromByteBuffer], because scanning a future memory-mapped
-     * production list would eagerly touch every file page during startup.
+     * This is intentionally not run by [fromByteBuffer], because scanning a memory-mapped list
+     * eagerly touches every file page. The first successful scan is cached for policy reloads.
      */
     fun validateSorted() {
+        if (sortedValidated) return
+        synchronized(this) {
+            if (sortedValidated) return
+            validateSortedOnce()
+            sortedValidated = true
+        }
+    }
+
+    private fun validateSortedOnce() {
         if (entryCount < 2) return
 
         var previous = hashAt(0)
@@ -102,7 +114,7 @@ class CompiledBlocklist private constructor(
     }
 }
 
-/** Exact-domain matcher backed by a compiled blocklist. It is not wired into the VPN yet. */
+/** Exact-domain matcher backed by a compiled blocklist. */
 class CompiledBlocklistMatcher(
     private val blocklist: CompiledBlocklist
 ) : DomainMatcher {
