@@ -1,6 +1,6 @@
 # Blocklist binary format
 
-`tools/build_blocklist.py` converts a local text blocklist into a deterministic binary artifact. `CompiledBlocklist` can validate and query this artifact from Kotlin, and `CompiledBlocklistLoader` can open a local artifact through a read-only memory mapping. Neither component is wired into the VPN yet.
+`tools/build_blocklist.py` converts a local text blocklist into a deterministic binary artifact. `CompiledBlocklist` validates and queries the artifact from Kotlin, `CompiledBlocklistLoader` opens a private local override through a read-only memory mapping, and `ProductionBlocklistAssetLoader` verifies and caches the pinned production artifact packaged in the APK.
 
 ## Input normalization
 
@@ -20,7 +20,7 @@ All integer fields are little-endian.
 | 16 | 8 | Entry count (`uint64`) |
 | 24 | N × 8 | Unsigned 64-bit FNV-1a hashes, strictly sorted |
 
-The output size is `24 + entryCount × 8` bytes. The artifact contains hashes only and stores exact domains from the input; parent-domain lookup belongs to a future matcher policy.
+The output size is `24 + entryCount × 8` bytes. The artifact contains hashes only and stores exact domains from the input. Runtime policy adds parent-domain lookup only through the verified Public Suffix boundary.
 
 ## Integrity and collision handling
 
@@ -35,7 +35,11 @@ The Kotlin reader validates magic, format version, hash algorithm, entry count, 
 ```powershell
 python -m unittest discover tools/tests
 python tools/build_blocklist.py --input tools/tests/fixtures/blocklist.txt --output build/test-blocklist.bin
+powershell -NoProfile -ExecutionPolicy Bypass -File .\prepare-active-blocklist-production.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-active-blocklist-asset.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 
-Do not add remote downloads, production-scale source lists, parent-domain policy, or VPN integration until the loader, reader, and compiler remain compatible under the shared golden vectors and fixtures.
+`tools/active_blocklist_source.json` pins the source repository, commit, path, byte size, Git blob SHA-1, SHA-256, and license. `tools/active_blocklist_production.json` pins the deterministic artifact size, SHA-256, and entry count. Preparation downloads only the exact pinned GitHub revision and verifies every identity field before compilation. Routine verification is offline and rejects a missing, tampered, malformed, or unsorted packaged artifact.
+
+The production source is 1Hosts Lite under MPL-2.0. Its exact source revision and license are recorded in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).

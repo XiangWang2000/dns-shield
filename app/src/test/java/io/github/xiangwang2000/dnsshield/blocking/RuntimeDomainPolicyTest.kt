@@ -49,6 +49,40 @@ class RuntimeDomainPolicyTest {
     }
 
     @Test
+    fun missingPrivateFileUsesBundledBlocklistProvider() {
+        val filesDirectory = createFilesDirectory()
+        var bundledProviderCalls = 0
+
+        val assembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            loadBundledBlocklist = {
+                bundledProviderCalls++
+                loadSharedFixture()
+            }
+        )
+
+        assertEquals(1, bundledProviderCalls)
+        assertEquals(CompiledBlocklistStatus.Loaded(entryCount = 4), assembly.compiledBlocklistStatus)
+        assertTrue(assembly.matcher.shouldBlock("github.com"))
+    }
+
+    @Test
+    fun privateActiveFileTakesPrecedenceOverBundledProvider() {
+        val filesDirectory = createFilesDirectory()
+        writeSharedFixture(RuntimeDomainPolicy.activeBlocklistFile(filesDirectory))
+
+        val assembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            loadBundledBlocklist = {
+                error("Bundled provider must not run when private active.bin exists")
+            }
+        )
+
+        assertEquals(CompiledBlocklistStatus.Loaded(entryCount = 4), assembly.compiledBlocklistStatus)
+        assertTrue(assembly.matcher.shouldBlock("github.com"))
+    }
+
+    @Test
     fun loadsSharedFixtureFromActivePath() {
         val filesDirectory = createFilesDirectory()
         writeSharedFixture(RuntimeDomainPolicy.activeBlocklistFile(filesDirectory))
@@ -126,10 +160,17 @@ class RuntimeDomainPolicyTest {
         Files.createTempDirectory("dns-shield-files-").toFile().apply { deleteOnExit() }
 
     private fun writeSharedFixture(destination: File) {
-        val encoded = Files.readString(findRepositoryFixture(), StandardCharsets.US_ASCII)
         prepareParentDirectory(destination)
-        destination.writeBytes(Base64.getDecoder().decode(encoded.trim()))
+        destination.writeBytes(sharedFixtureBytes())
         destination.deleteOnExit()
+    }
+
+    private fun loadSharedFixture(): CompiledBlocklist =
+        CompiledBlocklist.fromByteBuffer(java.nio.ByteBuffer.wrap(sharedFixtureBytes()))
+
+    private fun sharedFixtureBytes(): ByteArray {
+        val encoded = Files.readString(findRepositoryFixture(), StandardCharsets.US_ASCII)
+        return Base64.getDecoder().decode(encoded.trim())
     }
 
     private fun prepareParentDirectory(file: File) {

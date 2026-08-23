@@ -17,6 +17,7 @@ import io.github.xiangwang2000.dnsshield.blocking.CompiledBlocklistStatus
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
+import io.github.xiangwang2000.dnsshield.blocking.ProductionBlocklistAssetLoader
 import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverOwner
 import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
 import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
@@ -532,6 +533,12 @@ class DnsVpnService : VpnService() {
         PublicSuffixResolverOwner.fromAssets(assets)
     }
 
+    // The verified production blocklist is read once per service lifecycle and retained by its
+    // ByteBuffer. A private filesDir/blocklists/active.bin remains an explicit local override.
+    private val productionBlocklistLoader by lazy {
+        ProductionBlocklistAssetLoader.fromAssets(assets)
+    }
+
     @Volatile private var isVpnRunning = false
 
     private var upstreamDnsPrimary: String = "8.8.8.8"
@@ -556,6 +563,7 @@ class DnsVpnService : VpnService() {
         val status = try {
             val assembly = RuntimeDomainPolicy.assemble(
                 filesDirectory = filesDir,
+                loadBundledBlocklist = productionBlocklistLoader::load,
                 registrableDomainResolverProvider = {
                     publicSuffixResolverOwner.resolverOrNull()
                 }

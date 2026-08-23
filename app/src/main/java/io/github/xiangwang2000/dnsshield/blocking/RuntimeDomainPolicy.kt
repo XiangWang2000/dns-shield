@@ -3,11 +3,12 @@ package io.github.xiangwang2000.dnsshield.blocking
 import java.io.File
 
 /**
- * Resolves the optional active compiled blocklist from the app-private files directory.
+ * Resolves an app-private active compiled blocklist or a caller-supplied bundled default.
  *
  * The stable path is `<filesDir>/blocklists/active.bin`. A missing file means the optional
- * blocklist is not configured. Existing empty, malformed, directory, or unreadable inputs are
- * passed to [DomainPolicyAssembler] so they are reported as rejected instead of being hidden.
+ * blocklist selects the bundled provider when one is configured. Existing empty, malformed,
+ * directory, or unreadable private inputs are passed to [DomainPolicyAssembler] so they are
+ * reported as rejected instead of being hidden.
  */
 object RuntimeDomainPolicy {
     const val BLOCKLIST_DIRECTORY_NAME = "blocklists"
@@ -21,14 +22,19 @@ object RuntimeDomainPolicy {
         allowlist: DomainAllowlist = DomainAllowlist.NONE,
         builtInMatcher: DomainMatcher = BuiltInDomainMatcher(),
         loadCompiledBlocklist: (File) -> CompiledBlocklist = CompiledBlocklistLoader::fromFile,
+        loadBundledBlocklist: (() -> CompiledBlocklist)? = null,
         registrableDomainResolverProvider: () -> RegistrableDomainResolver? = { null }
     ): DomainPolicyAssembly {
         val activeFile = activeBlocklistFile(filesDirectory)
+        val privateBlocklistFile = activeFile.takeIf { it.exists() }
         return DomainPolicyAssembler.assemble(
-            compiledBlocklistFile = activeFile.takeIf { it.exists() },
+            compiledBlocklistFile = privateBlocklistFile,
             allowlist = allowlist,
             builtInMatcher = builtInMatcher,
             loadCompiledBlocklist = loadCompiledBlocklist,
+            compiledBlocklistProvider = loadBundledBlocklist.takeIf {
+                privateBlocklistFile == null
+            },
             registrableDomainResolverProvider = registrableDomainResolverProvider
         )
     }

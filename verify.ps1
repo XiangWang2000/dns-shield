@@ -18,6 +18,9 @@ Set-Location $Root
 
 Write-Host "==> PowerShell script syntax"
 foreach ($scriptName in @(
+    "prepare-active-blocklist-production.ps1",
+    "install-active-blocklist-asset.ps1",
+    "benchmark-production-blocklist-android.ps1",
     "prepare-public-suffix-production.ps1",
     "install-public-suffix-asset.ps1",
     "benchmark-runtime-domain-policy-android.ps1",
@@ -52,6 +55,19 @@ if (-not (Test-Path -LiteralPath $ProductionPublicSuffixAsset -PathType Leaf)) {
     --asset $ProductionPublicSuffixAsset
 if ($LASTEXITCODE -ne 0) {
     throw "Packaged production Public Suffix asset verification failed with exit code $LASTEXITCODE."
+}
+
+Write-Host "==> Packaged production active blocklist"
+$ProductionActiveBlocklistAsset = Join-Path $Root "app\src\main\assets\active.bin"
+if (-not (Test-Path -LiteralPath $ProductionActiveBlocklistAsset -PathType Leaf)) {
+    throw "Packaged production active blocklist is missing: $ProductionActiveBlocklistAsset"
+}
+& python .\tools\verify_active_blocklist_asset.py `
+    --manifest .\tools\active_blocklist_production.json `
+    --source-manifest .\tools\active_blocklist_source.json `
+    --asset $ProductionActiveBlocklistAsset
+if ($LASTEXITCODE -ne 0) {
+    throw "Packaged production active blocklist verification failed with exit code $LASTEXITCODE."
 }
 
 Write-Host "==> Gradle build and tests"

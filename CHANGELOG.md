@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- APK 內建固定 commit、SHA-256 驗證的 1Hosts Lite `active.bin`，提供 102,972 筆廣告、追蹤與惡意網域規則。
+- 加入來源下載、deterministic compilation、production artifact 驗證及 Android 實機 benchmark 流程；App 執行期間不會下載規則。
+
+### Changed
+
+- production blocklist 與 Public Suffix resolver 在同一個 VPN Service lifecycle 內只載入一次；已驗證排序狀態會供後續 policy reload 重用。
+
 ## 1.2.2 - 2026-08-21
 
 ### Changed

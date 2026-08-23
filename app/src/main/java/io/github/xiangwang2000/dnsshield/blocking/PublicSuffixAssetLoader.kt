@@ -72,7 +72,7 @@ internal object ProductionPublicSuffixArtifact {
         }
         val artifactSha256 = MessageDigest.getInstance("SHA-256")
             .digest(artifact)
-            .toHexString()
+            .toArtifactHexString()
         require(artifactSha256 == expected.artifactSha256) {
             "Public Suffix asset SHA-256 mismatch: expected ${expected.artifactSha256}, " +
                 "found $artifactSha256"
@@ -99,7 +99,7 @@ internal object ProductionPublicSuffixArtifact {
     }
 }
 
-private fun InputStream.readAtMost(maxBytes: Int): ByteArray {
+internal fun InputStream.readAtMost(maxBytes: Int): ByteArray {
     require(maxBytes > 0)
     val output = ByteArrayOutputStream(minOf(maxBytes, DEFAULT_BUFFER_SIZE))
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -111,10 +111,10 @@ private fun InputStream.readAtMost(maxBytes: Int): ByteArray {
     return output.toByteArray()
 }
 
-private fun ByteArray.toHexString(): String {
+internal fun ByteArray.toArtifactHexString(): String {
     val digits = "0123456789abcdef"
     return buildString(size * 2) {
-        for (byte in this@toHexString) {
+        for (byte in this@toArtifactHexString) {
             val value = byte.toInt() and 0xFF
             append(digits[value ushr 4])
             append(digits[value and 0x0F])
