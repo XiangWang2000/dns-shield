@@ -14,6 +14,14 @@ import kotlin.test.assertTrue
 
 class DomainPolicyDiagnosticsTest {
     @Test
+    fun displaysNotLoadedPolicyWithoutClaimingBuiltInRules() {
+        assertEquals(
+            listOf("規則來源：尚未載入"),
+            DomainPolicyDiagnostics.details(RulePolicyStatus.NotLoaded)
+        )
+    }
+
+    @Test
     fun logsNotConfiguredAndKeepsBuiltInBlockingWhenActiveFileIsMissing() {
         val filesDirectory = Files.createTempDirectory("dns-shield-diagnostics-missing-").toFile()
 

@@ -77,7 +77,7 @@ class DnsVpnService : VpnService() {
         val savedBytesFlow = MutableStateFlow(0L)
         val activeDnsFlow = MutableStateFlow("None")
         val liveLogsFlow = MutableStateFlow<List<String>>(emptyList())
-        val rulePolicyStatusFlow = MutableStateFlow(RulePolicyStatus())
+        val rulePolicyStatusFlow = MutableStateFlow(RulePolicyStatus.NotLoaded)
 
         // Atomic counters for perfectly thread-safe, concurrent statistics updates
         val queryCounter = AtomicInteger(0)
@@ -1122,6 +1122,7 @@ class DnsVpnService : VpnService() {
     private fun closeTunnelResources() {
         isVpnRunning = false
         isRunningFlow.value = false
+        rulePolicyStatusFlow.value = RulePolicyStatus.NotLoaded
 
         try {
             vpnInterface?.close()
@@ -1139,6 +1140,7 @@ class DnsVpnService : VpnService() {
     private suspend fun closeTunnelResourcesAndJoin() {
         isVpnRunning = false
         isRunningFlow.value = false
+        rulePolicyStatusFlow.value = RulePolicyStatus.NotLoaded
 
         try {
             vpnInterface?.close()

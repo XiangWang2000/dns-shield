@@ -1,6 +1,7 @@
 package io.github.xiangwang2000.dnsshield.blocking
 
 enum class RuleBlocklistSource {
+    NOT_LOADED,
     BUILT_IN,
     APK_BUNDLED,
     PRIVATE_OVERRIDE
@@ -28,17 +29,25 @@ data class RulePolicyStatus(
     val degradationReason: String? = null,
     val publicSuffixStatus: PublicSuffixResolverStatus = PublicSuffixResolverStatus.NotLoaded,
     val reloadError: String? = null
-)
+) {
+    companion object {
+        val NotLoaded = RulePolicyStatus(source = RuleBlocklistSource.NOT_LOADED)
+    }
+}
 
 /** Formats the service diagnostic emitted after publishing a runtime policy assembly. */
 internal object DomainPolicyDiagnostics {
     fun details(status: RulePolicyStatus): List<String> = buildList {
-        val source = when (status.source) {
-            RuleBlocklistSource.BUILT_IN -> "內建規則"
-            RuleBlocklistSource.APK_BUNDLED -> "APK 內建清單（${status.sourceName}）"
-            RuleBlocklistSource.PRIVATE_OVERRIDE -> "App 私有覆寫檔"
+        when (status.source) {
+            RuleBlocklistSource.NOT_LOADED -> {
+                add("規則來源：尚未載入")
+                status.reloadError?.let { add("規則重新載入失敗：$it") }
+                return@buildList
+            }
+            RuleBlocklistSource.BUILT_IN -> add("規則來源：內建規則")
+            RuleBlocklistSource.APK_BUNDLED -> add("規則來源：APK 內建清單（${status.sourceName}）")
+            RuleBlocklistSource.PRIVATE_OVERRIDE -> add("規則來源：App 私有覆寫檔")
         }
-        add("規則來源：$source")
         add("來源 revision：${status.sourceRevision ?: "未提供"}")
         add("來源日期：${status.sourceDate ?: "未知"}")
         status.entryCount?.let { add("規則數：${it} 筆") }
