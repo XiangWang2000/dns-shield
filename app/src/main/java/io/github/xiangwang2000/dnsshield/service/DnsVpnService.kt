@@ -702,6 +702,8 @@ class DnsVpnService : VpnService() {
                     .setSession("DNS Shield")
                     // The default non-blocking TUN descriptor busy-spins when no packet is ready.
                     .setBlocking(true)
+                    // This DNS-only tunnel handles IPv4; let IPv6 traffic use the underlying network.
+                    .allowFamily(android.system.OsConstants.AF_INET6)
                     .addAddress(VPN_IP, 32)
                     .addRoute(DUMMY_DNS_IP, 32) // Route dummy DNS requests to TUN interface
                     .addDnsServer(DUMMY_DNS_IP) // Set dummy IP as DNS server
