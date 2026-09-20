@@ -20,6 +20,7 @@ object RuntimeDomainPolicy {
     fun assemble(
         filesDirectory: File,
         allowlist: DomainAllowlist = DomainAllowlist.NONE,
+        userRules: Iterable<UserDomainRule> = emptyList(),
         builtInMatcher: DomainMatcher = BuiltInDomainMatcher(),
         loadCompiledBlocklist: (File) -> CompiledBlocklist = CompiledBlocklistLoader::fromFile,
         loadBundledBlocklist: (() -> CompiledBlocklist)? = null,
@@ -30,6 +31,7 @@ object RuntimeDomainPolicy {
         return DomainPolicyAssembler.assemble(
             compiledBlocklistFile = privateBlocklistFile,
             allowlist = allowlist,
+            userRules = userRules,
             builtInMatcher = builtInMatcher,
             loadCompiledBlocklist = loadCompiledBlocklist,
             compiledBlocklistProvider = loadBundledBlocklist.takeIf {

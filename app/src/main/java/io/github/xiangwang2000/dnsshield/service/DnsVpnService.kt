@@ -18,15 +18,21 @@ import io.github.xiangwang2000.dnsshield.blocking.CompiledBlocklistStatus
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
+import io.github.xiangwang2000.dnsshield.blocking.DomainNameNormalizer
+import io.github.xiangwang2000.dnsshield.blocking.DomainRuleAction
 import io.github.xiangwang2000.dnsshield.blocking.ProductionBlocklistAssetLoader
 import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverOwner
 import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
 import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
+import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidation
+import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidator
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import kotlin.coroutines.resume
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -57,6 +63,7 @@ class DnsVpnService : VpnService() {
         const val ACTION_RESTART = "io.github.xiangwang2000.dnsshield.service.RESTART"
         const val ACTION_UPDATE_DNS = "io.github.xiangwang2000.dnsshield.service.UPDATE_DNS"
         const val ACTION_CLEAR_LOGS = "io.github.xiangwang2000.dnsshield.service.CLEAR_LOGS"
+        const val ACTION_RELOAD_DOMAIN_POLICY = "io.github.xiangwang2000.dnsshield.service.RELOAD_DOMAIN_POLICY"
         private const val CHANNEL_ID = "dns_vpn_channel"
         private const val NOTIFICATION_ID = 5543
         private const val MAX_CONCURRENT_DNS_QUERIES = 24
@@ -76,6 +83,7 @@ class DnsVpnService : VpnService() {
         val savedBytesFlow = MutableStateFlow(0L)
         val activeDnsFlow = MutableStateFlow("None")
         val liveLogsFlow = MutableStateFlow<List<String>>(emptyList())
+        val liveDecisionEventsFlow = MutableStateFlow<List<DnsDecisionEvent>>(emptyList())
 
         // Atomic counters for perfectly thread-safe, concurrent statistics updates
         val queryCounter = AtomicInteger(0)
@@ -200,6 +208,8 @@ class DnsVpnService : VpnService() {
         }
 
         private val logList = mutableListOf<String>()
+        private val decisionEvents = mutableListOf<DnsDecisionEvent>()
+        private val decisionEventId = AtomicInteger(0)
 
         fun setUiForeground(isForeground: Boolean) {
             synchronized(flushLock) {
@@ -259,6 +269,10 @@ class DnsVpnService : VpnService() {
                     liveLogsFlow.value = emptyList()
                 }
             }
+            synchronized(decisionEvents) {
+                decisionEvents.clear()
+                liveDecisionEventsFlow.value = emptyList()
+            }
             queryCounter.set(0)
             blockedAdsCounter.set(0)
             savedBytesCounter.set(0L)
@@ -277,6 +291,29 @@ class DnsVpnService : VpnService() {
             savedBytesCounter.addAndGet(savedInBytes)
             queryCounter.incrementAndGet()
             scheduleStatsFlush()
+        }
+
+        private fun recordBlockedDomain(
+            domain: String,
+            reason: DnsDecisionReason
+        ) {
+            val normalized = DomainNameNormalizer.normalize(domain) ?: return
+            synchronized(decisionEvents) {
+                decisionEvents.add(
+                    0,
+                    DnsDecisionEvent(
+                        id = decisionEventId.incrementAndGet().toLong(),
+                        domain = normalized,
+                        decision = DnsDecision.BLOCK,
+                        reason = reason,
+                        occurredAtMillis = System.currentTimeMillis()
+                    )
+                )
+                if (decisionEvents.size > MAX_LOG_LINES) {
+                    decisionEvents.removeAt(decisionEvents.lastIndex)
+                }
+                liveDecisionEventsFlow.value = decisionEvents.toList()
+            }
         }
 
         private fun scheduleLogFlush() {
@@ -409,6 +446,7 @@ class DnsVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.IO)
+    private val domainPolicyReloadMutex = Mutex()
 
     private data class DnsStateSnapshot(
         val primary: String,
@@ -462,18 +500,57 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private fun reloadDomainPolicy() {
+    private suspend fun reloadDomainPolicy() {
+        domainPolicyReloadMutex.withLock {
+            reloadDomainPolicySnapshot()
+        }
+    }
+
+    private suspend fun reloadDomainPolicySnapshot() {
         val status = try {
+            val storedRules = AppDatabase.getDatabase(this).dnsDao().getUserDomainRulesList()
+            val ruleResolver = if (storedRules.any { it.includeSubdomains }) {
+                publicSuffixResolverOwner.resolverOrNull()
+            } else {
+                null
+            }
+            var rejectedRuleCount = 0
+            val userRules = storedRules.mapNotNull { entity ->
+                val action = runCatching { DomainRuleAction.valueOf(entity.action) }.getOrNull()
+                if (action == null) {
+                    rejectedRuleCount++
+                    return@mapNotNull null
+                }
+                when (
+                    val validation = UserDomainRuleValidator.validate(
+                        domain = entity.domain,
+                        action = action,
+                        includeSubdomains = entity.includeSubdomains,
+                        resolver = ruleResolver
+                    )
+                ) {
+                    is UserDomainRuleValidation.Valid -> validation.rule
+                    is UserDomainRuleValidation.Invalid -> {
+                        rejectedRuleCount++
+                        null
+                    }
+                }
+            }
             val assembly = RuntimeDomainPolicy.assemble(
                 filesDirectory = filesDir,
+                userRules = userRules,
                 loadBundledBlocklist = productionBlocklistLoader::load,
                 registrableDomainResolverProvider = {
                     publicSuffixResolverOwner.resolverOrNull()
                 }
             )
-            domainPolicy.install(assembly) {
+            val installedStatus = domainPolicy.install(assembly) {
                 invalidatePolicyState()
             }
+            if (rejectedRuleCount > 0) {
+                addLog("[網域規則] 有 $rejectedRuleCount 條無效或無法通過 PSL 驗證的規則未套用。")
+            }
+            installedStatus
         } catch (exception: Exception) {
             val reason = exception.message?.takeIf(String::isNotBlank)
                 ?: exception.javaClass.simpleName
@@ -535,6 +612,9 @@ class DnsVpnService : VpnService() {
             }
             ACTION_CLEAR_LOGS -> {
                 clearLogs()
+            }
+            ACTION_RELOAD_DOMAIN_POLICY -> {
+                serviceScope.launch { reloadDomainPolicy() }
             }
         }
         return START_NOT_STICKY
@@ -630,6 +710,8 @@ class DnsVpnService : VpnService() {
                 }
 
                 vpnInterface = establishedFd
+                // Rules can change while the VPN is being established; load them again before handling packets.
+                reloadDomainPolicy()
                 isVpnRunning = true
                 isRunningFlow.value = true
                 addLog("[防護成功] 安全 DNS 防護已成功啟動並建立通道。")
@@ -848,6 +930,14 @@ class DnsVpnService : VpnService() {
 
             val savedInBytes = estimateSavedBytes(domain)
             recordBlockedQuery(savedInBytes)
+            val reason = if (
+                dnsState.policyAssembly.userRuleMatcher.decisionFor(domain) == DomainRuleAction.BLOCK
+            ) {
+                DnsDecisionReason.USER_RULE
+            } else {
+                DnsDecisionReason.PROTECTION_LIST
+            }
+            recordBlockedDomain(domain, reason)
 
             addDnsQueryLog {
                 "🛡️ [真正攔截] $domain -> NXDOMAIN"

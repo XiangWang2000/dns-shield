@@ -9,9 +9,16 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import io.github.xiangwang2000.dnsshield.blocking.DomainNameNormalizer
+import io.github.xiangwang2000.dnsshield.blocking.DomainRuleAction
+import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverOwner
+import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidation
+import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidator
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import io.github.xiangwang2000.dnsshield.data.BypassedApp
 import io.github.xiangwang2000.dnsshield.data.DnsServer
+import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
+import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
@@ -31,6 +38,9 @@ data class DnsShieldUiState(
     val savedBytes: Long = 0L,
     val activeDns: String = "None",
     val logs: List<String> = emptyList(),
+    val userDomainRules: List<UserDomainRuleEntity> = emptyList(),
+    val domainRuleSearchQuery: String = "",
+    val blockedEvents: List<DnsDecisionEvent> = emptyList(),
     val dnsServers: List<DnsServer> = emptyList(),
     val activeDnsServer: DnsServer? = null,
     val appSearchQuery: String = "",
@@ -60,6 +70,20 @@ data class AppListState(
     val isLoadingApps: Boolean
 )
 
+data class DomainRulesAndEventsState(
+    val rules: List<UserDomainRuleEntity>,
+    val searchQuery: String,
+    val blockedEvents: List<DnsDecisionEvent>,
+    val infoCardVisible: Boolean
+)
+
+data class DomainRuleUndoToken(
+    val domain: String,
+    val includeSubdomains: Boolean,
+    val expectedRevision: String,
+    val previous: UserDomainRuleEntity?
+)
+
 object AppIconCache {
     private val cache = android.util.LruCache<String, Drawable>(128)
 
@@ -87,6 +111,9 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     private val db = AppDatabase.getDatabase(application)
     private val dnsDao = db.dnsDao()
     private val sharedPrefs = application.getSharedPreferences("dns_shield_prefs", Context.MODE_PRIVATE)
+    private val publicSuffixResolverOwner by lazy {
+        PublicSuffixResolverOwner.fromAssets(application.assets)
+    }
 
     private val _isVpnRunning = MutableStateFlow(DnsVpnService.isRunningFlow.value)
     val isVpnRunning = _isVpnRunning.asStateFlow()
@@ -105,6 +132,15 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _liveLogs = MutableStateFlow<List<String>>(DnsVpnService.liveLogsFlow.value)
     val liveLogs = _liveLogs.asStateFlow()
+
+    private val _blockedEvents = MutableStateFlow(DnsVpnService.liveDecisionEventsFlow.value)
+    private val _domainRuleSearchQuery = MutableStateFlow("")
+
+    private val userDomainRules = dnsDao.getUserDomainRulesFlow().stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
 
     val vpnSettingsModified = MutableStateFlow(false)
 
@@ -180,13 +216,22 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         AppListState(query, apps, loading)
     }
 
+    private val domainRulesAndEventsStateFlow: Flow<DomainRulesAndEventsState> = combine(
+        userDomainRules,
+        _domainRuleSearchQuery,
+        _blockedEvents,
+        _infoCardVisible
+    ) { rules, query, events, infoVisible ->
+        DomainRulesAndEventsState(rules, query, events, infoVisible)
+    }
+
     val uiState: StateFlow<DnsShieldUiState> = combine(
         vpnMetricsStateFlow,
         vpnStatusAndDnsStateFlow,
         appListStateFlow,
-        vpnSettingsModified,
-        _infoCardVisible
-    ) { metrics, statusDns, appList, settingsModified, infoVisible ->
+        domainRulesAndEventsStateFlow,
+        vpnSettingsModified
+    ) { metrics, statusDns, appList, ruleState, settingsModified ->
         DnsShieldUiState(
             isRunning = statusDns.isRunning,
             queryCount = metrics.queryCount,
@@ -194,13 +239,16 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             savedBytes = metrics.savedBytes,
             activeDns = statusDns.activeDns,
             logs = metrics.logs,
+            userDomainRules = ruleState.rules,
+            domainRuleSearchQuery = ruleState.searchQuery,
+            blockedEvents = ruleState.blockedEvents,
             dnsServers = statusDns.dnsServers,
             activeDnsServer = statusDns.activeDnsServer,
             appSearchQuery = appList.searchQuery,
             filteredApps = appList.filteredApps,
             isLoadingApps = appList.isLoadingApps,
             vpnSettingsModified = settingsModified,
-            infoCardVisible = infoVisible
+            infoCardVisible = ruleState.infoCardVisible
         )
     }.stateIn(
         scope = viewModelScope,
@@ -212,6 +260,9 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             savedBytes = _savedBytes.value,
             activeDns = _activeDns.value,
             logs = _liveLogs.value,
+            userDomainRules = userDomainRules.value,
+            domainRuleSearchQuery = _domainRuleSearchQuery.value,
+            blockedEvents = _blockedEvents.value,
             dnsServers = emptyList(),
             activeDnsServer = null,
             appSearchQuery = _searchQuery.value,
@@ -226,6 +277,116 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         _infoCardVisible.value = visible
         viewModelScope.launch(Dispatchers.IO) {
             sharedPrefs.edit().putBoolean("info_card_visible", visible).apply()
+        }
+    }
+
+    fun setDomainRuleSearchQuery(query: String) {
+        _domainRuleSearchQuery.value = query
+    }
+
+    suspend fun saveDomainRule(
+        input: String,
+        action: DomainRuleAction,
+        includeSubdomains: Boolean
+    ): String? = withContext(Dispatchers.IO) {
+        val resolver = if (includeSubdomains) {
+            publicSuffixResolverOwner.resolverOrNull()
+        } else {
+            null
+        }
+        val rule = when (
+            val validation = UserDomainRuleValidator.validate(
+                domain = input,
+                action = action,
+                includeSubdomains = includeSubdomains,
+                resolver = resolver
+            )
+        ) {
+            is UserDomainRuleValidation.Valid -> validation.rule
+            is UserDomainRuleValidation.Invalid -> return@withContext when (validation.reason) {
+                UserDomainRuleValidation.Reason.INVALID_DOMAIN -> "請輸入有效的網域名稱。"
+                UserDomainRuleValidation.Reason.PUBLIC_SUFFIX_RESOLVER_UNAVAILABLE ->
+                    "目前無法驗證公共後綴，請稍後再試。"
+                UserDomainRuleValidation.Reason.PUBLIC_SUFFIX_DOMAIN ->
+                    "公共後綴不能套用到所有子網域。"
+            }
+        }
+
+        try {
+            dnsDao.insertUserDomainRule(
+                UserDomainRuleEntity(
+                    domain = rule.domain,
+                    action = rule.action.name,
+                    includeSubdomains = rule.includeSubdomains
+                )
+            )
+            addLog("[網域規則] 已儲存 ${rule.domain}（${rule.action.name}）。")
+            requestDomainPolicyReloadIfRunning()
+            null
+        } catch (exception: Exception) {
+            Log.e("DnsVpnViewModel", "Failed to save user domain rule", exception)
+            "儲存規則失敗：${exception.localizedMessage ?: "資料庫錯誤"}"
+        }
+    }
+
+    suspend fun deleteDomainRule(rule: UserDomainRuleEntity) = withContext(Dispatchers.IO) {
+        try {
+            dnsDao.deleteUserDomainRule(rule.domain, rule.includeSubdomains)
+            addLog("[網域規則] 已刪除 ${rule.domain}。")
+            requestDomainPolicyReloadIfRunning()
+        } catch (exception: Exception) {
+            Log.e("DnsVpnViewModel", "Failed to delete user domain rule", exception)
+            addLog("[網域規則] 刪除 ${rule.domain} 失敗：${exception.localizedMessage ?: "資料庫錯誤"}")
+        }
+    }
+
+    suspend fun allowBlockedDomain(domain: String): DomainRuleUndoToken = withContext(Dispatchers.IO) {
+        val validated = UserDomainRuleValidator.validate(
+            domain = domain,
+            action = DomainRuleAction.ALLOW,
+            includeSubdomains = false
+        ) as? UserDomainRuleValidation.Valid
+            ?: throw IllegalArgumentException("攔截事件中的網域格式無效")
+        val rule = UserDomainRuleEntity(
+            domain = validated.rule.domain,
+            action = DomainRuleAction.ALLOW.name,
+            includeSubdomains = false
+        )
+        val previous = dnsDao.replaceUserDomainRule(rule)
+        addLog("[網域規則] 已為 ${rule.domain} 新增精確允許規則。")
+        requestDomainPolicyReloadIfRunning()
+        DomainRuleUndoToken(
+            domain = rule.domain,
+            includeSubdomains = false,
+            expectedRevision = rule.revision,
+            previous = previous
+        )
+    }
+
+    suspend fun undoDomainRule(token: DomainRuleUndoToken): Boolean = withContext(Dispatchers.IO) {
+        val restored = dnsDao.restoreUserDomainRule(
+            domain = token.domain,
+            includeSubdomains = token.includeSubdomains,
+            expectedRevision = token.expectedRevision,
+            previous = token.previous
+        )
+        if (restored) {
+            addLog("[網域規則] 已復原 ${token.domain} 的規則變更。")
+            requestDomainPolicyReloadIfRunning()
+        }
+        restored
+    }
+
+    private fun requestDomainPolicyReloadIfRunning() {
+        if (!isVpnRunning.value) return
+        val intent = Intent(getApplication(), DnsVpnService::class.java).apply {
+            action = DnsVpnService.ACTION_RELOAD_DOMAIN_POLICY
+        }
+        try {
+            getApplication<Application>().startService(intent)
+        } catch (exception: Exception) {
+            Log.e("DnsVpnViewModel", "Failed to request active domain policy reload", exception)
+            addLog("[網域規則] 新設定已儲存，VPN 規則同步失敗；請重新啟動防護服務。")
         }
     }
 
@@ -248,6 +409,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         collectServiceFlow(DnsVpnService.savedBytesFlow, _savedBytes)
         collectServiceFlow(DnsVpnService.activeDnsFlow, _activeDns)
         collectServiceFlow(DnsVpnService.liveLogsFlow, _liveLogs)
+        collectServiceFlow(DnsVpnService.liveDecisionEventsFlow, _blockedEvents)
 
         // Observe bypassed apps list database and re-evaluate installed apps isBypassed status
         viewModelScope.launch {
@@ -495,6 +657,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
         // snappiness backup values
         _liveLogs.value = emptyList()
+        _blockedEvents.value = emptyList()
         _queryCount.value = 0
         _blockedAds.value = 0
         _savedBytes.value = 0L
