@@ -13,14 +13,16 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.xiangwang2000.dnsshield.MainActivity
-import io.github.xiangwang2000.dnsshield.blocking.CompiledBlocklistStatus
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
 import io.github.xiangwang2000.dnsshield.blocking.ProductionBlocklistAssetLoader
 import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverOwner
+import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverStatus
 import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
 import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
+import io.github.xiangwang2000.dnsshield.blocking.RuleBlocklistSource
+import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import kotlin.coroutines.resume
 import kotlinx.coroutines.*
@@ -75,6 +77,7 @@ class DnsVpnService : VpnService() {
         val savedBytesFlow = MutableStateFlow(0L)
         val activeDnsFlow = MutableStateFlow("None")
         val liveLogsFlow = MutableStateFlow<List<String>>(emptyList())
+        val rulePolicyStatusFlow = MutableStateFlow(RulePolicyStatus())
 
         // Atomic counters for perfectly thread-safe, concurrent statistics updates
         val queryCounter = AtomicInteger(0)
@@ -560,10 +563,11 @@ class DnsVpnService : VpnService() {
     }
 
     private fun reloadDomainPolicy() {
-        val status = try {
+        try {
             val assembly = RuntimeDomainPolicy.assemble(
                 filesDirectory = filesDir,
                 loadBundledBlocklist = productionBlocklistLoader::load,
+                bundledSourceMetadata = productionBlocklistLoader.sourceMetadata,
                 registrableDomainResolverProvider = {
                     publicSuffixResolverOwner.resolverOrNull()
                 }
@@ -571,15 +575,24 @@ class DnsVpnService : VpnService() {
             domainPolicy.install(assembly) {
                 invalidatePolicyState()
             }
+            rulePolicyStatusFlow.value = assembly.displayStatus.copy(
+                publicSuffixStatus = if (assembly.displayStatus.source == RuleBlocklistSource.BUILT_IN) {
+                    PublicSuffixResolverStatus.NotLoaded
+                } else {
+                    publicSuffixResolverOwner.status()
+                },
+                reloadError = null
+            )
         } catch (exception: Exception) {
             val reason = exception.message?.takeIf(String::isNotBlank)
                 ?: exception.javaClass.simpleName
             Log.e(TAG, "Failed to reload domain policy", exception)
+            rulePolicyStatusFlow.value = rulePolicyStatusFlow.value.copy(reloadError = reason)
             addLog("[攔截規則] 重新載入失敗，保留目前規則：$reason")
             return
         }
 
-        addLog(DomainPolicyDiagnostics.message(status))
+        addLog(DomainPolicyDiagnostics.message(rulePolicyStatusFlow.value))
     }
 
     private fun clearDnsStateLocked() {

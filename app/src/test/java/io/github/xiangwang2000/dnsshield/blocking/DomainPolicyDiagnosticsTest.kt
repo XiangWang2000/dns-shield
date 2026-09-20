@@ -66,6 +66,31 @@ class DomainPolicyDiagnosticsTest {
         assertFalse(assembly.matcher.shouldBlock("github.com"))
     }
 
+    @Test
+    fun displaysSourceValidationAndPublicSuffixDegradationSeparately() {
+        val lines = DomainPolicyDiagnostics.details(
+            RulePolicyStatus(
+                source = RuleBlocklistSource.APK_BUNDLED,
+                sourceName = "Pinned list",
+                sourceRevision = "revision-123",
+                sourceDate = "2026-08-23",
+                entryCount = 102_972,
+                validation = RuleBlocklistValidation.APK_VERIFIED,
+                degradationReason = "本機 override 無效，已改用 APK 清單",
+                publicSuffixStatus = PublicSuffixResolverStatus.Rejected("bad PSL asset")
+            )
+        )
+
+        assertTrue(lines.contains("規則來源：APK 內建清單（Pinned list）"))
+        assertTrue(lines.contains("來源 revision：revision-123"))
+        assertTrue(lines.contains("來源日期：2026-08-23"))
+        assertTrue(lines.contains("規則數：102972 筆"))
+        assertTrue(lines.contains("驗證狀態：APK 清單完整性驗證通過"))
+        assertTrue(lines.any { it.contains("降級原因：") && it.contains("改用 APK 清單") })
+        assertTrue(lines.any { it.contains("Public Suffix List 載入失敗") && it.contains("精確網域比對") })
+        assertTrue(lines.any { it.contains("bad PSL asset") })
+    }
+
     private fun prepareParentDirectory(file: File) {
         val parent = requireNotNull(file.parentFile)
         check(parent.mkdirs() || parent.isDirectory)

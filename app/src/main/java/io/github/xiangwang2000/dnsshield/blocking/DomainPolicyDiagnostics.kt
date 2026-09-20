@@ -1,7 +1,71 @@
 package io.github.xiangwang2000.dnsshield.blocking
 
+enum class RuleBlocklistSource {
+    BUILT_IN,
+    APK_BUNDLED,
+    PRIVATE_OVERRIDE
+}
+
+enum class RuleBlocklistValidation {
+    BUILT_IN,
+    APK_VERIFIED,
+    PRIVATE_STRUCTURE_CHECKED
+}
+
+data class RuleSourceMetadata(
+    val name: String,
+    val revision: String?,
+    val sourceDate: String?
+)
+
+data class RulePolicyStatus(
+    val source: RuleBlocklistSource = RuleBlocklistSource.BUILT_IN,
+    val sourceName: String = "",
+    val sourceRevision: String? = null,
+    val sourceDate: String? = null,
+    val entryCount: Int? = null,
+    val validation: RuleBlocklistValidation = RuleBlocklistValidation.BUILT_IN,
+    val degradationReason: String? = null,
+    val publicSuffixStatus: PublicSuffixResolverStatus = PublicSuffixResolverStatus.NotLoaded,
+    val reloadError: String? = null
+)
+
 /** Formats the service diagnostic emitted after publishing a runtime policy assembly. */
 internal object DomainPolicyDiagnostics {
+    fun details(status: RulePolicyStatus): List<String> = buildList {
+        val source = when (status.source) {
+            RuleBlocklistSource.BUILT_IN -> "內建規則"
+            RuleBlocklistSource.APK_BUNDLED -> "APK 內建清單（${status.sourceName}）"
+            RuleBlocklistSource.PRIVATE_OVERRIDE -> "App 私有覆寫檔"
+        }
+        add("規則來源：$source")
+        add("來源 revision：${status.sourceRevision ?: "未提供"}")
+        add("來源日期：${status.sourceDate ?: "未知"}")
+        status.entryCount?.let { add("規則數：${it} 筆") }
+        add(
+            "驗證狀態：" + when (status.validation) {
+                RuleBlocklistValidation.BUILT_IN -> "使用內建規則"
+                RuleBlocklistValidation.APK_VERIFIED -> "APK 清單完整性驗證通過"
+                RuleBlocklistValidation.PRIVATE_STRUCTURE_CHECKED ->
+                    "格式與排序檢查通過；來源身分未驗證"
+            }
+        )
+        status.degradationReason?.let { add("降級原因：$it") }
+        when (val suffix = status.publicSuffixStatus) {
+            PublicSuffixResolverStatus.NotLoaded -> Unit
+            is PublicSuffixResolverStatus.Loaded -> add(
+                "Public Suffix List：已載入（${suffix.exactRules} 條一般、" +
+                    "${suffix.wildcardRules} 條萬用、${suffix.exceptionRules} 條例外規則）"
+            )
+            is PublicSuffixResolverStatus.Rejected -> add(
+                "Public Suffix List 載入失敗；已降級為精確網域比對：${suffix.reason}"
+            )
+        }
+        status.reloadError?.let { add("規則重新載入失敗，保留前一版：$it") }
+    }
+
+    fun message(status: RulePolicyStatus): String = details(status).joinToString("；")
+
     fun message(status: CompiledBlocklistStatus): String = when (status) {
         CompiledBlocklistStatus.NotConfigured ->
             "[攔截規則] 未設定 compiled blocklist，使用內建規則"

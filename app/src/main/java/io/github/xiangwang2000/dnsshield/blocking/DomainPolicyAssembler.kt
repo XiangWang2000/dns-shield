@@ -20,7 +20,8 @@ sealed class CompiledBlocklistStatus {
 /** Pure policy assembly result. Runtime callers may log [compiledBlocklistStatus]. */
 data class DomainPolicyAssembly(
     val matcher: DomainMatcher,
-    val compiledBlocklistStatus: CompiledBlocklistStatus
+    val compiledBlocklistStatus: CompiledBlocklistStatus,
+    val displayStatus: RulePolicyStatus = RulePolicyStatus()
 )
 
 /**
