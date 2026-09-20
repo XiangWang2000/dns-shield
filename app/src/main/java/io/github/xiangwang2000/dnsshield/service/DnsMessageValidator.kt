@@ -56,7 +56,8 @@ internal data class DnsCacheRecordMetadata(
     val section: DnsRecordSection,
     val ttlOffset: Int,
     val ttlSeconds: Long,
-    val soaMinimumSeconds: Long?
+    val soaMinimumSeconds: Long?,
+    val rrsigTypeCovered: Int?
 )
 
 internal object DnsMessageValidator {
@@ -155,12 +156,18 @@ internal object DnsMessageValidator {
                 } else {
                     null
                 }
+                if (record.type == 46 && record.rdataLength < 2) return null
                 records += DnsCacheRecordMetadata(
                     type = record.type,
                     section = sections[sectionIndex],
                     ttlOffset = record.ttlOffset,
                     ttlSeconds = record.ttlSeconds,
-                    soaMinimumSeconds = soaMinimum
+                    soaMinimumSeconds = soaMinimum,
+                    rrsigTypeCovered = if (record.type == 46) {
+                        readUnsignedShort(response, record.rdataOffset)
+                    } else {
+                        null
+                    }
                 )
                 offset = record.nextOffset
             }
@@ -175,6 +182,35 @@ internal object DnsMessageValidator {
     fun buildNxDomainResponse(query: ParsedDnsQuery): ByteArray = buildErrorResponse(query, rcode = 3)
 
     fun buildServFailResponse(query: ParsedDnsQuery): ByteArray = buildErrorResponse(query, rcode = 2)
+
+    fun buildParseErrorResponse(message: ByteArray, reason: RejectionReason): ByteArray? {
+        if (message.size < HEADER_BYTES || message.size > MAX_DNS_MESSAGE_BYTES) return null
+
+        val requestFlags = readUnsignedShort(message, 2)
+        if (requestFlags and 0x8000 != 0) return null
+        val opcode = requestFlags ushr 11 and 0x0F
+        val rcode = when (reason) {
+            RejectionReason.UNSUPPORTED_OPCODE -> if (opcode != 0) 4 else return null
+            RejectionReason.QUESTION_COUNT,
+            RejectionReason.INVALID_QUESTION,
+            RejectionReason.INVALID_SECTION,
+            RejectionReason.TRAILING_DATA -> if (opcode == 0) 1 else return null
+            RejectionReason.TOO_SHORT,
+            RejectionReason.TOO_LARGE,
+            RejectionReason.RESPONSE_PACKET -> return null
+        }
+
+        val response = ByteArray(HEADER_BYTES)
+        response[0] = message[0]
+        response[1] = message[1]
+        val responseFlags = 0x8000 or (requestFlags and 0x7800) or (requestFlags and 0x0100) or rcode
+        writeUnsignedShort(response, 2, responseFlags)
+        writeUnsignedShort(response, 4, 0)
+        writeUnsignedShort(response, 6, 0)
+        writeUnsignedShort(response, 8, 0)
+        writeUnsignedShort(response, 10, 0)
+        return response
+    }
 
     private fun buildErrorResponse(query: ParsedDnsQuery, rcode: Int): ByteArray {
         val response = query.wire.copyOf(query.questionEndOffset)

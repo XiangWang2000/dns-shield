@@ -204,6 +204,67 @@ class DnsResponseCacheTest {
     }
 
     @Test
+    fun cnameRrsigToNodataUsesSoaMinimumOnlyWhenSignatureCoversCname() {
+        val queryBytes = DnsTestMessages.query(type = 28, transactionId = 0x201B)
+        val query = parsedQuery(queryBytes)
+        val cname = DnsTestResourceRecord(
+            type = 5,
+            ttl = 60,
+            data = DnsTestMessages.encodedName("missing.example.com")
+        )
+        val soa = soaRecord(ttl = 3_600, minimum = 5)
+        var monotonicMillis = 1_000L
+        val signedCnameNodata = DnsTestMessages.responseWithRecords(
+            queryBytes,
+            answers = listOf(cname, rrsigRecord(typeCovered = 5, ttl = 60)),
+            authorities = listOf(soa)
+        )
+        val entry = assertNotNull(DnsResponseCacheEntry.create(signedCnameNodata, query) { monotonicMillis })
+
+        assertEquals(
+            5L,
+            DnsTestMessages.records(assertNotNull(entry.responseAtCurrentTime())).single { it.type == 6 }.ttl
+        )
+        monotonicMillis += 4_000L
+        assertEquals(
+            listOf(56L, 56L, 1L),
+            DnsTestMessages.records(assertNotNull(entry.responseAtCurrentTime())).map { it.ttl }
+        )
+        monotonicMillis += 1_000L
+        assertNull(entry.responseAtCurrentTime())
+
+        val unrelatedRrsig = DnsTestMessages.responseWithRecords(
+            queryBytes,
+            answers = listOf(cname, rrsigRecord(typeCovered = 1, ttl = 60)),
+            authorities = listOf(soa)
+        )
+        val unrelatedEntry = assertNotNull(DnsResponseCacheEntry.create(unrelatedRrsig, query) { monotonicMillis })
+        assertEquals(
+            3_600L,
+            DnsTestMessages.records(assertNotNull(unrelatedEntry.responseAtCurrentTime())).single { it.type == 6 }.ttl
+        )
+    }
+
+    @Test
+    fun rejectsRrsigWithoutTypeCoveredFieldInsteadOfThrowingDuringCacheParsing() {
+        val queryBytes = DnsTestMessages.query(type = 28, transactionId = 0x201C)
+        val query = parsedQuery(queryBytes)
+        val cname = DnsTestResourceRecord(
+            type = 5,
+            ttl = 60,
+            data = DnsTestMessages.encodedName("missing.example.com")
+        )
+        val malformedRrsig = DnsTestResourceRecord(type = 46, ttl = 60, data = byteArrayOf(0))
+        val response = DnsTestMessages.responseWithRecords(
+            queryBytes,
+            answers = listOf(cname, malformedRrsig),
+            authorities = listOf(soaRecord(ttl = 3_600, minimum = 5))
+        )
+
+        assertNull(DnsResponseCacheEntry.create(response, query) { 1_000L })
+    }
+
+    @Test
     fun rejectsServfailRefusedTruncatedAndMalformedRecords() {
         val queryBytes = DnsTestMessages.query(transactionId = 0x2018)
         val query = parsedQuery(queryBytes)
@@ -298,6 +359,16 @@ class DnsResponseCacheTest {
             uint32(1) + uint32(3_600) + uint32(600) + uint32(86_400) + uint32(minimum)
         return DnsTestResourceRecord(type = 6, ttl = ttl, data = data, ownerName = "example.com")
     }
+
+    private fun rrsigRecord(typeCovered: Int, ttl: Long): DnsTestResourceRecord {
+        val data = uint16(typeCovered) + byteArrayOf(8, 2) +
+            uint32(60) + uint32(2_000_000_000) + uint32(1_000_000_000) + uint16(1234) +
+            DnsTestMessages.encodedName("example.com") + byteArrayOf(1)
+        return DnsTestResourceRecord(type = 46, ttl = ttl, data = data, ownerName = "example.com")
+    }
+
+    private fun uint16(value: Int): ByteArray =
+        byteArrayOf((value ushr 8).toByte(), value.toByte())
 
     private fun uint32(value: Long): ByteArray = byteArrayOf(
         (value ushr 24).toByte(),

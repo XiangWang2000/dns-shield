@@ -50,7 +50,9 @@ internal class DnsResponseCacheEntry private constructor(
             }
             val cnameOnlyAnswerWithNegativeAuthority =
                 query.question.type != 5 && query.question.type != 255 &&
-                    answerRecords.isNotEmpty() && answerRecords.all { it.type == 5 } && authoritySoas.isNotEmpty()
+                    answerRecords.any { it.type == 5 } &&
+                    answerRecords.all { it.type == 5 || (it.type == 46 && it.rrsigTypeCovered == 5) } &&
+                    authoritySoas.isNotEmpty()
             val negative = responseCode == 3 || answerRecords.isEmpty() || cnameOnlyAnswerWithNegativeAuthority
             val negativeSoas = if (negative) authoritySoas else emptyList()
             if (negative && negativeSoas.isEmpty()) return null
