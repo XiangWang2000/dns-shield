@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -32,6 +33,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -116,19 +120,23 @@ fun DnsShieldDashboard(
 
     // Clear, clean, authorized action handler for toggling the VPN protection layer
     val handleToggleVpn = {
-        if (uiState.isRunning) {
-            viewModel.toggleVpn(context)
-        } else {
-            try {
-                val vpnIntent = VpnService.prepare(context)
-                if (vpnIntent != null) {
-                    vpnPrepareLauncher.launch(vpnIntent)
-                } else {
-                    viewModel.toggleVpn(context)
+        when (uiState.vpnLifecycleState) {
+            VpnLifecycleState.RUNNING,
+            VpnLifecycleState.STARTING -> viewModel.toggleVpn(context)
+            VpnLifecycleState.STOPPING -> Unit
+            VpnLifecycleState.STOPPED,
+            VpnLifecycleState.FAILED -> {
+                try {
+                    val vpnIntent = VpnService.prepare(context)
+                    if (vpnIntent != null) {
+                        vpnPrepareLauncher.launch(vpnIntent)
+                    } else {
+                        viewModel.toggleVpn(context)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("MainActivity", "Failed to prepare/launch VPN service", e)
+                    Toast.makeText(context, "系統 VPN 核心不可用：${e.localizedMessage}", Toast.LENGTH_LONG).show()
                 }
-            } catch (e: Exception) {
-                android.util.Log.e("MainActivity", "Failed to prepare/launch VPN service", e)
-                Toast.makeText(context, "系統 VPN 核心不可用：${e.localizedMessage}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -182,7 +190,7 @@ fun DnsShieldScreen(
 
             // Animated Power / Status Banner
             ProtectionStatusCard(
-                isRunning = uiState.isRunning,
+                lifecycleState = uiState.vpnLifecycleState,
                 queryCount = uiState.queryCount,
                 blockedAds = uiState.blockedAds,
                 savedBytesText = formatBytes(uiState.savedBytes),
@@ -295,13 +303,28 @@ fun AppHeader(isRunning: Boolean) {
 
 @Composable
 fun ProtectionStatusCard(
-    isRunning: Boolean,
+    lifecycleState: VpnLifecycleState,
     queryCount: Int,
     blockedAds: Int,
     savedBytesText: String,
     activeDns: String,
     onToggleVpn: () -> Unit
 ) {
+    val isRunning = lifecycleState.isRunning
+    val statusLabel = when (lifecycleState) {
+        VpnLifecycleState.STOPPED -> "防護已關閉"
+        VpnLifecycleState.STARTING -> "正在啟動防護…"
+        VpnLifecycleState.RUNNING -> "防護中"
+        VpnLifecycleState.STOPPING -> "正在停止防護…"
+        VpnLifecycleState.FAILED -> "防護異常，點按可重試"
+    }
+    val actionLabel = when (lifecycleState) {
+        VpnLifecycleState.STOPPED -> "啟動防護"
+        VpnLifecycleState.STARTING -> "取消啟動"
+        VpnLifecycleState.RUNNING -> "關閉防護"
+        VpnLifecycleState.STOPPING -> "正在停止防護"
+        VpnLifecycleState.FAILED -> "重新啟動防護"
+    }
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -347,7 +370,10 @@ fun ProtectionStatusCard(
                                 }
                             )
                         )
-                        .clickable(onClickLabel = "Toggle VPN Protection") {
+                        .clickable(
+                            enabled = lifecycleState != VpnLifecycleState.STOPPING,
+                            onClickLabel = actionLabel
+                        ) {
                             onToggleVpn()
                         }
                         .testTag("power_button")
@@ -371,7 +397,8 @@ fun ProtectionStatusCard(
                 Spacer(modifier = Modifier.height(3.dp))
 
                 Text(
-                    text = if (isRunning) "防護中" else "防護關閉",
+                    text = statusLabel,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (isRunning) CyberEmerald else ColorTextSecondary
