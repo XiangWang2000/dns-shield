@@ -702,8 +702,18 @@ class DnsVpnService : VpnService() {
                     }
                 }
             }
-            Ipv4UdpDnsParseResult.NotDns,
-            is Ipv4UdpDnsParseResult.Rejected -> return
+            Ipv4UdpDnsParseResult.NotDns -> return
+            is Ipv4UdpDnsParseResult.Rejected -> {
+                parsed.dnsErrorResponse?.let { response ->
+                    sendResponsePacket(
+                        responseData = response.dnsPayload,
+                        clientIp = response.clientIp,
+                        mockDnsIp = response.resolverIp,
+                        clientPort = response.clientPort,
+                        outputStream = outputStream
+                    )
+                }
+            }
         }
     }
 
