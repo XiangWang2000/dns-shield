@@ -3,7 +3,10 @@ package io.github.xiangwang2000.dnsshield.service
 internal sealed interface Ipv4UdpDnsParseResult {
     data class Query(val packet: ParsedIpv4UdpDnsQuery) : Ipv4UdpDnsParseResult
     data object NotDns : Ipv4UdpDnsParseResult
-    data class Rejected(val reason: PacketRejectionReason) : Ipv4UdpDnsParseResult
+    data class Rejected(
+        val reason: PacketRejectionReason,
+        val dnsErrorResponse: ParsedIpv4UdpDnsErrorResponse? = null
+    ) : Ipv4UdpDnsParseResult
 }
 
 internal enum class PacketRejectionReason {
@@ -26,6 +29,13 @@ internal data class ParsedIpv4UdpDnsQuery(
     val sourcePort: Int,
     val payload: ByteArray,
     val query: ParsedDnsQuery
+)
+
+internal data class ParsedIpv4UdpDnsErrorResponse(
+    val clientIp: ByteArray,
+    val resolverIp: ByteArray,
+    val clientPort: Int,
+    val dnsPayload: ByteArray
 )
 
 internal object DnsIpv4UdpQueryParser {
@@ -73,7 +83,18 @@ internal object DnsIpv4UdpQueryParser {
         val query = when (val parseResult = DnsMessageValidator.parseQuery(payload)) {
             is DnsQueryParseResult.Valid -> parseResult.query
             is DnsQueryParseResult.Rejected -> {
-                return Ipv4UdpDnsParseResult.Rejected(PacketRejectionReason.INVALID_DNS_MESSAGE)
+                val dnsErrorResponse = DnsMessageValidator.buildParseErrorResponse(payload, parseResult.reason)?.let { response ->
+                    ParsedIpv4UdpDnsErrorResponse(
+                        clientIp = packet.copyOfRange(12, 16),
+                        resolverIp = packet.copyOfRange(16, 20),
+                        clientPort = sourcePort,
+                        dnsPayload = response
+                    )
+                }
+                return Ipv4UdpDnsParseResult.Rejected(
+                    reason = PacketRejectionReason.INVALID_DNS_MESSAGE,
+                    dnsErrorResponse = dnsErrorResponse
+                )
             }
         }
 

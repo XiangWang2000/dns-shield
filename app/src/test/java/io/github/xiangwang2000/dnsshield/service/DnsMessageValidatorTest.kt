@@ -5,6 +5,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -77,6 +78,43 @@ class DnsMessageValidatorTest {
         assertEquals(
             RejectionReason.INVALID_SECTION,
             assertIs<DnsQueryParseResult.Rejected>(DnsMessageValidator.parseQuery(duplicateOptQuery)).reason
+        )
+    }
+
+    @Test
+    fun buildsHeaderOnlyFormErrForBoundedQueryMessages() {
+        val request = DnsTestMessages.query(transactionId = 0xBEEF).also {
+            val requestFlags = 0x0100 or 0x0038
+            it[2] = (requestFlags ushr 8).toByte()
+            it[3] = requestFlags.toByte()
+            it[5] = 2
+        }
+        val reason = assertIs<DnsQueryParseResult.Rejected>(DnsMessageValidator.parseQuery(request)).reason
+        assertEquals(RejectionReason.QUESTION_COUNT, reason)
+        val response = assertNotNull(DnsMessageValidator.buildParseErrorResponse(request, reason))
+        val requestFlags = readUnsignedShort(request, 2)
+        val responseFlags = readUnsignedShort(response, 2)
+
+        assertEquals(12, response.size)
+        assertEquals(0xBEEF, readUnsignedShort(response, 0))
+        assertEquals(0x8000 or (requestFlags and 0x7800) or (requestFlags and 0x0100) or 1, responseFlags)
+        assertEquals(0, readUnsignedShort(response, 4))
+        assertEquals(0, readUnsignedShort(response, 6))
+        assertEquals(0, readUnsignedShort(response, 8))
+        assertEquals(0, readUnsignedShort(response, 10))
+
+        assertNull(DnsMessageValidator.buildParseErrorResponse(ByteArray(11), RejectionReason.TOO_SHORT))
+        assertNull(
+            DnsMessageValidator.buildParseErrorResponse(
+                ByteArray(DnsMessageValidator.MAX_DNS_MESSAGE_BYTES + 1),
+                RejectionReason.TOO_LARGE
+            )
+        )
+        assertNull(
+            DnsMessageValidator.buildParseErrorResponse(
+                DnsTestMessages.response(request),
+                RejectionReason.RESPONSE_PACKET
+            )
         )
     }
 
