@@ -149,8 +149,8 @@ class DnsMessageValidatorTest {
         assertTrue(DnsMessageValidator.isValidResponse(truncated, query))
         assertFalse(DnsMessageValidator.isCacheableResponse(servFail, query))
         assertFalse(DnsMessageValidator.isCacheableResponse(truncated, query))
-        assertTrue(DnsMessageValidator.isCacheableResponse(noError, query))
-        assertTrue(DnsMessageValidator.isCacheableResponse(nxDomain, query))
+        assertFalse(DnsMessageValidator.isCacheableResponse(noError, query))
+        assertFalse(DnsMessageValidator.isCacheableResponse(nxDomain, query))
     }
 
     @Test
