@@ -56,7 +56,8 @@ internal data class DnsCacheRecordMetadata(
     val section: DnsRecordSection,
     val ttlOffset: Int,
     val ttlSeconds: Long,
-    val soaMinimumSeconds: Long?
+    val soaMinimumSeconds: Long?,
+    val rrsigTypeCovered: Int?
 )
 
 internal object DnsMessageValidator {
@@ -155,12 +156,18 @@ internal object DnsMessageValidator {
                 } else {
                     null
                 }
+                if (record.type == 46 && record.rdataLength < 2) return null
                 records += DnsCacheRecordMetadata(
                     type = record.type,
                     section = sections[sectionIndex],
                     ttlOffset = record.ttlOffset,
                     ttlSeconds = record.ttlSeconds,
-                    soaMinimumSeconds = soaMinimum
+                    soaMinimumSeconds = soaMinimum,
+                    rrsigTypeCovered = if (record.type == 46) {
+                        readUnsignedShort(response, record.rdataOffset)
+                    } else {
+                        null
+                    }
                 )
                 offset = record.nextOffset
             }
