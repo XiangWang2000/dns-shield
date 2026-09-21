@@ -45,6 +45,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicLongArray
 import java.util.concurrent.atomic.AtomicReference
 import android.util.LruCache
 import okhttp3.OkHttpClient
@@ -89,6 +90,19 @@ class DnsVpnService : VpnService() {
         private val diagnosticMetrics = DnsDiagnosticMetrics()
         internal val d14PolicyAssemblyNanos = AtomicLong(-1L)
         internal val d14NetworkChangeCount = AtomicLong(0L)
+        private val d14PacketRejectionCounts =
+            AtomicLongArray(PacketRejectionReason.values().size)
+
+        internal fun resetD14PacketRejectionCounts() {
+            for (reason in PacketRejectionReason.values()) {
+                d14PacketRejectionCounts.set(reason.ordinal, 0L)
+            }
+        }
+
+        internal fun d14PacketRejectionCountsSnapshot(): Map<String, Long> =
+            PacketRejectionReason.values().associate { reason ->
+                reason.name to d14PacketRejectionCounts.get(reason.ordinal)
+            }
         internal val d14UnderlyingNetworkSnapshot = AtomicReference<UnderlyingNetworkSnapshot?>(null)
 
         private val flowFlushScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -1440,6 +1454,9 @@ class DnsVpnService : VpnService() {
             }
             Ipv4UdpDnsParseResult.NotDns -> return
             is Ipv4UdpDnsParseResult.Rejected -> {
+                if (BuildConfig.D14_DEVICE_TEST) {
+                    d14PacketRejectionCounts.incrementAndGet(parsed.reason.ordinal)
+                }
                 val request = beginDnsRequest(receivedAtNanos)
                 try {
                     parsed.dnsErrorResponse?.let { response ->

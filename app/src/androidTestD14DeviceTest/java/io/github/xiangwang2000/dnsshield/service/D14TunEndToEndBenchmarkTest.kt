@@ -103,6 +103,7 @@ class D14TunEndToEndBenchmarkTest {
             assertTrue("Policy assembly should be measured in the D14 target.", DnsVpnService.d14PolicyAssemblyNanos.get() > 0L)
             val initial = DnsVpnService.diagnosticsFlow.value
             diagnosticsBefore = initial
+            DnsVpnService.resetD14PacketRejectionCounts()
 
             val cacheDomain = "d14-cache-$runId.example.invalid"
             val miss = sendQuery(cacheDomain, 0x1401)
@@ -527,6 +528,7 @@ class D14TunEndToEndBenchmarkTest {
             .put("scenarios", scenarioResults)
             .put("diagnostics", diagnosticsJson(snapshot))
             .put("diagnostic_deltas", diagnosticDeltasJson(diagnosticsBefore, snapshot, clientTimeouts.get()))
+            .put("packet_rejection_reason_counts", JSONObject(DnsVpnService.d14PacketRejectionCountsSnapshot()))
             .put("coalesced_wait", JSONObject()
                 .put("sample_scope", "coalesced waiters only; not total worker/admission queue time")
                 .put("sample_count", snapshot.coalescedWait.sampleCount)
