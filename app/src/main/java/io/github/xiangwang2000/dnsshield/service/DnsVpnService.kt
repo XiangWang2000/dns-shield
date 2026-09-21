@@ -431,13 +431,13 @@ class DnsVpnService : VpnService() {
 
         private fun scheduleStatsFlush() {
             statsDirty.set(true)
-            if (!isUiForeground) return
+            if (!isUiForeground && !BuildConfig.D14_DEVICE_TEST) return
             synchronized(flushLock) {
                 if (statsFlushJob?.isActive == true) return
                 statsFlushJob = flowFlushScope.launch {
                     do {
                         delay(FOREGROUND_STATS_FLUSH_MS)
-                        if (!isUiForeground) return@launch
+                        if (!isUiForeground && !BuildConfig.D14_DEVICE_TEST) return@launch
                         statsDirty.set(false)
                         flushStatsNow()
                     } while (statsDirty.get())

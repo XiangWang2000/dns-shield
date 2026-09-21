@@ -99,6 +99,7 @@ class D14TunEndToEndBenchmarkTest {
             )
             waitForLifecycle(VpnLifecycleState.RUNNING, 20_000L)
             vpnReadyNanos = SystemClock.elapsedRealtimeNanos()
+            waitForSelectedValidatedPhysicalNetwork(context, 5_000L)
             assertTrue("Policy assembly should be measured in the D14 target.", DnsVpnService.d14PolicyAssemblyNanos.get() > 0L)
             val initial = DnsVpnService.diagnosticsFlow.value
             diagnosticsBefore = initial
