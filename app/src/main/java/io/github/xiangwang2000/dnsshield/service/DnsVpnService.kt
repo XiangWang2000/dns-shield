@@ -1205,10 +1205,13 @@ class DnsVpnService : VpnService() {
     }
 
     private suspend fun handleTunnelEnded(command: LifecycleCommand.TunnelEnded) {
-        if (
-            command.generation != tunnelGeneration ||
-            vpnInterface !== command.descriptor ||
-            lifecycleStateFlow.value != VpnLifecycleState.RUNNING
+        if (!isCurrentTunnelEnded(
+                endedGeneration = command.generation,
+                currentGeneration = tunnelGeneration,
+                endedDescriptor = command.descriptor,
+                currentDescriptor = vpnInterface,
+                lifecycleState = lifecycleStateFlow.value
+            )
         ) return
 
         addLog(command.failure ?: "VPN tunnel stopped unexpectedly")
