@@ -113,6 +113,66 @@ internal object DnsMessageValidator {
         return !containsOptRecord(response) || containsOptRecord(query.wire)
     }
 
+    fun isTruncatedResponse(response: ByteArray, query: ParsedDnsQuery): Boolean {
+        if (response.size < HEADER_BYTES || readUnsignedShort(response, 0) != query.transactionId) return false
+        val flags = readUnsignedShort(response, 2)
+        if (flags and 0x8000 == 0 || flags and 0x0200 == 0 || flags ushr 11 and 0x0F != query.opcode) return false
+        if (readUnsignedShort(response, 4) != 1) return false
+        val parsedQuestion = parseQuestion(response, HEADER_BYTES) ?: return false
+        return query.question.matches(parsedQuestion.question)
+    }
+
+    fun maxClientUdpResponseBytes(
+        query: ParsedDnsQuery,
+        tunMtuBytes: Int = DnsResponsePacketBuilder.TUN_MTU_BYTES
+    ): Int {
+        val udpPayloadLimit = tunMtuBytes - DnsResponsePacketBuilder.IPV4_HEADER_BYTES -
+            DnsResponsePacketBuilder.UDP_HEADER_BYTES
+        require(udpPayloadLimit >= 512)
+        return minOf(query.maxUdpResponseBytes, udpPayloadLimit)
+    }
+
+    fun truncateResponseForClient(
+        response: ByteArray,
+        query: ParsedDnsQuery,
+        maximumBytes: Int
+    ): ByteArray? {
+        if (!isValidResponse(response, query) || maximumBytes < HEADER_BYTES) return null
+        if (response.size <= maximumBytes) return response
+
+        val parsedQuestion = parseQuestion(response, HEADER_BYTES) ?: return null
+        if (parsedQuestion.nextOffset > maximumBytes) return null
+
+        val sectionCounts = intArrayOf(
+            readUnsignedShort(response, 6),
+            readUnsignedShort(response, 8),
+            readUnsignedShort(response, 10)
+        )
+        val retainedCounts = IntArray(sectionCounts.size)
+        var offset = parsedQuestion.nextOffset
+        var truncated = false
+        for (section in sectionCounts.indices) {
+            for (index in 0 until sectionCounts[section]) {
+                val record = parseRecord(response, offset) ?: return null
+                if (record.nextOffset > maximumBytes) {
+                    truncated = true
+                    break
+                }
+                offset = record.nextOffset
+                retainedCounts[section]++
+            }
+            if (truncated) break
+        }
+        if (!truncated) return response
+
+        return response.copyOf(offset).also { truncatedResponse ->
+            writeUnsignedShort(truncatedResponse, 2, readUnsignedShort(response, 2) or 0x0200)
+            retainedCounts.forEachIndexed { index, count ->
+                writeUnsignedShort(truncatedResponse, 6 + index * 2, count)
+            }
+        }
+    }
+
     fun isCacheableResponse(response: ByteArray, query: ParsedDnsQuery): Boolean {
         if (!isValidResponse(response, query)) return false
         val flags = readUnsignedShort(response, 2)
