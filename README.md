@@ -89,6 +89,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-production-block
 
 測試方法與 ASUS_Z01RD 實測結果請參閱 [docs/production-blocklist-android-benchmark.md](docs/production-blocklist-android-benchmark.md)。
 
+VPN 底層網路切換的觀察方式、API 24–27 限制及實機驗收狀態，請參閱 [docs/network-change-recovery.md](docs/network-change-recovery.md)。
+
 Public Suffix 來源更新是獨立且明確的維護操作。先安裝鎖定且帶雜湊的 IDNA 依賴，再取得並正規化 manifest 指定的來源：
 
 ```powershell
