@@ -2,15 +2,26 @@ package io.github.xiangwang2000.dnsshield.data
 
 import android.content.Context
 import androidx.room.Database
+import androidx.room.migration.Migration
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [BypassedApp::class, DnsServer::class], version = 1, exportSchema = false)
+@Database(entities = [BypassedApp::class, DnsServer::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dnsDao(): DnsDao
 
     companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN allowPlaintextFallback INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN primaryDohUrl TEXT")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN primaryDohBootstrapIps TEXT")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN secondaryDohUrl TEXT")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN secondaryDohBootstrapIps TEXT")
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -21,6 +32,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "dns_shield_database"
                 )
+                .addMigrations(MIGRATION_1_2)
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         super.onCreate(db)

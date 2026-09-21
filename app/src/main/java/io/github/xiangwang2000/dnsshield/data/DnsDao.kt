@@ -40,6 +40,9 @@ interface DnsDao {
     @Query("DELETE FROM dns_servers WHERE id = :serverId")
     suspend fun deleteDnsServerById(serverId: Int): Int
 
+    @Query("UPDATE dns_servers SET allowPlaintextFallback = :allow WHERE id = :serverId")
+    suspend fun updatePlaintextFallback(serverId: Int, allow: Boolean): Int
+
     @Query("UPDATE dns_servers SET isActive = 1 WHERE id = :serverId")
     suspend fun activateDnsById(serverId: Int): Int
 
