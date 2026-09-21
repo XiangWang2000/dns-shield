@@ -42,6 +42,7 @@ if (releaseRequested && !releaseSigningReady) {
 android {
   namespace = "io.github.xiangwang2000.dnsshield"
   compileSdk = 37
+  testBuildType = providers.gradleProperty("androidTestBuildType").getOrElse("debug")
 
   defaultConfig {
     applicationId = "io.github.xiangwang2000.dnsshield"
@@ -96,6 +97,12 @@ android {
       if (file("${rootDir}/debug.keystore").exists()) {
         signingConfig = signingConfigs.getByName("debugConfig")
       }
+    }
+    create("d04DeviceTest") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d04test"
+      versionNameSuffix = "-d04test"
+      matchingFallbacks += listOf("debug")
     }
   }
   compileOptions {
