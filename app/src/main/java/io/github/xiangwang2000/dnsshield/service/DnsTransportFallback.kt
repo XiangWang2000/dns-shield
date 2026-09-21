@@ -6,7 +6,8 @@ internal object DnsTransportFallback {
     suspend fun <T : Any> resolve(
         deadline: DnsRequestDeadline,
         primary: suspend () -> T?,
-        fallback: suspend () -> T?
+        fallback: suspend () -> T?,
+        onFallback: () -> Unit = {}
     ): T? {
         val remainingMillis = deadline.remainingMillis()
         if (remainingMillis <= 0L) return null
@@ -18,6 +19,7 @@ internal object DnsTransportFallback {
             } else if (primaryResponse != null) {
                 primaryResponse
             } else {
+                onFallback()
                 fallback().takeIf { deadline.remainingMillis() > 0L }
             }
         }

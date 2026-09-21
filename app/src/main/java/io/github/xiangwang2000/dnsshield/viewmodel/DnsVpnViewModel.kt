@@ -12,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import io.github.xiangwang2000.dnsshield.data.BypassedApp
 import io.github.xiangwang2000.dnsshield.data.DnsServer
+import io.github.xiangwang2000.dnsshield.service.DnsDiagnosticsSnapshot
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
 import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
 import io.github.xiangwang2000.dnsshield.service.VpnToggleAction
@@ -29,9 +30,7 @@ data class AppInfo(
 data class DnsShieldUiState(
     val isRunning: Boolean = false,
     val vpnLifecycleState: VpnLifecycleState = VpnLifecycleState.STOPPED,
-    val queryCount: Int = 0,
-    val blockedAds: Int = 0,
-    val savedBytes: Long = 0L,
+    val diagnostics: DnsDiagnosticsSnapshot = DnsDiagnosticsSnapshot(),
     val activeDns: String = "None",
     val logs: List<String> = emptyList(),
     val dnsServers: List<DnsServer> = emptyList(),
@@ -41,12 +40,14 @@ data class DnsShieldUiState(
     val isLoadingApps: Boolean = false,
     val vpnSettingsModified: Boolean = false,
     val infoCardVisible: Boolean = true
-)
+) {
+    val queryCount: Long get() = diagnostics.received
+    val blockedAds: Long get() = diagnostics.blocked
+    val savedBytes: Long get() = diagnostics.estimatedSavedBytes
+}
 
 data class VpnMetricsState(
-    val queryCount: Int,
-    val blockedAds: Int,
-    val savedBytes: Long,
+    val diagnostics: DnsDiagnosticsSnapshot,
     val logs: List<String>
 )
 
@@ -96,14 +97,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     private val _vpnLifecycleState = MutableStateFlow(DnsVpnService.lifecycleStateFlow.value)
     val vpnLifecycleState = _vpnLifecycleState.asStateFlow()
 
-    private val _queryCount = MutableStateFlow(DnsVpnService.queryCountFlow.value)
-    val queryCount = _queryCount.asStateFlow()
-
-    private val _blockedAds = MutableStateFlow(DnsVpnService.blockedAdsFlow.value)
-    val blockedAds = _blockedAds.asStateFlow()
-
-    private val _savedBytes = MutableStateFlow(DnsVpnService.savedBytesFlow.value)
-    val savedBytes = _savedBytes.asStateFlow()
+    private val _diagnostics = MutableStateFlow(DnsVpnService.diagnosticsFlow.value)
 
     private val _activeDns = MutableStateFlow(DnsVpnService.activeDnsFlow.value)
     val activeDns = _activeDns.asStateFlow()
@@ -160,12 +154,10 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     )
 
     private val vpnMetricsStateFlow: Flow<VpnMetricsState> = combine(
-        _queryCount,
-        _blockedAds,
-        _savedBytes,
+        _diagnostics,
         _liveLogs
-    ) { q, b, s, logs ->
-        VpnMetricsState(q, b, s, logs)
+    ) { diagnostics, logs ->
+        VpnMetricsState(diagnostics, logs)
     }
 
     private val vpnStatusAndDnsStateFlow: Flow<VpnStatusAndDnsState> = combine(
@@ -195,9 +187,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         DnsShieldUiState(
             isRunning = statusDns.isRunning,
             vpnLifecycleState = statusDns.lifecycleState,
-            queryCount = metrics.queryCount,
-            blockedAds = metrics.blockedAds,
-            savedBytes = metrics.savedBytes,
+            diagnostics = metrics.diagnostics,
             activeDns = statusDns.activeDns,
             logs = metrics.logs,
             dnsServers = statusDns.dnsServers,
@@ -214,9 +204,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         initialValue = DnsShieldUiState(
             isRunning = _vpnLifecycleState.value.isRunning,
             vpnLifecycleState = _vpnLifecycleState.value,
-            queryCount = _queryCount.value,
-            blockedAds = _blockedAds.value,
-            savedBytes = _savedBytes.value,
+            diagnostics = _diagnostics.value,
             activeDns = _activeDns.value,
             logs = _liveLogs.value,
             dnsServers = emptyList(),
@@ -250,9 +238,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     init {
         // Direct, high-speed StateFlow collections across the same process using clean helper method
         collectServiceFlow(DnsVpnService.lifecycleStateFlow, _vpnLifecycleState)
-        collectServiceFlow(DnsVpnService.queryCountFlow, _queryCount)
-        collectServiceFlow(DnsVpnService.blockedAdsFlow, _blockedAds)
-        collectServiceFlow(DnsVpnService.savedBytesFlow, _savedBytes)
+        collectServiceFlow(DnsVpnService.diagnosticsFlow, _diagnostics)
         collectServiceFlow(DnsVpnService.activeDnsFlow, _activeDns)
         collectServiceFlow(DnsVpnService.liveLogsFlow, _liveLogs)
 
@@ -496,8 +482,6 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
         // snappiness backup values
         _liveLogs.value = emptyList()
-        _queryCount.value = 0
-        _blockedAds.value = 0
-        _savedBytes.value = 0L
+        _diagnostics.value = DnsDiagnosticsSnapshot()
     }
 }
