@@ -92,6 +92,20 @@ class DohFailureBackoffTest {
         assertTrue(backoff.tryAcquire(OTHER_ENDPOINT))
     }
 
+    @Test
+    fun newNetworkGenerationResetsBackoffAndIgnoresLateFailuresFromOldNetwork() {
+        val backoff = DohFailureBackoff(failureThreshold = 1, cooldownMillis = 10)
+
+        assertTrue(backoff.tryAcquire(ENDPOINT, generation = 0))
+        backoff.recordFailure(ENDPOINT, generation = 0)
+        assertFalse(backoff.tryAcquire(ENDPOINT, generation = 0))
+
+        backoff.resetForGeneration(1)
+        backoff.recordFailure(ENDPOINT, generation = 0)
+
+        assertTrue(backoff.tryAcquire(ENDPOINT, generation = 1))
+    }
+
     private companion object {
         const val ENDPOINT = "https://dns.google/dns-query"
         const val OTHER_ENDPOINT = "https://cloudflare-dns.com/dns-query"
