@@ -42,6 +42,7 @@ if (releaseRequested && !releaseSigningReady) {
 android {
   namespace = "io.github.xiangwang2000.dnsshield"
   compileSdk = 37
+  testBuildType = providers.gradleProperty("androidTestBuildType").getOrElse("debug")
 
   defaultConfig {
     applicationId = "io.github.xiangwang2000.dnsshield"
@@ -50,6 +51,7 @@ android {
     versionCode = 5
     versionName = "1.2.2"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    buildConfigField("boolean", "D14_DEVICE_TEST", "false")
   }
 
   signingConfigs {
@@ -97,6 +99,13 @@ android {
         signingConfig = signingConfigs.getByName("debugConfig")
       }
     }
+    create("d14DeviceTest") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d14test"
+      versionNameSuffix = "-d14test"
+      buildConfigField("boolean", "D14_DEVICE_TEST", "true")
+      matchingFallbacks += listOf("debug")
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -104,6 +113,7 @@ android {
   }
   buildFeatures {
     compose = true
+    buildConfig = true
   }
   sourceSets {
     getByName("androidTest") {

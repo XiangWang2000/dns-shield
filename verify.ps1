@@ -24,6 +24,7 @@ foreach ($scriptName in @(
     "prepare-public-suffix-production.ps1",
     "install-public-suffix-asset.ps1",
     "benchmark-runtime-domain-policy-android.ps1",
+    "tools\d14-device-test.ps1",
     "release.ps1"
 )) {
     $tokens = $null
@@ -78,6 +79,15 @@ Write-Host "==> Gradle build and tests"
     :app:compileDebugKotlin
 if ($LASTEXITCODE -ne 0) {
     throw "Gradle verification failed with exit code $LASTEXITCODE."
+}
+
+Write-Host "==> Isolated D14 device-test APKs"
+& .\gradlew.bat --no-daemon --console=plain `
+    -PandroidTestBuildType=d14DeviceTest `
+    :app:assembleD14DeviceTest `
+    :app:assembleD14DeviceTestAndroidTest
+if ($LASTEXITCODE -ne 0) {
+    throw "D14 Gradle verification failed with exit code $LASTEXITCODE."
 }
 
 Write-Host "Verification passed."
