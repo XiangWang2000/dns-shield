@@ -12,10 +12,11 @@ internal class DnsResponseCacheEntry private constructor(
         val elapsedMillis = (monotonicClock() - insertedAtMillis).coerceAtLeast(0L)
         if (elapsedMillis >= lifetimeMillis) return null
 
-        val elapsedSeconds = elapsedMillis / 1_000L
         return responseData.copyOf().also { response ->
             ttlFields.forEach { field ->
-                writeUnsignedInt(response, field.offset, field.initialTtlSeconds - elapsedSeconds)
+                // Round remaining lifetime down so downstream caches cannot extend expiry.
+                val remainingSeconds = (field.initialTtlSeconds * 1_000L - elapsedMillis) / 1_000L
+                writeUnsignedInt(response, field.offset, remainingSeconds)
             }
         }
     }
