@@ -1030,9 +1030,7 @@ class DnsVpnService : VpnService() {
             .post(requestBody)
             .build()
 
-        val client = getOkHttpClient().newBuilder()
-            .dns(DohBootstrapDns.forEndpoints(resolverEndpoints))
-            .build()
+        val client = getOkHttpClient().forDohEndpoints(resolverEndpoints)
         val call = client.newCall(request)
         call.timeout().timeout(remainingMillis, TimeUnit.MILLISECONDS)
 
@@ -1056,7 +1054,7 @@ class DnsVpnService : VpnService() {
                 override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                     try {
                         if (continuation.isActive) {
-                            if (response.isSuccessful) {
+                            if (response.isSuccessful && response.request.url.isHttps) {
                                 val body = response.body
                                 val bytes = DnsDohResponseValidator.readValidatedBody(
                                     contentType = response.header("Content-Type"),
