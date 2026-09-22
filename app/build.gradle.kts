@@ -31,6 +31,10 @@ val releaseSigningReady = listOf(
 val releaseRequested = gradle.startParameter.taskNames.any {
   it.contains("release", ignoreCase = true)
 }
+val d15InstrumentationRequested = gradle.startParameter.taskNames.any {
+  it.contains("D15testAndroidTest", ignoreCase = true) ||
+    it.contains("connectedD15test", ignoreCase = true)
+}
 
 if (releaseRequested && !releaseSigningReady) {
   throw GradleException(
@@ -50,6 +54,9 @@ android {
     versionCode = 5
     versionName = "1.2.2"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    if (d15InstrumentationRequested) {
+      testBuildType = "d15test"
+    }
   }
 
   signingConfigs {
@@ -96,6 +103,11 @@ android {
       if (file("${rootDir}/debug.keystore").exists()) {
         signingConfig = signingConfigs.getByName("debugConfig")
       }
+    }
+    create("d15test") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d15test"
+      matchingFallbacks += listOf("debug")
     }
   }
   compileOptions {

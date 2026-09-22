@@ -501,10 +501,13 @@ class DnsVpnService : VpnService() {
     private val lifecycleRequests = VpnLifecycleRequestTracker()
     private val userIntentStore by lazy {
         VpnUserIntentStore(
-            getSharedPreferences("vpn_service_state", Context.MODE_PRIVATE)
+            getSharedPreferences(VPN_SERVICE_PREFERENCES, Context.MODE_PRIVATE)
         )
     }
     private var latestLifecycleStartId = 0
+
+    private fun systemAlwaysOnEnabled(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isAlwaysOn
 
     private sealed class LifecycleCommand {
         data class Start(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
@@ -1070,14 +1073,14 @@ class DnsVpnService : VpnService() {
             }
             null -> {
                 val userIntent = userIntentStore.snapshot()
-                if (userIntent.shouldRecoverFromSystemStart()) {
+                if (userIntent.shouldRecoverFromSystemStart(systemAlwaysOnEnabled())) {
                     addLog("System recovery command received; restoring the requested VPN state")
                     val requestGeneration = lifecycleRequests.nextRequest()
                     lifecycleCommands.trySend(LifecycleCommand.Start(startId, requestGeneration))
                 }
             }
         }
-        return if (userIntentStore.snapshot().shouldUseStickyServiceStart()) {
+        return if (userIntentStore.snapshot().shouldUseStickyServiceStart(systemAlwaysOnEnabled())) {
             START_STICKY
         } else {
             START_NOT_STICKY
