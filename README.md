@@ -20,7 +20,7 @@ DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標
 
 DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆：
 
-- 目前只處理由系統 VPN DNS 路徑送入的 IPv4 UDP/53 查詢。
+- 目前只處理由系統 VPN DNS 路徑送入的 IPv4 UDP/53 查詢。DNS/TCP framing 僅有可測的基礎元件，尚未接入 `VpnService`/TUN；在完成真實 DNS client、連線生命週期與裝置端到端驗收前，不能視為支援本機 TCP/53。
 - App 自行使用 DoH、DoT、非標準連接埠、直接 IP 連線或其他繞過系統 DNS 的方式，不會被此工具攔截。
 - DNS 層規則無法阻擋與正常內容共用網域的廣告，也無法保證涵蓋所有廣告、追蹤或惡意網域。
 - App 不會在執行期間下載遠端規則；production blocklist 只會隨經驗證的新 APK 更新。私有 override 缺失時使用 APK 內規則，損壞時則安全退回既有內建規則。
