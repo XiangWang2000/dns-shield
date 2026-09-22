@@ -17,6 +17,20 @@ import kotlin.test.assertTrue
 
 class DnsResponseCacheTest {
     @Test
+    fun fractionalSecondsNeverExtendDownstreamCacheExpiry() {
+        val queryBytes = DnsTestMessages.query(transactionId = 0x2021)
+        val query = parsedQuery(queryBytes)
+        var monotonicMillis = 10_000L
+        val entry = assertNotNull(DnsResponseCacheEntry.create(positiveResponse(queryBytes, ttl = 4), query) { monotonicMillis })
+        for ((elapsed, expected) in listOf(0L to 4L, 1L to 3L, 999L to 3L, 1_000L to 3L, 1_999L to 2L, 3_999L to 0L)) {
+            monotonicMillis = 10_000L + elapsed
+            assertEquals(expected, onlyRecord(entry.responseAtCurrentTime()).ttl)
+        }
+        monotonicMillis = 14_000L
+        assertNull(entry.responseAtCurrentTime())
+    }
+
+    @Test
     fun ttlZeroIsNotCachedAndTtlOneExpiresAtOneSecond() {
         val queryBytes = DnsTestMessages.query(transactionId = 0x2011)
         val query = parsedQuery(queryBytes)
