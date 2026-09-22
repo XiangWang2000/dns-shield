@@ -99,6 +99,15 @@ class DnsVpnService : VpnService() {
             }
         }
 
+        internal fun resetD14Diagnostics() {
+            diagnosticMetrics.reset()
+            resetD14PacketRejectionCounts()
+            diagnosticsFlow.value = diagnosticMetrics.snapshot()
+        }
+
+        internal fun d14DiagnosticsSnapshot(): DnsDiagnosticsSnapshot =
+            diagnosticMetrics.snapshot()
+
         internal fun d14PacketRejectionCountsSnapshot(): Map<String, Long> =
             PacketRejectionReason.values().associate { reason ->
                 reason.name to d14PacketRejectionCounts.get(reason.ordinal)

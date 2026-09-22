@@ -101,9 +101,9 @@ class D14TunEndToEndBenchmarkTest {
             vpnReadyNanos = SystemClock.elapsedRealtimeNanos()
             waitForSelectedValidatedPhysicalNetwork(context, 5_000L)
             assertTrue("Policy assembly should be measured in the D14 target.", DnsVpnService.d14PolicyAssemblyNanos.get() > 0L)
-            val initial = DnsVpnService.diagnosticsFlow.value
+            DnsVpnService.resetD14Diagnostics()
+            val initial = DnsVpnService.d14DiagnosticsSnapshot()
             diagnosticsBefore = initial
-            DnsVpnService.resetD14PacketRejectionCounts()
 
             val cacheDomain = "d14-cache-$runId.example.invalid"
             val miss = sendQuery(cacheDomain, 0x1401)
@@ -488,7 +488,9 @@ class D14TunEndToEndBenchmarkTest {
         failure: Throwable?
     ) {
         val nowNanos = SystemClock.elapsedRealtimeNanos()
-        val snapshot = DnsVpnService.diagnosticsFlow.value
+        val snapshot = DnsVpnService.d14DiagnosticsSnapshot()
+        val packetRejectionCounts = DnsVpnService.d14PacketRejectionCountsSnapshot()
+        val diagnosticDeltas = diagnosticDeltasJson(diagnosticsBefore, snapshot, clientTimeouts.get())
         val samplesJson = JSONObject()
         val summariesJson = JSONObject()
         latencySamples.forEach { (scenario, samples) ->
@@ -527,8 +529,8 @@ class D14TunEndToEndBenchmarkTest {
             .put("client_latency_percentiles_ms", summariesJson)
             .put("scenarios", scenarioResults)
             .put("diagnostics", diagnosticsJson(snapshot))
-            .put("diagnostic_deltas", diagnosticDeltasJson(diagnosticsBefore, snapshot, clientTimeouts.get()))
-            .put("packet_rejection_reason_counts", JSONObject(DnsVpnService.d14PacketRejectionCountsSnapshot()))
+            .put("diagnostic_deltas", diagnosticDeltas)
+            .put("packet_rejection_reason_counts", JSONObject(packetRejectionCounts))
             .put("coalesced_wait", JSONObject()
                 .put("sample_scope", "coalesced waiters only; not total worker/admission queue time")
                 .put("sample_count", snapshot.coalescedWait.sampleCount)
@@ -566,6 +568,11 @@ class D14TunEndToEndBenchmarkTest {
 
         val reportFile = java.io.File(context.filesDir, "d14-e2e-$runId.json")
         reportFile.writeText(report.toString(2) + "\n", Charsets.UTF_8)
+        assertEquals(
+            "Rejected diagnostics must equal the parser rejection reason total.",
+            diagnosticDeltas.getLong("rejected"),
+            packetRejectionCounts.values.sum()
+        )
         println("DNS_SHIELD_D14_REPORT=${reportFile.absolutePath}")
     }
 
