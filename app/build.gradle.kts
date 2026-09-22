@@ -39,6 +39,10 @@ if (releaseRequested && !releaseSigningReady) {
   )
 }
 
+val d08InstrumentationRequested = gradle.startParameter.taskNames.any {
+  it.contains("D08test", ignoreCase = true)
+}
+
 android {
   namespace = "io.github.xiangwang2000.dnsshield"
   compileSdk = 37
@@ -50,6 +54,7 @@ android {
     versionCode = 5
     versionName = "1.2.2"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    if (d08InstrumentationRequested) testBuildType = "d08test"
   }
 
   signingConfigs {
@@ -96,6 +101,11 @@ android {
       if (file("${rootDir}/debug.keystore").exists()) {
         signingConfig = signingConfigs.getByName("debugConfig")
       }
+    }
+    create("d08test") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d08test"
+      matchingFallbacks += listOf("debug")
     }
   }
   compileOptions {
