@@ -3,6 +3,7 @@ package io.github.xiangwang2000.dnsshield.service
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.EOFException
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.ReadableByteChannel
 import java.nio.channels.WritableByteChannel
@@ -10,8 +11,23 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class DnsTcpFrameCodecTest {
+    @org.junit.Test(timeout = 1000)
+    fun rejectsZeroProgressReadWithoutClosingCallerChannel() {
+        val input = PartialReadableChannel(ByteArrayInputStream(byteArrayOf(0, 1, 42)), maxChunk = 0)
+        assertFailsWith<IOException> { DnsTcpFrameCodec.readFrame(input) }
+        assertTrue(input.isOpen)
+    }
+
+    @org.junit.Test(timeout = 1000)
+    fun rejectsZeroProgressWriteWithoutClosingCallerChannel() {
+        val output = PartialWritableChannel(ByteArrayOutputStream(), maxChunk = 0)
+        assertFailsWith<IOException> { DnsTcpFrameCodec.writeFrame(output, byteArrayOf(42)) }
+        assertTrue(output.isOpen)
+    }
+
     @Test
     fun writesAndReadsMultipleFramesAcrossPartialChannels() {
         val bytes = ByteArrayOutputStream()

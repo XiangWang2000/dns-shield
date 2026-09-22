@@ -9,7 +9,11 @@ import java.nio.channels.Channels
 import java.nio.channels.ReadableByteChannel
 import java.nio.channels.WritableByteChannel
 
-/** Reads and writes one DNS-over-TCP length-prefixed message. */
+/**
+ * Reads and writes DNS-over-TCP frames through blocking streams/channels.
+ * Zero-progress I/O is rejected; non-blocking readiness belongs to the caller.
+ * The caller owns the connection and must close it to cancel blocking I/O.
+ */
 internal object DnsTcpFrameCodec {
     const val MAX_DNS_MESSAGE_BYTES = 0xFFFF
 
@@ -65,7 +69,7 @@ internal object DnsTcpFrameCodec {
         while (frame.hasRemaining()) {
             val written = channel.write(frame)
             if (written < 0) throw EOFException("DNS/TCP channel closed while writing")
-            if (written == 0) Thread.yield()
+            if (written == 0) throw IOException("DNS/TCP blocking channel made no write progress")
         }
     }
 
@@ -83,7 +87,7 @@ internal object DnsTcpFrameCodec {
                     throw EOFException("Unexpected EOF in DNS/TCP frame")
                 }
                 read > 0 -> readAny = true
-                else -> Thread.yield()
+                else -> throw IOException("DNS/TCP blocking channel made no read progress")
             }
         }
         return true
