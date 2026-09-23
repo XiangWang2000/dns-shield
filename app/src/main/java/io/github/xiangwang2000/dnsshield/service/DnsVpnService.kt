@@ -488,16 +488,19 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private fun reloadDomainPolicy() {
+    private suspend fun reloadDomainPolicy(requestGeneration: Long) {
         try {
-            val assembly = RuntimeDomainPolicy.assemble(
-                filesDirectory = filesDir,
-                loadBundledBlocklist = productionBlocklistLoader::load,
-                bundledSourceMetadata = productionBlocklistLoader.sourceMetadata,
-                registrableDomainResolverProvider = {
-                    publicSuffixResolverOwner.resolverOrNull()
-                }
-            )
+            val assembly = withContext(Dispatchers.IO) {
+                RuntimeDomainPolicy.assemble(
+                    filesDirectory = filesDir,
+                    loadBundledBlocklist = productionBlocklistLoader::load,
+                    bundledSourceMetadata = productionBlocklistLoader.sourceMetadata,
+                    registrableDomainResolverProvider = {
+                        publicSuffixResolverOwner.resolverOrNull()
+                    }
+                )
+            }
+            if (!lifecycleRequests.isCurrent(requestGeneration)) return
             domainPolicy.install(assembly) {
                 invalidatePolicyState()
             }
@@ -509,7 +512,10 @@ class DnsVpnService : VpnService() {
                 },
                 reloadError = null
             )
+        } catch (exception: CancellationException) {
+            throw exception
         } catch (exception: Exception) {
+            if (!lifecycleRequests.isCurrent(requestGeneration)) return
             val reason = exception.message?.takeIf(String::isNotBlank)
                 ?: exception.javaClass.simpleName
             Log.e(TAG, "Failed to reload domain policy", exception)
@@ -656,7 +662,7 @@ class DnsVpnService : VpnService() {
                 startForeground(NOTIFICATION_ID, notification)
             }
 
-            withContext(Dispatchers.IO) { reloadDomainPolicy() }
+            reloadDomainPolicy(requestGeneration)
             if (!lifecycleRequests.isCurrent(requestGeneration)) {
                 abandonSupersededStartup()
                 return
