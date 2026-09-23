@@ -863,8 +863,10 @@ class DnsVpnService : VpnService() {
                 .build()
             manager.registerNetworkCallback(request, registration.underlyingCallback)
             manager.registerDefaultNetworkCallback(registration.defaultCallback)
-            registration.bestMatchingCallback?.let { callback ->
-                manager.registerBestMatchingNetworkCallback(request, callback, Handler(Looper.getMainLooper()))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                registration.bestMatchingCallback?.let { callback ->
+                    manager.registerBestMatchingNetworkCallback(request, callback, Handler(Looper.getMainLooper()))
+                }
             }
         } catch (exception: Exception) {
             unregisterUnderlyingNetworkCallback()
