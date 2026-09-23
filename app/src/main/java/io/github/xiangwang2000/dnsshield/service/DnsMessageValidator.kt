@@ -45,6 +45,21 @@ internal enum class RejectionReason {
     TRAILING_DATA
 }
 
+internal enum class DnsRecordSection {
+    ANSWER,
+    AUTHORITY,
+    ADDITIONAL
+}
+
+internal data class DnsCacheRecordMetadata(
+    val type: Int,
+    val section: DnsRecordSection,
+    val ttlOffset: Int,
+    val ttlSeconds: Long,
+    val soaMinimumSeconds: Long?,
+    val rrsigTypeCovered: Int?
+)
+
 internal object DnsMessageValidator {
     const val MAX_DNS_MESSAGE_BYTES = 4096
     private const val HEADER_BYTES = 12
@@ -174,11 +189,50 @@ internal object DnsMessageValidator {
     }
 
     fun isCacheableResponse(response: ByteArray, query: ParsedDnsQuery): Boolean {
-        if (!isValidResponse(response, query)) return false
-        val flags = readUnsignedShort(response, 2)
-        val truncated = flags and 0x0200 != 0
-        val responseCode = flags and 0x000F
-        return !truncated && (responseCode == 0 || responseCode == 3) && !containsOptRecord(response)
+        return DnsResponseCacheEntry.create(response, query) { 0L } != null
+    }
+
+    internal fun parseCacheRecordMetadata(
+        response: ByteArray,
+        query: ParsedDnsQuery
+    ): List<DnsCacheRecordMetadata>? {
+        if (!isValidResponse(response, query)) return null
+        val parsedQuestion = parseQuestion(response, HEADER_BYTES) ?: return null
+        val sectionCounts = intArrayOf(
+            readUnsignedShort(response, 6),
+            readUnsignedShort(response, 8),
+            readUnsignedShort(response, 10)
+        )
+        val sections = DnsRecordSection.values()
+        val records = ArrayList<DnsCacheRecordMetadata>()
+        var offset = parsedQuestion.nextOffset
+
+        sectionCounts.forEachIndexed { sectionIndex, count ->
+            repeat(count) {
+                val record = parseRecord(response, offset) ?: return null
+                val soaMinimum = if (record.type == 6) {
+                    parseSoaMinimum(response, record.rdataOffset, record.rdataOffset + record.rdataLength)
+                        ?: return null
+                } else {
+                    null
+                }
+                if (record.type == 46 && record.rdataLength < 2) return null
+                records += DnsCacheRecordMetadata(
+                    type = record.type,
+                    section = sections[sectionIndex],
+                    ttlOffset = record.ttlOffset,
+                    ttlSeconds = record.ttlSeconds,
+                    soaMinimumSeconds = soaMinimum,
+                    rrsigTypeCovered = if (record.type == 46) {
+                        readUnsignedShort(response, record.rdataOffset)
+                    } else {
+                        null
+                    }
+                )
+                offset = record.nextOffset
+            }
+        }
+        return records.takeIf { offset == response.size }
     }
 
     fun prepareUpstreamQuery(query: ParsedDnsQuery): ByteArray = query.wire.copyOf().also { wire ->
@@ -232,7 +286,16 @@ internal object DnsMessageValidator {
 
     private data class ParsedName(val labels: List<ByteArray>, val nextOffset: Int)
     private data class ParsedQuestion(val question: DnsQuestion, val nextOffset: Int)
-    private data class ParsedRecord(val type: Int, val clazz: Int, val classOffset: Int, val nextOffset: Int)
+    private data class ParsedRecord(
+        val type: Int,
+        val clazz: Int,
+        val classOffset: Int,
+        val ttlOffset: Int,
+        val ttlSeconds: Long,
+        val rdataOffset: Int,
+        val rdataLength: Int,
+        val nextOffset: Int
+    )
     private data class OptUdpPayload(val size: Int, val classOffset: Int)
 
     private fun parseQuestion(message: ByteArray, offset: Int): ParsedQuestion? {
@@ -365,8 +428,22 @@ internal object DnsMessageValidator {
             type = type,
             clazz = readUnsignedShort(message, fixedFieldsOffset + 2),
             classOffset = fixedFieldsOffset + 2,
+            ttlOffset = fixedFieldsOffset + 4,
+            ttlSeconds = readUnsignedInt(message, fixedFieldsOffset + 4),
+            rdataOffset = dataStart,
+            rdataLength = dataLength,
             nextOffset = dataEnd
         )
+    }
+
+    private fun parseSoaMinimum(message: ByteArray, dataStart: Int, dataEnd: Int): Long? {
+        val primaryServer = parseName(message, dataStart) ?: return null
+        if (primaryServer.nextOffset > dataEnd) return null
+        val responsibleMailbox = parseName(message, primaryServer.nextOffset) ?: return null
+        if (responsibleMailbox.nextOffset > dataEnd - 20 || dataEnd - responsibleMailbox.nextOffset != 20) {
+            return null
+        }
+        return readUnsignedInt(message, dataEnd - 4)
     }
 
     private fun isValidRecordData(
@@ -496,6 +573,12 @@ internal object DnsMessageValidator {
         }
         return offset == dataEnd
     }
+
+    private fun readUnsignedInt(message: ByteArray, offset: Int): Long =
+        ((message[offset].toLong() and 0xFF) shl 24) or
+            ((message[offset + 1].toLong() and 0xFF) shl 16) or
+            ((message[offset + 2].toLong() and 0xFF) shl 8) or
+            (message[offset + 3].toLong() and 0xFF)
 
     private fun toDomainName(labels: List<ByteArray>): String? {
         if (labels.isEmpty()) return "."

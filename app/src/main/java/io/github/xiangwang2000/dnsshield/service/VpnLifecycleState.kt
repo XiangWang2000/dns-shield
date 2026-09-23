@@ -39,3 +39,14 @@ internal class VpnLifecycleRequestTracker {
     fun isCurrent(requestGeneration: Long): Boolean =
         generation.get() == requestGeneration
 }
+
+internal fun isCurrentTunnelEnded(
+    endedGeneration: Long,
+    currentGeneration: Long,
+    endedDescriptor: Any,
+    currentDescriptor: Any?,
+    lifecycleState: VpnLifecycleState
+): Boolean =
+    endedGeneration == currentGeneration &&
+        endedDescriptor === currentDescriptor &&
+        lifecycleState == VpnLifecycleState.RUNNING

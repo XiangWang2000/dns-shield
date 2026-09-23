@@ -168,6 +168,75 @@ internal object DnsTestMessages {
         )
     }
 
+    fun responseWithRecords(
+        query: ByteArray,
+        answers: List<DnsTestResourceRecord> = emptyList(),
+        authorities: List<DnsTestResourceRecord> = emptyList(),
+        additionals: List<DnsTestResourceRecord> = emptyList(),
+        transactionId: Int = readUnsignedShort(query, 0),
+        flags: Int = 0x8180
+    ): ByteArray {
+        val sections = listOf(answers, authorities, additionals)
+        val base = response(query, transactionId = transactionId, flags = flags)
+        val recordsSize = sections.sumOf { section -> section.sumOf { it.wireSize() } }
+        return base.copyOf(base.size + recordsSize).also { message ->
+            writeShort(message, 6, answers.size)
+            writeShort(message, 8, authorities.size)
+            writeShort(message, 10, additionals.size)
+
+            var offset = base.size
+            sections.forEach { section ->
+                section.forEach { record ->
+                    val owner = when {
+                        record.ownerName == null -> byteArrayOf(0xC0.toByte(), 12)
+                        record.ownerName.isEmpty() -> byteArrayOf(0)
+                        else -> encodeName(record.ownerName)
+                    }
+                    System.arraycopy(owner, 0, message, offset, owner.size)
+                    offset += owner.size
+                    writeShort(message, offset, record.type)
+                    writeShort(message, offset + 2, record.clazz)
+                    writeUnsignedInt(message, offset + 4, record.ttl)
+                    writeShort(message, offset + 8, record.data.size)
+                    offset += 10
+                    System.arraycopy(record.data, 0, message, offset, record.data.size)
+                    offset += record.data.size
+                }
+            }
+        }
+    }
+
+    fun records(message: ByteArray): List<DnsTestRecordView> {
+        require(message.size >= 12)
+        var offset = skipWireName(message, 12) + 4
+        val result = ArrayList<DnsTestRecordView>()
+        val counts = intArrayOf(
+            readUnsignedShort(message, 6),
+            readUnsignedShort(message, 8),
+            readUnsignedShort(message, 10)
+        )
+        counts.forEachIndexed { section, count ->
+            repeat(count) {
+                val fieldsOffset = skipWireName(message, offset)
+                val dataOffset = fieldsOffset + 10
+                val dataLength = readUnsignedShort(message, fieldsOffset + 8)
+                result += DnsTestRecordView(
+                    section = section,
+                    type = readUnsignedShort(message, fieldsOffset),
+                    clazz = readUnsignedShort(message, fieldsOffset + 2),
+                    ttlOffset = fieldsOffset + 4,
+                    ttl = readUnsignedInt(message, fieldsOffset + 4),
+                    dataOffset = dataOffset,
+                    dataLength = dataLength
+                )
+                offset = dataOffset + dataLength
+                require(offset <= message.size)
+            }
+        }
+        require(offset == message.size)
+        return result
+    }
+
     fun queryQuestionEnd(query: ByteArray): Int {
         var offset = 12
         while (true) {
@@ -224,7 +293,72 @@ internal object DnsTestMessages {
         bytes[offset] = (value ushr 8).toByte()
         bytes[offset + 1] = value.toByte()
     }
+
+    private fun writeUnsignedInt(bytes: ByteArray, offset: Int, value: Long) {
+        require(value in 0..0xFFFF_FFFFL)
+        bytes[offset] = (value ushr 24).toByte()
+        bytes[offset + 1] = (value ushr 16).toByte()
+        bytes[offset + 2] = (value ushr 8).toByte()
+        bytes[offset + 3] = value.toByte()
+    }
+
+    private fun readUnsignedInt(bytes: ByteArray, offset: Int): Long =
+        ((bytes[offset].toLong() and 0xFF) shl 24) or
+            ((bytes[offset + 1].toLong() and 0xFF) shl 16) or
+            ((bytes[offset + 2].toLong() and 0xFF) shl 8) or
+            (bytes[offset + 3].toLong() and 0xFF)
+
+    private fun skipWireName(bytes: ByteArray, startOffset: Int): Int {
+        var offset = startOffset
+        while (offset < bytes.size) {
+            val length = bytes[offset].toInt() and 0xFF
+            when {
+                length == 0 -> return offset + 1
+                length and 0xC0 == 0xC0 -> return offset + 2
+                length and 0xC0 != 0 -> error("Invalid DNS name encoding")
+                else -> {
+                    offset += length + 1
+                    require(offset <= bytes.size)
+                }
+            }
+        }
+        error("Truncated DNS name")
+    }
 }
+
+internal data class DnsTestResourceRecord(
+    val type: Int,
+    val ttl: Long,
+    val data: ByteArray,
+    val clazz: Int = 1,
+    val ownerName: String? = null
+) {
+    init {
+        require(type in 0..0xFFFF)
+        require(clazz in 0..0xFFFF)
+        require(ttl in 0..0xFFFF_FFFFL)
+        require(data.size <= 0xFFFF)
+    }
+
+    internal fun wireSize(): Int {
+        val ownerSize = when {
+            ownerName == null -> 2
+            ownerName.isEmpty() -> 1
+            else -> ownerName.split('.').sumOf { label -> label.toByteArray(Charsets.US_ASCII).size + 1 } + 1
+        }
+        return ownerSize + 10 + data.size
+    }
+}
+
+internal data class DnsTestRecordView(
+    val section: Int,
+    val type: Int,
+    val clazz: Int,
+    val ttlOffset: Int,
+    val ttl: Long,
+    val dataOffset: Int,
+    val dataLength: Int
+)
 
 internal data class IndependentDnsResponse(
     val name: String,

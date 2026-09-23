@@ -49,6 +49,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
+import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
 import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
@@ -232,6 +234,7 @@ fun DnsShieldScreen(
                             dnsServers = uiState.dnsServers,
                             activeDnsServer = uiState.activeDnsServer,
                             dnsTransportStatus = uiState.dnsTransportStatus,
+                            rulePolicyStatus = uiState.rulePolicyStatus,
                             onSelectDns = onSelectDns,
                             onAddDnsClicked = { showAddDnsDialog = true },
                             onDeleteDns = onDeleteDns,
@@ -664,6 +667,7 @@ fun ControlCenterTab(
     dnsServers: List<DnsServer>,
     activeDnsServer: DnsServer?,
     dnsTransportStatus: String,
+    rulePolicyStatus: RulePolicyStatus,
     onSelectDns: (Int) -> Unit,
     onAddDnsClicked: () -> Unit,
     onDeleteDns: (DnsServer) -> Unit,
@@ -736,6 +740,10 @@ fun ControlCenterTab(
                     )
                 }
             }
+        }
+
+        item {
+            RuleStatusCard(rulePolicyStatus)
         }
 
         items(dnsServers, key = { it.id }) { server ->
@@ -847,6 +855,42 @@ fun ControlCenterTab(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RuleStatusCard(status: RulePolicyStatus) {
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, ColorBorder, RoundedCornerShape(12.dp))
+            .testTag("rule_status_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Text(
+                text = "攔截規則狀態",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = ColorTextPrimary
+            )
+            DomainPolicyDiagnostics.details(status).forEach { line ->
+                Text(
+                    text = line,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    color = if (line.startsWith("降級原因：") || line.contains("載入失敗")) {
+                        CyberAmber
+                    } else {
+                        ColorTextSecondary
+                    }
+                )
             }
         }
     }
