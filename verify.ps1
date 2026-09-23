@@ -75,6 +75,7 @@ Write-Host "==> Gradle build and tests"
 & .\gradlew.bat --no-daemon --console=plain `
     :app:assembleDebug `
     :app:assembleDebugAndroidTest `
+    :app:lintDebug `
     :app:testDebugUnitTest `
     :app:compileDebugKotlin
 if ($LASTEXITCODE -ne 0) {
