@@ -330,11 +330,26 @@ class DnsUdpUpstreamClientTest {
         }
     }
 
+    private fun bindDualProtocolServers(loopback: InetAddress): Pair<DatagramSocket, ServerSocket> {
+        // TCP and UDP have separate port namespaces; an ephemeral port in one may be busy in the other.
+        repeat(20) {
+            val tcpServer = ServerSocket(0, 1, loopback)
+            try {
+                return DatagramSocket(tcpServer.localPort, loopback) to tcpServer
+            } catch (_: java.net.BindException) {
+                tcpServer.close()
+            } catch (failure: Exception) {
+                tcpServer.close()
+                throw failure
+            }
+        }
+        throw java.net.BindException("Could not reserve the same loopback port for UDP and TCP")
+    }
+
     @Test
     fun truncatedUdpResponseRetriesTheSameUpstreamOverTcpWithinTheDeadline() = runBlocking {
         val loopback = InetAddress.getByName("127.0.0.1")
-        val udpServer = DatagramSocket(0, loopback)
-        val tcpServer = ServerSocket(udpServer.localPort, 1, loopback)
+        val (udpServer, tcpServer) = bindDualProtocolServers(loopback)
         val client = DatagramSocket()
         val queryBytes = DnsTestMessages.query()
         val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
