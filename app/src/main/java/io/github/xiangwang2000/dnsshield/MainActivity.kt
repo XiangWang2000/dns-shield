@@ -50,6 +50,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.DnsServer
+import io.github.xiangwang2000.dnsshield.service.DnsDiagnosticsSnapshot
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
 import io.github.xiangwang2000.dnsshield.ui.theme.*
 import io.github.xiangwang2000.dnsshield.viewmodel.AppInfo
@@ -217,6 +218,7 @@ fun DnsShieldScreen(
                         ControlCenterTab(
                             dnsServers = uiState.dnsServers,
                             activeDnsServer = uiState.activeDnsServer,
+                            diagnostics = uiState.diagnostics,
                             rulePolicyStatus = uiState.rulePolicyStatus,
                             onSelectDns = onSelectDns,
                             onAddDnsClicked = { showAddDnsDialog = true },
@@ -307,8 +309,8 @@ fun AppHeader(isRunning: Boolean) {
 @Composable
 fun ProtectionStatusCard(
     lifecycleState: VpnLifecycleState,
-    queryCount: Int,
-    blockedAds: Int,
+    queryCount: Long,
+    blockedAds: Long,
     savedBytesText: String,
     activeDns: String,
     onToggleVpn: () -> Unit
@@ -418,7 +420,7 @@ fun ProtectionStatusCard(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     StatCard(
-                        title = "DNS 解析",
+                        title = "DNS 請求",
                         value = "$queryCount 次",
                         icon = Icons.AutoMirrored.Filled.AltRoute,
                         iconTint = CyberSky,
@@ -639,6 +641,7 @@ fun StatCard(
 fun ControlCenterTab(
     dnsServers: List<DnsServer>,
     activeDnsServer: DnsServer?,
+    diagnostics: DnsDiagnosticsSnapshot,
     rulePolicyStatus: RulePolicyStatus,
     onSelectDns: (Int) -> Unit,
     onAddDnsClicked: () -> Unit,
@@ -765,6 +768,69 @@ fun ControlCenterTab(
                     }
                 }
             }
+        }
+
+        item {
+            DnsDiagnosticsCard(diagnostics)
+        }
+    }
+}
+
+@Composable
+private fun DnsDiagnosticsCard(diagnostics: DnsDiagnosticsSnapshot) {
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, ColorBorder, RoundedCornerShape(12.dp))
+            .testTag("dns_diagnostics_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text("DNS 診斷", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ColorTextPrimary)
+            Text(
+                "收到 ${diagnostics.received}｜解析 ${diagnostics.resolved}｜攔截 ${diagnostics.blocked}",
+                fontSize = 12.sp,
+                color = ColorTextPrimary
+            )
+            Text(
+                "失敗 ${diagnostics.failed}（超載 ${diagnostics.overloaded}）｜拒絕 ${diagnostics.rejected}",
+                fontSize = 12.sp,
+                color = ColorTextSecondary
+            )
+            Text(
+                "快取命中 ${diagnostics.cacheHits}｜合併同查詢 ${diagnostics.coalesced}",
+                fontSize = 12.sp,
+                color = ColorTextSecondary
+            )
+            Text(
+                "上游呼叫：DoH 已排入 OkHttp ${diagnostics.dohCallsQueued}｜UDP 已送出 ${diagnostics.udpAttempts}｜TCP DNS ${diagnostics.tcpAttempts}",
+                fontSize = 12.sp,
+                color = ColorTextSecondary
+            )
+            Text(
+                "UDP 備援路徑 ${diagnostics.fallbackAttempts}｜次要 DNS 重試 ${diagnostics.udpRetryAttempts}",
+                fontSize = 12.sp,
+                color = ColorTextSecondary
+            )
+            Text(
+                "待處理 ${diagnostics.pending}（最高 ${diagnostics.peakPending}）",
+                fontSize = 12.sp,
+                color = ColorTextSecondary
+            )
+            val latency = diagnostics.latency
+            Text(
+                text = if (latency.sampleCount == 0) {
+                    "延遲：尚無資料"
+                } else {
+                    "最近 ${latency.sampleCount} 筆延遲：P50 ${latency.p50Millis} ms｜P95 ${latency.p95Millis} ms"
+                },
+                fontSize = 12.sp,
+                color = ColorTextSecondary
+            )
         }
     }
 }

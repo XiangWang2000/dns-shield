@@ -5,6 +5,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.coroutines.CoroutineContext
@@ -15,6 +16,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertContentEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -282,6 +284,8 @@ class DnsUdpUpstreamClientTest {
         val expectedResponse = DnsTestMessages.response(queryBytes)
         val primaryReceived = CountDownLatch(1)
         val secondaryReceived = CountDownLatch(1)
+        val udpAttempts = AtomicInteger()
+        val udpRetries = AtomicInteger()
         val silentPrimary = thread(name = "silent-primary-dns") {
             runCatching {
                 primary.receive(DatagramPacket(ByteArray(4096), 4096))
@@ -305,13 +309,17 @@ class DnsUdpUpstreamClientTest {
                     DnsUdpUpstreamEndpoint(loopback, primary.localPort),
                     DnsUdpUpstreamEndpoint(loopback, secondary.localPort)
                 ),
-                deadline = deadline
+                deadline = deadline,
+                onAttempt = { udpAttempts.incrementAndGet() },
+                onRetry = { udpRetries.incrementAndGet() }
             )
             val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L
 
             assertContentEquals(expectedResponse, response)
             assertTrue(primaryReceived.await(1, TimeUnit.SECONDS))
             assertTrue(secondaryReceived.await(1, TimeUnit.SECONDS))
+            assertEquals(2, udpAttempts.get())
+            assertEquals(1, udpRetries.get())
             assertTrue(elapsedMillis < 1_000, "UDP fallback exceeded the total deadline: ${elapsedMillis}ms")
             respondingSecondary.join(1_000)
             assertTrue(!respondingSecondary.isAlive)

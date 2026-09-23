@@ -27,7 +27,8 @@ internal object DnsUdpUpstreamClient {
         port: Int = 53,
         deadline: DnsRequestDeadline,
         attemptTimeoutMillis: Long = DEFAULT_ATTEMPT_TIMEOUT_MILLIS,
-        ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+        onAttempt: () -> Unit = {}
     ): ByteArray? {
         val startedAtNanos = System.nanoTime()
         val remainingMillis = deadline.remainingMillis(startedAtNanos)
@@ -42,7 +43,7 @@ internal object DnsUdpUpstreamClient {
             continuation.invokeOnCancellation { socket.close() }
             ioDispatcher.dispatch(continuation.context, Runnable {
                 val result = runCatching {
-                    queryUntilDeadline(socket, query, server, port, attemptDeadlineNanos)
+                    queryUntilDeadline(socket, query, server, port, attemptDeadlineNanos, onAttempt)
                 }
                 if (continuation.isActive) continuation.resumeWith(result)
             })
@@ -53,7 +54,9 @@ internal object DnsUdpUpstreamClient {
         socket: DatagramSocket,
         query: ParsedDnsQuery,
         upstreams: List<DnsUdpUpstreamEndpoint>,
-        deadline: DnsRequestDeadline
+        deadline: DnsRequestDeadline,
+        onAttempt: () -> Unit = {},
+        onRetry: () -> Unit = {}
     ): ByteArray? {
         var lastFailure: Exception? = null
         upstreams.forEachIndexed { index, upstream ->
@@ -72,7 +75,11 @@ internal object DnsUdpUpstreamClient {
                     server = upstream.address,
                     port = upstream.port,
                     deadline = deadline,
-                    attemptTimeoutMillis = attemptBudgetMillis
+                    attemptTimeoutMillis = attemptBudgetMillis,
+                    onAttempt = {
+                        onAttempt()
+                        if (index > 0) onRetry()
+                    }
                 )
                 if (response != null) return response
             } catch (exception: CancellationException) {
@@ -103,7 +110,8 @@ internal object DnsUdpUpstreamClient {
         query: ParsedDnsQuery,
         server: InetAddress,
         port: Int,
-        deadlineNanos: Long
+        deadlineNanos: Long,
+        onAttempt: () -> Unit = {}
     ): ByteArray? {
         if (deadlineNanos - System.nanoTime() <= 0L) return null
 
@@ -111,6 +119,7 @@ internal object DnsUdpUpstreamClient {
         socket.connect(server, port)
         val upstreamQuery = DnsMessageValidator.prepareUpstreamQuery(query)
         socket.send(DatagramPacket(upstreamQuery, upstreamQuery.size, server, port))
+        onAttempt()
 
         val buffer = ByteArray(DNS_MESSAGE_BUFFER_BYTES)
         while (true) {
