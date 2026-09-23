@@ -28,6 +28,20 @@ DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆
 - 「節省流量」是依被阻擋網域類型推算的參考值，不是實際網路流量量測。
 - 實際解析延遲、耗電與攔截效果會因裝置、Android 版本、網路及 DNS 解析器而異。
 
+## Always-on 與系統恢復
+
+- 服務會持久化最後一次明確的使用者啟用或停用選擇。系統以 null intent
+  恢復服務時，會在使用者最後選擇啟用，或 Android 29 以上已設定 Always-on
+  且 App 尚未記錄明確停用的情況下重新建立隧道。
+- 使用者明確停用服務，或 Android 撤銷 VPN 授權時，服務會清除恢復意圖，避免
+  `START_STICKY` 或系統恢復流程重新啟用 VPN。
+- Manifest 明確宣告支援 Android Always-on；完整的重開機、程序回收、切換 VPN
+  與各 Android 版本的實機驗收仍需逐項執行，不能只以 `START_STICKY` 宣稱完成。
+- Android 24–28 沒有公開的 `isAlwaysOn()` 查詢 API；這些版本只有在 App 曾明確
+  記錄啟用意圖時才會自動恢復，需透過實機流程驗證系統行為。
+- 目前 VPN 只建立 DNS 位址的路由，尚未驗證 Android lockdown 對一般流量的相容性。
+  因此不宣稱支援 lockdown，啟用該模式前應先完成完整流量路徑與實機驗證。
+
 ## 隱私
 
 DNS Shield 不包含帳號、分析 SDK、廣告 SDK或開發者營運的後端服務。DNS 查詢會傳送至使用者選擇的第三方解析器；已安裝 App 清單、排除名單與設定不會由 DNS Shield 上傳。
@@ -73,6 +87,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```powershell
 .\gradlew.bat --no-daemon --console=plain :app:connectedDebugAndroidTest
 ```
+
+D15 的實機 smoke test 使用獨立的 `d15test` build type，套件為
+`io.github.xiangwang2000.dnsshield.d15test`，不會使用正式 Debug 套件的資料。可在
+已連線的裝置上只執行 D15 測試：
+
+```powershell
+.\gradlew.bat :app:assembleD15test :app:assembleD15testAndroidTest
+adb install -r .\app\build\outputs\apk\d15test\app-d15test.apk
+adb install -r .\app\build\outputs\apk\androidTest\d15test\app-d15test-androidTest.apk
+adb shell am instrument -w -r `
+  -e class io.github.xiangwang2000.dnsshield.service.D15ServiceSmokeTest `
+  io.github.xiangwang2000.dnsshield.d15test.test/androidx.test.runner.AndroidJUnitRunner
+adb uninstall io.github.xiangwang2000.dnsshield.d15test.test
+adb uninstall io.github.xiangwang2000.dnsshield.d15test
+```
+
+此 smoke test 只驗證顯式啟動、顯式停止與隔離資料清理；Always-on 重開機、系統回收、
+VPN 切換、授權撤銷及 lockdown 仍需逐項進行實機驗收。
 
 離線 blocklist 編譯器及其測試可獨立執行：
 

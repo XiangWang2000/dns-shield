@@ -434,7 +434,15 @@ class DnsVpnService : VpnService() {
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.IO)
     private val lifecycleCommands = Channel<LifecycleCommand>(Channel.UNLIMITED)
     private val lifecycleRequests = VpnLifecycleRequestTracker()
+    private val userIntentStore by lazy {
+        VpnUserIntentStore(
+            getSharedPreferences(VPN_SERVICE_PREFERENCES, Context.MODE_PRIVATE)
+        )
+    }
     private var latestLifecycleStartId = 0
+
+    private fun systemAlwaysOnEnabled(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isAlwaysOn
 
     private sealed class LifecycleCommand {
         data class Start(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
@@ -989,11 +997,13 @@ class DnsVpnService : VpnService() {
         latestLifecycleStartId = startId
         when (intent?.action) {
             ACTION_START -> {
+                userIntentStore.markExplicitStart()
                 addLog("Starting service command received")
                 val requestGeneration = lifecycleRequests.nextRequest()
                 lifecycleCommands.trySend(LifecycleCommand.Start(startId, requestGeneration))
             }
             ACTION_STOP -> {
+                userIntentStore.markExplicitStop()
                 addLog("Stopping service command received")
                 lifecycleRequests.nextRequest()
                 lifecycleCommands.trySend(LifecycleCommand.Stop(startId))
@@ -1014,8 +1024,20 @@ class DnsVpnService : VpnService() {
             ACTION_CLEAR_LOGS -> {
                 lifecycleCommands.trySend(LifecycleCommand.ClearLogs(startId))
             }
+            null -> {
+                val userIntent = userIntentStore.snapshot()
+                if (userIntent.shouldRecoverFromSystemStart(systemAlwaysOnEnabled())) {
+                    addLog("System recovery command received; restoring the requested VPN state")
+                    val requestGeneration = lifecycleRequests.nextRequest()
+                    lifecycleCommands.trySend(LifecycleCommand.Start(startId, requestGeneration))
+                }
+            }
         }
-        return START_NOT_STICKY
+        return if (userIntentStore.snapshot().shouldUseStickyServiceStart(systemAlwaysOnEnabled())) {
+            START_STICKY
+        } else {
+            START_NOT_STICKY
+        }
     }
 
     override fun onDestroy() {
@@ -1028,6 +1050,7 @@ class DnsVpnService : VpnService() {
 
     override fun onRevoke() {
         addLog("VPN connection revoked by system settings")
+        userIntentStore.markAuthorizationRevoke()
         lifecycleRequests.nextRequest()
         lifecycleCommands.trySend(LifecycleCommand.Stop(latestLifecycleStartId))
         super.onRevoke()
