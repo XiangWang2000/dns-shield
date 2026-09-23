@@ -1252,7 +1252,7 @@ fun LogsTab(
                                     DnsDecisionReason.USER_RULE -> "使用者規則"
                                     DnsDecisionReason.PROTECTION_LIST -> "防護名單"
                                 }
-                                val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                                val time = java.text.SimpleDateFormat("HH:mm:ss", androidx.compose.ui.platform.LocalConfiguration.current.locales[0])
                                     .format(java.util.Date(event.occurredAtMillis))
                                 Text("$decisionLabel · $reasonLabel · $time", color = ColorTextSecondary, fontSize = 11.sp)
                             }
