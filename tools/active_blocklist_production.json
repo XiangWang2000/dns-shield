@@ -4,7 +4,9 @@
   "entry_count": 102972,
   "parsed_domains": 102972,
   "schema_version": 1,
+  "source_name": "badmojr/1Hosts Lite",
   "source_revision": "273a6bcdcc3585bc47f1ebb6823db05ec5b7b409",
+  "source_date": "2026-08-23",
   "source_sha256": "a3e143b2fcddd38fa5a9095548d176391b1cc791135b4248b3d1c9ebaa253634",
   "source_size": 2055757,
   "unique_domains": 102972

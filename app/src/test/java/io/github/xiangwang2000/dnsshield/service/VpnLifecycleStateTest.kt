@@ -49,6 +49,65 @@ class VpnLifecycleStateTest {
     }
 
     @Test
+    fun repeatedStartStopRestartCommandsLeaveOnlyTheLatestRequestCurrent() {
+        val requests = VpnLifecycleRequestTracker()
+        val firstStart = requests.nextRequest()
+        val firstStop = requests.nextRequest()
+        val restart = requests.nextRequest()
+        val secondStop = requests.nextRequest()
+        val secondStart = requests.nextRequest()
+
+        assertFalse(requests.isCurrent(firstStart))
+        assertFalse(requests.isCurrent(firstStop))
+        assertFalse(requests.isCurrent(restart))
+        assertFalse(requests.isCurrent(secondStop))
+        assertTrue(requests.isCurrent(secondStart))
+    }
+
+    @Test
+    fun staleTunnelEndedCallbackCannotStopANewerOrNonRunningTunnel() {
+        val oldDescriptor = Any()
+        val currentDescriptor = Any()
+
+        assertFalse(
+            isCurrentTunnelEnded(
+                endedGeneration = 4,
+                currentGeneration = 5,
+                endedDescriptor = oldDescriptor,
+                currentDescriptor = currentDescriptor,
+                lifecycleState = VpnLifecycleState.RUNNING
+            )
+        )
+        assertFalse(
+            isCurrentTunnelEnded(
+                endedGeneration = 5,
+                currentGeneration = 5,
+                endedDescriptor = oldDescriptor,
+                currentDescriptor = currentDescriptor,
+                lifecycleState = VpnLifecycleState.RUNNING
+            )
+        )
+        assertFalse(
+            isCurrentTunnelEnded(
+                endedGeneration = 5,
+                currentGeneration = 5,
+                endedDescriptor = currentDescriptor,
+                currentDescriptor = currentDescriptor,
+                lifecycleState = VpnLifecycleState.STOPPING
+            )
+        )
+        assertTrue(
+            isCurrentTunnelEnded(
+                endedGeneration = 5,
+                currentGeneration = 5,
+                endedDescriptor = currentDescriptor,
+                currentDescriptor = currentDescriptor,
+                lifecycleState = VpnLifecycleState.RUNNING
+            )
+        )
+    }
+
+    @Test
     fun serviceDestructionPreservesFailedStateForRetry() {
         assertEquals(VpnLifecycleState.FAILED, VpnLifecycleState.FAILED.stateAfterServiceDestroy())
         assertEquals(VpnLifecycleState.STOPPED, VpnLifecycleState.RUNNING.stateAfterServiceDestroy())
