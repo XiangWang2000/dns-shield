@@ -39,6 +39,16 @@ DnsServerMigrationTest now covers production v1-to-v3 and D07 v2-to-v3 through
 Room's actual opening and schema validation, preserving resolver and bypass rows,
 and existing rule content plus its unique domain/scope constraint.
 The historical one-test device result above tested the former D08 v2 schema;
-it does not validate the new chain. Run the two updated instrumentation cases
+it does not validate the new chain. Reproduce the two updated instrumentation cases
 with the isolated commands above before merging D08. APK compilation alone is
 not a passing Room runtime migration test.
+
+## Observed v3 migration acceptance (2026-09-23)
+
+Code commit: 4fda522. ASUS_Z01RD / Android 10 / JCAZB7604377HFP:
+`OK (2 tests)`, 0.510 s. Both production v1-to-v3 and D07 v2-to-v3 opened
+successfully through Room. Resolver custom/active flags, addresses, fallback
+defaults, bypass state, and existing user rules plus their unique index passed.
+Both isolated APKs built successfully; the application and instrumentation packages
+were removed after the run. The production package remained installed; this run
+did not start a VPN or reboot the device. Strict TUN/TLS/UI acceptance is unchanged.
