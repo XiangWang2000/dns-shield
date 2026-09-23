@@ -63,7 +63,15 @@ DNS Shield 不包含帳號、分析 SDK、廣告 SDK或開發者營運的後端�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 
-驗證入口會執行離線 Python 工具測試、production Public Suffix asset 驗證、Debug APK 與 androidTest APK 建置、JVM 單元測試及 Kotlin 編譯；實機 instrumentation test 不會由此腳本自動執行。
+驗證入口會執行離線 Python 工具測試、production Public Suffix 與 active blocklist asset 驗證、Android lint、Debug APK 與 androidTest APK 建置、JVM 單元測試及 Kotlin 編譯。GitHub Actions 固定使用 Windows 2025、Python 3.13.15 與 Temurin 17.0.20+8 執行同一個 `verify.ps1`，並保存 JVM 測試與 lint 報告。
+
+目前 `main` 已將 GitHub Actions 的 `Windows verification` 設為 required status check，並套用於 repository 管理員；分支不必先與 `main` 同步。D01–D12 專屬回歸案例會隨各功能修復加入；要等功能 PR 在此 workflow 下實際通過後，才能確認全部涵蓋。
+
+`assembleDebugAndroidTest` 只建置 instrumentation APK，不代表已執行 instrumentation tests。連接 emulator 或 Android 裝置後，可用以下命令執行；公開 DNS 測試與實機效能、耗電量測仍須明確啟動：
+
+```powershell
+.\gradlew.bat --no-daemon --console=plain :app:connectedDebugAndroidTest
+```
 
 離線 blocklist 編譯器及其測試可獨立執行：
 
