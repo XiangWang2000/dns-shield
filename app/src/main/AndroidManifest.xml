@@ -30,11 +30,13 @@
         </activity>
 
         <!-- Native Android VpnService Declaration -->
+        <!-- User-authorized VPN apps qualify for systemExempted without exact-alarm access. -->
         <service
             android:name=".service.DnsVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:foregroundServiceType="systemExempted"
-            android:exported="false">
+            android:exported="false"
+            tools:ignore="ForegroundServicePermission">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>

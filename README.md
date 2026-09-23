@@ -12,6 +12,7 @@ DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標
 - 依內建規則與 APK 內固定版本的 1Hosts Lite compiled blocklist，以 NXDOMAIN 回覆廣告、追蹤及惡意網域。
 - 阻擋規則已由可單元測試的 `DomainMatcher` 元件處理，並保留既有的決策快取與 VPN DNS 熱路徑行為。
 - APK 內的 `active.bin` 含 102,972 筆固定來源規則；若 App 私有 `blocklists/active.bin` 存在，則作為本機 override。parent-domain matching 受 APK 內已驗證的 Public Suffix List 邊界限制。
+- 控制中心會顯示目前規則來源、revision、日期、筆數、驗證狀態，以及 Public Suffix List 是否降級為精確網域比對。
 - 支援自訂 DNS、DNS 回應快取及同時重複查詢去重。
 - 支援選擇具有啟動入口的已安裝 App，使其略過 DNS Shield VPN。
 - 在 App 開啟時顯示查詢數、阻擋數、估算節省流量與診斷日誌。
@@ -23,7 +24,7 @@ DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆
 - 目前只處理由系統 VPN DNS 路徑送入的 IPv4 UDP/53 查詢。
 - App 自行使用 DoH、DoT、非標準連接埠、直接 IP 連線或其他繞過系統 DNS 的方式，不會被此工具攔截。
 - DNS 層規則無法阻擋與正常內容共用網域的廣告，也無法保證涵蓋所有廣告、追蹤或惡意網域。
-- App 不會在執行期間下載遠端規則；production blocklist 只會隨經驗證的新 APK 更新。私有 override 缺失時使用 APK 內規則，損壞時則安全退回既有內建規則。
+- App 不會在執行期間下載遠端規則；production blocklist 只會隨經驗證的新 APK 更新。私有 override 缺失時使用 APK 內規則，格式或排序驗證失敗時也會改用 APK 內已驗證的清單；若該清單同樣無法使用，才退回內建規則。
 - 「節省流量」是依被阻擋網域類型推算的參考值，不是實際網路流量量測。
 - 實際解析延遲、耗電與攔截效果會因裝置、Android 版本、網路及 DNS 解析器而異。
 
@@ -63,7 +64,15 @@ DNS Shield 不包含帳號、分析 SDK、廣告 SDK或開發者營運的後端�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 
-驗證入口會執行離線 Python 工具測試、production Public Suffix asset 驗證、Debug APK 與 androidTest APK 建置、JVM 單元測試及 Kotlin 編譯；實機 instrumentation test 不會由此腳本自動執行。
+驗證入口會執行離線 Python 工具測試、production Public Suffix 與 active blocklist asset 驗證、Android lint、Debug APK 與 androidTest APK 建置、JVM 單元測試及 Kotlin 編譯。GitHub Actions 固定使用 Windows 2025、Python 3.13.15 與 Temurin 17.0.20+8 執行同一個 `verify.ps1`，並保存 JVM 測試與 lint 報告。
+
+目前 `main` 已將 GitHub Actions 的 `Windows verification` 設為 required status check，並套用於 repository 管理員；分支不必先與 `main` 同步。D01–D12 專屬回歸案例會隨各功能修復加入；要等功能 PR 在此 workflow 下實際通過後，才能確認全部涵蓋。
+
+`assembleDebugAndroidTest` 只建置 instrumentation APK，不代表已執行 instrumentation tests。連接 emulator 或 Android 裝置後，可用以下命令執行；公開 DNS 測試與實機效能、耗電量測仍須明確啟動：
+
+```powershell
+.\gradlew.bat --no-daemon --console=plain :app:connectedDebugAndroidTest
+```
 
 離線 blocklist 編譯器及其測試可獨立執行：
 
