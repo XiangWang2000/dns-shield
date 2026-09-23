@@ -910,14 +910,10 @@ class DnsVpnService : VpnService() {
             return true
         }
         if (cachedResponse != null) {
-            sendResponsePacket(
-                cachedResponse,
-                dnsPacket.sourceIp,
-                dnsPacket.destinationIp,
-                dnsPacket.sourcePort,
-                outputStream,
-                transactionIdSource = dnsPacket.payload
-            )
+            if (!sendResolvedResponseIfCurrent(dnsPacket, dnsState, cachedResponse, outputStream)) {
+                sendServFailResponse(dnsPacket, outputStream)
+                return true
+            }
             recordResolvedQuery()
             val domain = dnsPacket.query.question.domainName ?: "Unknown"
             addDnsQueryLog {
@@ -947,6 +943,27 @@ class DnsVpnService : VpnService() {
         recordBlockedQuery(estimateSavedBytes(domain))
         addDnsQueryLog { "🛡️ [真正攔截] $domain -> NXDOMAIN" }
         return true
+    }
+
+    private fun sendResolvedResponseIfCurrent(
+        dnsPacket: ParsedIpv4UdpDnsQuery,
+        dnsState: DnsStateSnapshot,
+        response: ByteArray,
+        outputStream: FileOutputStream
+    ): Boolean = synchronized(dnsStateLock) {
+        if (!isCurrentDnsState(dnsState)) {
+            false
+        } else {
+            sendResponsePacket(
+                responseData = response,
+                clientIp = dnsPacket.sourceIp,
+                mockDnsIp = dnsPacket.destinationIp,
+                clientPort = dnsPacket.sourcePort,
+                outputStream = outputStream,
+                transactionIdSource = dnsPacket.payload
+            )
+            true
+        }
     }
 
     private fun sendServFailResponse(
@@ -1105,14 +1122,10 @@ class DnsVpnService : VpnService() {
         }
 
         if (sharedResponse != null) {
-            sendResponsePacket(
-                responseData = sharedResponse,
-                clientIp = dnsPacket.sourceIp,
-                mockDnsIp = dnsPacket.destinationIp,
-                clientPort = dnsPacket.sourcePort,
-                outputStream = outputStream,
-                transactionIdSource = dnsPayload
-            )
+            if (!sendResolvedResponseIfCurrent(dnsPacket, dnsState, sharedResponse, outputStream)) {
+                sendServFailResponse(dnsPacket, outputStream)
+                return
+            }
             recordResolvedQuery()
             addDnsQueryLog {
                 "✓ 解析成功 [ID=${formatTxId(dnsPayload)}]: $domain (${sharedResponse.size} bytes)"
