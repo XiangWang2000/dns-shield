@@ -26,3 +26,19 @@ to null. `verify.ps1` and both isolated APK builds passed.
 
 This result does not establish strict-mode zero-plaintext behavior through TUN,
 TLS/error handling, or UI transport status. Those acceptance items remain pending.
+
+## Schema integration update (2026-09-23)
+
+D08 must be integrated after D07 (#40 / PR #55). Schema v2 is reserved for
+D07 user rules; D08 is now v3. Register both D07 1-to-2 and DoH 2-to-3 migrations.
+The v3 entity list retains the rules table so Room validates it and preserves it.
+The former standalone D08 v2 schema was never released; isolated test packages
+were removed. It is not a supported production migration starting point.
+
+DnsServerMigrationTest now covers production v1-to-v3 and D07 v2-to-v3 through
+Room's actual opening and schema validation, preserving resolver and bypass rows,
+and existing rule content plus its unique domain/scope constraint.
+The historical one-test device result above tested the former D08 v2 schema;
+it does not validate the new chain. Run the two updated instrumentation cases
+with the isolated commands above before merging D08. APK compilation alone is
+not a passing Room runtime migration test.
