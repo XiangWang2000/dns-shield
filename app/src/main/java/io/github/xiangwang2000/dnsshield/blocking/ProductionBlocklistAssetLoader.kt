@@ -9,6 +9,9 @@ class ProductionBlocklistAssetLoader internal constructor(
     private val readArtifact: () -> ByteArray,
     private val contract: ProductionBlocklistArtifactContract = ProductionBlocklistArtifact.contract
 ) {
+    val sourceMetadata: RuleSourceMetadata
+        get() = contract.sourceMetadata
+
     @Volatile
     private var cachedBlocklist: CompiledBlocklist? = null
 
@@ -37,15 +40,24 @@ class ProductionBlocklistAssetLoader internal constructor(
 internal data class ProductionBlocklistArtifactContract(
     val artifactSize: Int,
     val artifactSha256: String,
-    val entryCount: Int
-)
+    val entryCount: Int,
+    val sourceName: String = "",
+    val sourceRevision: String? = null,
+    val sourceDate: String? = null
+) {
+    val sourceMetadata: RuleSourceMetadata
+        get() = RuleSourceMetadata(sourceName, sourceRevision, sourceDate)
+}
 
 internal object ProductionBlocklistArtifact {
     val contract = ProductionBlocklistArtifactContract(
         artifactSize = 823_800,
         artifactSha256 =
             "87737598676f344cafd32c5deb8c0225e07963b5e318ef8c9f099b912487bdbe",
-        entryCount = 102_972
+        entryCount = 102_972,
+        sourceName = "badmojr/1Hosts Lite",
+        sourceRevision = "273a6bcdcc3585bc47f1ebb6823db05ec5b7b409",
+        sourceDate = "2026-08-23"
     )
 
     fun verify(

@@ -10,17 +10,20 @@ import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.xiangwang2000.dnsshield.MainActivity
-import io.github.xiangwang2000.dnsshield.blocking.CompiledBlocklistStatus
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
 import io.github.xiangwang2000.dnsshield.blocking.ProductionBlocklistAssetLoader
 import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverOwner
+import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverStatus
 import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
 import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
+import io.github.xiangwang2000.dnsshield.blocking.RuleBlocklistSource
+import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import kotlin.coroutines.resume
@@ -80,6 +83,7 @@ class DnsVpnService : VpnService() {
         fun setPlaintextFallbackAllowed(resolverId: Int, allowed: Boolean) {
             plaintextFallbackFence.setAllowed(resolverId, allowed)
         }
+        val rulePolicyStatusFlow = MutableStateFlow(RulePolicyStatus.NotLoaded)
 
         // Atomic counters for perfectly thread-safe, concurrent statistics updates
         val queryCounter = AtomicInteger(0)
@@ -135,8 +139,7 @@ class DnsVpnService : VpnService() {
             )
         }
 
-        class CachedDnsRecord(val responseData: ByteArray, val expireAt: Long)
-        private val dnsCache = LruCache<DnsQueryKey, CachedDnsRecord>(500)
+        private val dnsCache = LruCache<DnsQueryKey, DnsResponseCacheEntry>(500)
         private val blockDecisionCache = LruCache<DomainPolicyCacheKey, Boolean>(1024)
         private val domainPolicy = ReloadableDomainPolicy()
 
@@ -165,89 +168,21 @@ class DnsVpnService : VpnService() {
             return DohEndpointConfiguration.defaultUrlForIp(ip)
         }
 
-        fun parseDnsResponseTtl(response: ByteArray): Long {
-            try {
-                if (response.size < 12) return 10_000L // 10s fallback for small packets
-                val qdCount = ((response[4].toInt() and 0xFF) shl 8) or (response[5].toInt() and 0xFF)
-                val anCount = ((response[6].toInt() and 0xFF) shl 8) or (response[7].toInt() and 0xFF)
-
-                var index = 12
-
-                // Skip Questions to find Answers offset
-                for (i in 0 until qdCount) {
-                    index = skipName(response, index)
-                    index += 4 // QTYPE (2) + QCLASS (2)
-                    if (index > response.size) return 10_000L
-                }
-
-                var minTtlSec = Long.MAX_VALUE
-                for (i in 0 until anCount) {
-                    index = skipName(response, index)
-                    if (index + 10 > response.size) break
-
-                    // index points to TYPE (2 bytes)
-                    index += 4 // Skip TYPE and CLASS
-
-                    val ttl = ((response[index].toLong() and 0xFF) shl 24) or
-                              ((response[index + 1].toLong() and 0xFF) shl 16) or
-                              ((response[index + 2].toLong() and 0xFF) shl 8) or
-                              (response[index + 3].toLong() and 0xFF)
-                    index += 4
-
-                    val rdLength = ((response[index].toInt() and 0xFF) shl 8) or (response[index + 1].toInt() and 0xFF)
-                    index += 2 + rdLength
-
-                    if (ttl > 0) {
-                        if (ttl < minTtlSec) {
-                            minTtlSec = ttl
-                        }
-                    }
-                }
-
-                if (minTtlSec != Long.MAX_VALUE) {
-                    // Safe boundaries: clamp between 5 seconds (avoid flood) and 300 seconds (avoid outdated IPs)
-                    val finalTtlSec = minTtlSec.coerceIn(5, 300)
-                    return finalTtlSec * 1000L
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error parsing DNS response TTL", e)
-            }
-            return 30_000L // 30s default fallback
-        }
-
-        private fun skipName(data: ByteArray, startOffset: Int): Int {
-            var index = startOffset
-            while (index < data.size) {
-                val len = data[index].toInt() and 0xFF
-                if (len == 0) {
-                    return index + 1
-                } else if ((len and 0xC0) == 0xC0) {
-                    return index + 2
-                } else {
-                    index += 1 + len
-                }
-            }
-            return data.size
-        }
-
-        // Defensive copy added to protect LRU cache keys and records from mutable buffer modifications
-        private fun putCache(key: DnsQueryKey, responseData: ByteArray) {
+        private fun putCache(key: DnsQueryKey, responseData: ByteArray, query: ParsedDnsQuery) {
             if (key.byteCount < 2) return
-            val ttlMillis = parseDnsResponseTtl(responseData)
-            val expireAt = System.currentTimeMillis() + ttlMillis
-            val record = CachedDnsRecord(responseData.copyOf(), expireAt)
-            dnsCache.put(key.copyForStorage(), record)
+            val record = DnsResponseCacheEntry.create(responseData, query) { SystemClock.elapsedRealtime() } ?: return
+            synchronized(dnsCache) {
+                dnsCache.put(key.copyForStorage(), record)
+            }
         }
 
         private fun getCache(key: DnsQueryKey): ByteArray? {
             if (key.byteCount < 2) return null
-            val record = dnsCache.get(key)
-            if (record != null) {
-                if (System.currentTimeMillis() < record.expireAt) {
-                    return record.responseData
-                } else {
-                    dnsCache.remove(key)
-                }
+            synchronized(dnsCache) {
+                val record = dnsCache.get(key) ?: return null
+                val response = record.responseAtCurrentTime()
+                if (response != null) return response
+                dnsCache.remove(key)
             }
             return null
         }
@@ -262,7 +197,7 @@ class DnsVpnService : VpnService() {
         }
 
         fun clearMemoryCache() {
-            dnsCache.evictAll()
+            synchronized(dnsCache) { dnsCache.evictAll() }
             blockDecisionCache.evictAll()
             addLog("🧹 [記憶體釋放] 已清空 DNS LruCache 解析快取")
         }
@@ -550,31 +485,47 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private fun reloadDomainPolicy() {
-        val status = try {
-            val assembly = RuntimeDomainPolicy.assemble(
-                filesDirectory = filesDir,
-                loadBundledBlocklist = productionBlocklistLoader::load,
-                registrableDomainResolverProvider = {
-                    publicSuffixResolverOwner.resolverOrNull()
-                }
-            )
+    private suspend fun reloadDomainPolicy(requestGeneration: Long) {
+        try {
+            val assembly = withContext(Dispatchers.IO) {
+                RuntimeDomainPolicy.assemble(
+                    filesDirectory = filesDir,
+                    loadBundledBlocklist = productionBlocklistLoader::load,
+                    bundledSourceMetadata = productionBlocklistLoader.sourceMetadata,
+                    registrableDomainResolverProvider = {
+                        publicSuffixResolverOwner.resolverOrNull()
+                    }
+                )
+            }
+            if (!lifecycleRequests.isCurrent(requestGeneration)) return
             domainPolicy.install(assembly) {
                 invalidatePolicyState()
             }
+            rulePolicyStatusFlow.value = assembly.displayStatus.copy(
+                publicSuffixStatus = if (assembly.displayStatus.source == RuleBlocklistSource.BUILT_IN) {
+                    PublicSuffixResolverStatus.NotLoaded
+                } else {
+                    publicSuffixResolverOwner.status()
+                },
+                reloadError = null
+            )
+        } catch (exception: CancellationException) {
+            throw exception
         } catch (exception: Exception) {
+            if (!lifecycleRequests.isCurrent(requestGeneration)) return
             val reason = exception.message?.takeIf(String::isNotBlank)
                 ?: exception.javaClass.simpleName
             Log.e(TAG, "Failed to reload domain policy", exception)
+            rulePolicyStatusFlow.value = rulePolicyStatusFlow.value.copy(reloadError = reason)
             addLog("[攔截規則] 重新載入失敗，保留目前規則：$reason")
             return
         }
 
-        addLog(DomainPolicyDiagnostics.message(status))
+        addLog(DomainPolicyDiagnostics.message(rulePolicyStatusFlow.value))
     }
 
     private fun clearDnsStateLocked() {
-        dnsCache.evictAll()
+        synchronized(dnsCache) { dnsCache.evictAll() }
         blockDecisionCache.evictAll()
     }
 
@@ -710,7 +661,7 @@ class DnsVpnService : VpnService() {
                 startForeground(NOTIFICATION_ID, notification)
             }
 
-            withContext(Dispatchers.IO) { reloadDomainPolicy() }
+            reloadDomainPolicy(requestGeneration)
             if (!lifecycleRequests.isCurrent(requestGeneration)) {
                 abandonSupersededStartup()
                 return
@@ -1135,10 +1086,9 @@ class DnsVpnService : VpnService() {
                             DnsMessageValidator.isValidResponse(it, query)
                         }
                         if (validatedResponse != null &&
-                            DnsMessageValidator.isCacheableResponse(validatedResponse, query) &&
                             isCurrentDnsState(dnsState)
                         ) {
-                            putCache(queryKey, validatedResponse)
+                            putCache(queryKey, validatedResponse, query)
                         }
                         validatedResponse?.takeIf { deadline.remainingMillis() > 0L }
                     }
@@ -1276,10 +1226,13 @@ class DnsVpnService : VpnService() {
     }
 
     private suspend fun handleTunnelEnded(command: LifecycleCommand.TunnelEnded) {
-        if (
-            command.generation != tunnelGeneration ||
-            vpnInterface !== command.descriptor ||
-            lifecycleStateFlow.value != VpnLifecycleState.RUNNING
+        if (!isCurrentTunnelEnded(
+                endedGeneration = command.generation,
+                currentGeneration = tunnelGeneration,
+                endedDescriptor = command.descriptor,
+                currentDescriptor = vpnInterface,
+                lifecycleState = lifecycleStateFlow.value
+            )
         ) return
 
         addLog(command.failure ?: "VPN tunnel stopped unexpectedly")
@@ -1310,6 +1263,7 @@ class DnsVpnService : VpnService() {
 
     // Service destruction cannot suspend, so it closes the owned descriptor and cancels its session directly.
     private fun closeTunnelResources() {
+        rulePolicyStatusFlow.value = RulePolicyStatus.NotLoaded
         val finalState = lifecycleStateFlow.value.stateAfterServiceDestroy()
         tunnelGeneration++
         if (finalState != VpnLifecycleState.FAILED) {
@@ -1337,6 +1291,7 @@ class DnsVpnService : VpnService() {
     }
 
     private suspend fun stopVpn(finalState: VpnLifecycleState = VpnLifecycleState.STOPPED) {
+        rulePolicyStatusFlow.value = RulePolicyStatus.NotLoaded
         addLog("正在關閉安全 DNS 防護隧道並釋放資源…")
         if (lifecycleStateFlow.value != VpnLifecycleState.STOPPED) {
             updateLifecycleState(VpnLifecycleState.STOPPING)

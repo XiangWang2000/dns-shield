@@ -80,6 +80,19 @@ class ProductionBlocklistAssetLoaderTest {
         )
     }
 
+    @Test
+    fun pinsDisplayedSourceMetadataToProductionManifest() {
+        val contract = ProductionBlocklistArtifact.contract
+        val manifest = Files.readString(productionManifestPath())
+
+        assertEquals("badmojr/1Hosts Lite", contract.sourceName)
+        assertEquals("273a6bcdcc3585bc47f1ebb6823db05ec5b7b409", contract.sourceRevision)
+        assertEquals("2026-08-23", contract.sourceDate)
+        assertTrue(manifest.contains("\"source_name\": \"${contract.sourceName}\""))
+        assertTrue(manifest.contains("\"source_revision\": \"${contract.sourceRevision}\""))
+        assertTrue(manifest.contains("\"source_date\": \"${contract.sourceDate}\""))
+    }
+
     private fun productionAssetPath(): Path {
         val relative = Paths.get(
             "app",
@@ -96,5 +109,12 @@ class ProductionBlocklistAssetLoaderTest {
             directory = current.parent
         }
         error("Unable to locate production blocklist asset: $relative")
+    }
+
+    private fun productionManifestPath(): Path {
+        var directory: Path? = productionAssetPath().toAbsolutePath()
+        repeat(5) { directory = directory?.parent }
+        val repositoryRoot = directory ?: error("Unable to locate repository root")
+        return repositoryRoot.resolve(Paths.get("tools", "active_blocklist_production.json"))
     }
 }
