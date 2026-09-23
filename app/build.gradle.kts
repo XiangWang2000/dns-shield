@@ -39,6 +39,10 @@ if (releaseRequested && !releaseSigningReady) {
   )
 }
 
+val d12InstrumentationRequested = gradle.startParameter.taskNames.any {
+  it.contains("D12test", ignoreCase = true)
+}
+
 android {
   namespace = "io.github.xiangwang2000.dnsshield"
   compileSdk = 37
@@ -52,6 +56,7 @@ android {
     versionName = "1.2.2"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     buildConfigField("boolean", "D14_DEVICE_TEST", "false")
+    if (d12InstrumentationRequested) testBuildType = "d12test"
   }
 
   signingConfigs {
@@ -104,6 +109,17 @@ android {
       applicationIdSuffix = ".d14test"
       versionNameSuffix = "-d14test"
       buildConfigField("boolean", "D14_DEVICE_TEST", "true")
+      matchingFallbacks += listOf("debug")
+    }
+    create("d04DeviceTest") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d04test"
+      versionNameSuffix = "-d04test"
+      matchingFallbacks += listOf("debug")
+    }
+    create("d12test") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d12test"
       matchingFallbacks += listOf("debug")
     }
   }
