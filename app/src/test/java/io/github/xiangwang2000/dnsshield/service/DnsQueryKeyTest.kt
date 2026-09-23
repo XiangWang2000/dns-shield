@@ -26,6 +26,7 @@ class DnsQueryKeyTest {
 
         assertNotEquals(key(payload), key(payload.copyOf().apply { this[4] = 0x31 }))
         assertNotEquals(key(payload, resolverGeneration = 8), key(payload))
+        assertNotEquals(key(payload, underlyingNetworkGeneration = 8), key(payload))
         assertNotEquals(key(payload, policyAssembly = policyAssembly()), key(payload))
     }
 
@@ -45,10 +46,12 @@ class DnsQueryKeyTest {
     private fun key(
         payload: ByteArray,
         resolverGeneration: Int = 7,
+        underlyingNetworkGeneration: Long = 2,
         policyAssembly: DomainPolicyAssembly = sharedPolicyAssembly
     ) = DnsVpnService.Companion.DnsQueryKey(
         bytes = payload,
         resolverGeneration = resolverGeneration,
+        underlyingNetworkGeneration = underlyingNetworkGeneration,
         policyAssembly = policyAssembly
     )
 
