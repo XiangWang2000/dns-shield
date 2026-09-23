@@ -21,7 +21,8 @@ sealed class CompiledBlocklistStatus {
 data class DomainPolicyAssembly(
     val matcher: DomainMatcher,
     val compiledBlocklistStatus: CompiledBlocklistStatus,
-    val userRuleMatcher: UserDomainRuleMatcher = UserDomainRuleMatcher(emptyList())
+    val userRuleMatcher: UserDomainRuleMatcher = UserDomainRuleMatcher(emptyList()),
+    val displayStatus: RulePolicyStatus = RulePolicyStatus()
 )
 
 /**

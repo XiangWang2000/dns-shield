@@ -17,6 +17,7 @@ import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidator
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import io.github.xiangwang2000.dnsshield.data.BypassedApp
 import io.github.xiangwang2000.dnsshield.data.DnsServer
+import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
 import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
@@ -47,7 +48,8 @@ data class DnsShieldUiState(
     val filteredApps: List<AppInfo> = emptyList(),
     val isLoadingApps: Boolean = false,
     val vpnSettingsModified: Boolean = false,
-    val infoCardVisible: Boolean = true
+    val infoCardVisible: Boolean = true,
+    val rulePolicyStatus: RulePolicyStatus = RulePolicyStatus()
 )
 
 data class VpnMetricsState(
@@ -141,6 +143,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
     )
+    private val _rulePolicyStatus = MutableStateFlow(DnsVpnService.rulePolicyStatusFlow.value)
 
     val vpnSettingsModified = MutableStateFlow(false)
 
@@ -225,7 +228,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         DomainRulesAndEventsState(rules, query, events, infoVisible)
     }
 
-    val uiState: StateFlow<DnsShieldUiState> = combine(
+    private val baseUiState: Flow<DnsShieldUiState> = combine(
         vpnMetricsStateFlow,
         vpnStatusAndDnsStateFlow,
         appListStateFlow,
@@ -250,6 +253,13 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             vpnSettingsModified = settingsModified,
             infoCardVisible = ruleState.infoCardVisible
         )
+    }
+
+    val uiState: StateFlow<DnsShieldUiState> = combine(
+        baseUiState,
+        _rulePolicyStatus
+    ) { state, rulePolicyStatus ->
+        state.copy(rulePolicyStatus = rulePolicyStatus)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
@@ -269,7 +279,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             filteredApps = emptyList(),
             isLoadingApps = _isLoadingApps.value,
             vpnSettingsModified = vpnSettingsModified.value,
-            infoCardVisible = _infoCardVisible.value
+            infoCardVisible = _infoCardVisible.value,
+            rulePolicyStatus = _rulePolicyStatus.value
         )
     )
 
@@ -410,6 +421,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         collectServiceFlow(DnsVpnService.activeDnsFlow, _activeDns)
         collectServiceFlow(DnsVpnService.liveLogsFlow, _liveLogs)
         collectServiceFlow(DnsVpnService.liveDecisionEventsFlow, _blockedEvents)
+        collectServiceFlow(DnsVpnService.rulePolicyStatusFlow, _rulePolicyStatus)
 
         // Observe bypassed apps list database and re-evaluate installed apps isBypassed status
         viewModelScope.launch {
