@@ -46,6 +46,7 @@ val d12InstrumentationRequested = gradle.startParameter.taskNames.any {
 android {
   namespace = "io.github.xiangwang2000.dnsshield"
   compileSdk = 37
+  testBuildType = providers.gradleProperty("androidTestBuildType").getOrElse("debug")
 
   defaultConfig {
     applicationId = "io.github.xiangwang2000.dnsshield"
@@ -107,6 +108,11 @@ android {
       applicationIdSuffix = ".d12test"
       matchingFallbacks += listOf("debug")
     }
+  }
+  buildTypes.create("d03test") {
+    initWith(buildTypes.getByName("debug"))
+    applicationIdSuffix = ".d03test"
+    matchingFallbacks += "debug"
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
