@@ -707,17 +707,18 @@ class DnsVpnService : VpnService() {
                 abandonSupersededStartup()
                 return
             }
-            val descriptor = builder.establish()
-            if (descriptor == null) {
-                if (!lifecycleRequests.isCurrent(requestGeneration)) {
-                    abandonSupersededStartup()
-                    return
+            val descriptor = establishVpnTunnel(
+                establish = { builder.establish() },
+                onUnavailable = {
+                    if (!lifecycleRequests.isCurrent(requestGeneration)) {
+                        abandonSupersededStartup()
+                    } else {
+                        addLog("Error: Failed to establish VPN interface (null)")
+                        updateLifecycleState(VpnLifecycleState.FAILED)
+                        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+                    }
                 }
-                addLog("Error: Failed to establish VPN interface (null)")
-                updateLifecycleState(VpnLifecycleState.FAILED)
-                runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
-                return
-            }
+            ) ?: return
 
             establishedFd = descriptor
             if (!lifecycleRequests.isCurrent(requestGeneration)) {
@@ -781,47 +782,19 @@ class DnsVpnService : VpnService() {
     }
 
     private fun runTunnel(descriptor: ParcelFileDescriptor, generation: Long) {
-        var failure: String? = null
-        var reportTunnelEnded = true
-        try {
-            val inputStream = FileInputStream(descriptor.fileDescriptor)
-            try {
-                val outputStream = FileOutputStream(descriptor.fileDescriptor)
-                try {
-                    val buffer = ByteArray(4096)
-                    while (isVpnRunning && generation == tunnelGeneration) {
-                        val readBytes = inputStream.read(buffer)
-                        if (readBytes > 0) {
-                            handlePacket(buffer, readBytes, outputStream)
-                        } else if (readBytes < 0) {
-                            failure = "Tunnel stream reached EOF unexpectedly"
-                            break
-                        }
-                    }
-                } finally {
-                    outputStream.close()
-                }
-            } finally {
-                inputStream.close()
-            }
-        } catch (exception: IOException) {
-            if (isVpnRunning && generation == tunnelGeneration) {
-                failure = "Tunnel read error: " + exception.message
-            }
-        } catch (exception: CancellationException) {
-            reportTunnelEnded = false
-            throw exception
-        } catch (exception: Exception) {
-            if (isVpnRunning && generation == tunnelGeneration) {
-                failure = "Tunnel reader failed: " + (exception.message ?: exception.javaClass.simpleName)
-            }
-        } finally {
-            if (reportTunnelEnded) {
+        runVpnTunnelReader(
+            openInput = { FileInputStream(descriptor.fileDescriptor) },
+            openOutput = { FileOutputStream(descriptor.fileDescriptor) },
+            isActive = { isVpnRunning && generation == tunnelGeneration },
+            handlePacket = { buffer, readBytes, outputStream ->
+                handlePacket(buffer, readBytes, outputStream)
+            },
+            onEnded = { failure ->
                 lifecycleCommands.trySend(
                     LifecycleCommand.TunnelEnded(generation, descriptor, failure)
                 )
             }
-        }
+        )
     }
     private fun handlePacket(packet: ByteArray, length: Int, outputStream: FileOutputStream) {
         when (val parsed = DnsIpv4UdpQueryParser.parse(packet, length)) {
@@ -1237,19 +1210,16 @@ class DnsVpnService : VpnService() {
         tunnelParentJob = null
         tunnelScope = null
 
-        try {
-            descriptor?.close()
-        } catch (exception: Exception) {
-            Log.e(TAG, "Error closing vpnInterface descriptor", exception)
-        }
-
-        try {
-            sessionJob?.cancelAndJoin()
-        } catch (exception: CancellationException) {
-            throw exception
-        } catch (exception: Exception) {
-            Log.e(TAG, "Exception cancelling tunnel session during shutdown", exception)
-        }
+        closeVpnTunnelThenJoin(
+            closeDescriptor = { descriptor?.close() },
+            joinSession = { sessionJob?.cancelAndJoin() },
+            onCloseFailure = { exception ->
+                Log.e(TAG, "Error closing vpnInterface descriptor", exception)
+            },
+            onJoinFailure = { exception ->
+                Log.e(TAG, "Exception cancelling tunnel session during shutdown", exception)
+            }
+        )
 
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
