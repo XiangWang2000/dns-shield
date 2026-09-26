@@ -20,7 +20,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.filled.*
@@ -51,6 +53,7 @@ import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
+import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
 import io.github.xiangwang2000.dnsshield.ui.theme.*
 import io.github.xiangwang2000.dnsshield.viewmodel.AppInfo
 import io.github.xiangwang2000.dnsshield.viewmodel.DnsShieldUiState
@@ -147,8 +150,20 @@ fun DnsShieldDashboard(
         uiState = uiState,
         onToggleVpn = handleToggleVpn,
         onSelectDns = { viewModel.selectDnsServer(it) },
-        onAddCustomDns = { name, pri, sec -> viewModel.addCustomDnsServer(name, pri, sec) },
+        onAddCustomDns = { name, pri, sec, allowPlaintext, primaryDoh, primaryBootstrap, secondaryDoh, secondaryBootstrap ->
+            viewModel.addCustomDnsServer(
+                name,
+                pri,
+                sec,
+                allowPlaintext,
+                primaryDoh,
+                primaryBootstrap,
+                secondaryDoh,
+                secondaryBootstrap
+            )
+        },
         onDeleteDns = { viewModel.deleteDnsServer(it) },
+        onSetPlaintextFallback = { server, allow -> viewModel.setPlaintextFallback(server, allow) },
         onSearchChange = { viewModel.setSearchQuery(it) },
         onToggleBypass = { pkg, name, active -> viewModel.toggleAppBypass(pkg, name, active) },
         onInfoCardDismiss = { viewModel.setInfoCardVisible(false) },
@@ -165,8 +180,9 @@ fun DnsShieldScreen(
     uiState: DnsShieldUiState,
     onToggleVpn: () -> Unit,
     onSelectDns: (Int) -> Unit,
-    onAddCustomDns: (String, String, String?) -> Unit,
+    onAddCustomDns: (String, String, String?, Boolean, String?, String?, String?, String?) -> Unit,
     onDeleteDns: (DnsServer) -> Unit,
+    onSetPlaintextFallback: (DnsServer, Boolean) -> Unit,
     onSearchChange: (String) -> Unit,
     onToggleBypass: (String, String, Boolean) -> Unit,
     onInfoCardDismiss: () -> Unit,
@@ -217,10 +233,12 @@ fun DnsShieldScreen(
                         ControlCenterTab(
                             dnsServers = uiState.dnsServers,
                             activeDnsServer = uiState.activeDnsServer,
+                            dnsTransportStatus = uiState.dnsTransportStatus,
                             rulePolicyStatus = uiState.rulePolicyStatus,
                             onSelectDns = onSelectDns,
                             onAddDnsClicked = { showAddDnsDialog = true },
-                            onDeleteDns = onDeleteDns
+                            onDeleteDns = onDeleteDns,
+                            onSetPlaintextFallback = onSetPlaintextFallback
                         )
                     }
                     1 -> {
@@ -260,8 +278,17 @@ fun DnsShieldScreen(
         if (showAddDnsDialog) {
             AddDnsDialog(
                 onDismiss = { showAddDnsDialog = false },
-                onConfirm = { name, pri, sec ->
-                    onAddCustomDns(name, pri, sec)
+                onConfirm = { name, pri, sec, allowPlaintext, primaryDoh, primaryBootstrap, secondaryDoh, secondaryBootstrap ->
+                    onAddCustomDns(
+                        name,
+                        pri,
+                        sec,
+                        allowPlaintext,
+                        primaryDoh,
+                        primaryBootstrap,
+                        secondaryDoh,
+                        secondaryBootstrap
+                    )
                     showAddDnsDialog = false
                 }
             )
@@ -639,10 +666,12 @@ fun StatCard(
 fun ControlCenterTab(
     dnsServers: List<DnsServer>,
     activeDnsServer: DnsServer?,
+    dnsTransportStatus: String,
     rulePolicyStatus: RulePolicyStatus,
     onSelectDns: (Int) -> Unit,
     onAddDnsClicked: () -> Unit,
-    onDeleteDns: (DnsServer) -> Unit
+    onDeleteDns: (DnsServer) -> Unit,
+    onSetPlaintextFallback: (DnsServer, Boolean) -> Unit
 ) {
     LazyColumn(
         modifier = Modifier
@@ -677,6 +706,38 @@ fun ControlCenterTab(
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("新增 DNS", fontSize = 12.sp, color = ColorWhite)
+                }
+            }
+        }
+
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("dns_transport_status")
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Text("最近一次 DNS 傳輸", fontSize = 11.sp, color = ColorTextSecondary)
+                    Text(
+                        dnsTransportStatus,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = when {
+                            dnsTransportStatus.contains("明文") -> CyberAmber
+                            dnsTransportStatus.contains("SERVFAIL") || dnsTransportStatus.contains("不可用") -> CyberCrimson
+                            else -> CyberEmerald
+                        }
+                    )
+                    Text(
+                        "DoH 使用 HTTPS 傳輸；DNS Shield 不在本機驗證 DNSSEC。",
+                        fontSize = 10.sp,
+                        color = ColorTextSecondary
+                    )
                 }
             }
         }
@@ -747,6 +808,36 @@ fun ControlCenterTab(
                                 text = "次要 IP: $it",
                                 fontSize = 12.sp,
                                 color = ColorTextSecondary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    if (server.allowPlaintextFallback) {
+                                        "加密優先 · 允許 UDP/53 降級"
+                                    } else {
+                                        "僅加密 · DoH 失敗時回覆 SERVFAIL"
+                                    },
+                                    fontSize = 11.sp,
+                                    color = if (server.allowPlaintextFallback) CyberAmber else CyberEmerald
+                                )
+                                if (server.allowPlaintextFallback) {
+                                    Text(
+                                        "既有設定升級後保留此舊版行為",
+                                        fontSize = 10.sp,
+                                        color = ColorTextSecondary
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = server.allowPlaintextFallback,
+                                onCheckedChange = { onSetPlaintextFallback(server, it) },
+                                modifier = Modifier.testTag("dns_plaintext_fallback_${server.id}")
                             )
                         }
                     }
@@ -1144,15 +1235,30 @@ fun LogsTab(
 @Composable
 fun AddDnsDialog(
     onDismiss: () -> Unit,
-    onConfirm: (name: String, primaryIp: String, secondaryIp: String?) -> Unit
+    onConfirm: (
+        name: String,
+        primaryIp: String,
+        secondaryIp: String?,
+        allowPlaintextFallback: Boolean,
+        primaryDohUrl: String?,
+        primaryBootstrapIps: String?,
+        secondaryDohUrl: String?,
+        secondaryBootstrapIps: String?
+    ) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
     var primaryIp by remember { mutableStateOf("") }
     var secondaryIp by remember { mutableStateOf("") }
+    var allowPlaintextFallback by remember { mutableStateOf(true) }
+    var primaryDohUrl by remember { mutableStateOf("") }
+    var primaryBootstrapIps by remember { mutableStateOf("") }
+    var secondaryDohUrl by remember { mutableStateOf("") }
+    var secondaryBootstrapIps by remember { mutableStateOf("") }
 
     var nameError by remember { mutableStateOf(false) }
     var primaryError by remember { mutableStateOf(false) }
     var secondaryError by remember { mutableStateOf(false) }
+    var dohError by remember { mutableStateOf<String?>(null) }
 
     fun validateIp(ip: String): Boolean {
         val ipv4Regex = """^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$""".toRegex()
@@ -1164,6 +1270,9 @@ fun AddDnsDialog(
         title = { Text("新增自訂安全 DNS Server", color = ColorTextPrimary) },
         text = {
             Column(
+                modifier = Modifier
+                    .heightIn(max = 470.dp)
+                    .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 OutlinedTextField(
@@ -1241,6 +1350,108 @@ fun AddDnsDialog(
                         errorBorderColor = CyberCrimson
                     )
                 )
+
+                OutlinedTextField(
+                    value = primaryDohUrl,
+                    onValueChange = {
+                        primaryDohUrl = it
+                        dohError = null
+                    },
+                    label = { Text("主要 DoH URL (選填，必須 HTTPS)") },
+                    placeholder = { Text("https://resolver.example/dns-query") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CyberEmerald,
+                        focusedLabelColor = CyberEmerald,
+                        unfocusedTextColor = ColorTextPrimary,
+                        focusedTextColor = ColorTextPrimary,
+                        errorBorderColor = CyberCrimson
+                    )
+                )
+
+                OutlinedTextField(
+                    value = primaryBootstrapIps,
+                    onValueChange = {
+                        primaryBootstrapIps = it
+                        dohError = null
+                    },
+                    label = { Text("主要 Bootstrap IPv4 (逗號分隔)") },
+                    placeholder = { Text("203.0.113.53, 203.0.113.54") },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CyberEmerald,
+                        focusedLabelColor = CyberEmerald,
+                        unfocusedTextColor = ColorTextPrimary,
+                        focusedTextColor = ColorTextPrimary,
+                        errorBorderColor = CyberCrimson
+                    )
+                )
+
+                OutlinedTextField(
+                    value = secondaryDohUrl,
+                    onValueChange = {
+                        secondaryDohUrl = it
+                        dohError = null
+                    },
+                    label = { Text("備援 DoH URL (選填，必須 HTTPS)") },
+                    placeholder = { Text("https://backup.example/dns-query") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CyberEmerald,
+                        focusedLabelColor = CyberEmerald,
+                        unfocusedTextColor = ColorTextPrimary,
+                        focusedTextColor = ColorTextPrimary,
+                        errorBorderColor = CyberCrimson
+                    )
+                )
+
+                OutlinedTextField(
+                    value = secondaryBootstrapIps,
+                    onValueChange = {
+                        secondaryBootstrapIps = it
+                        dohError = null
+                    },
+                    label = { Text("備援 Bootstrap IPv4 (逗號分隔)") },
+                    placeholder = { Text("203.0.113.55") },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CyberEmerald,
+                        focusedLabelColor = CyberEmerald,
+                        unfocusedTextColor = ColorTextPrimary,
+                        focusedTextColor = ColorTextPrimary,
+                        errorBorderColor = CyberCrimson
+                    )
+                )
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            if (allowPlaintextFallback) "加密優先，允許 UDP/53 明文降級"
+                            else "僅加密，DoH 不可用時回覆 SERVFAIL",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ColorTextPrimary
+                        )
+                        Text(
+                            "僅加密模式的自訂 DoH 主機名稱必須填 Bootstrap IPv4。",
+                            fontSize = 11.sp,
+                            color = ColorTextSecondary
+                        )
+                    }
+                    Switch(
+                        checked = allowPlaintextFallback,
+                        onCheckedChange = { allowPlaintextFallback = it },
+                        modifier = Modifier.testTag("dialog_plaintext_fallback_switch")
+                    )
+                }
+                dohError?.let {
+                    Text(it, fontSize = 12.sp, color = CyberCrimson)
+                }
             }
         },
         confirmButton = {
@@ -1253,16 +1464,43 @@ fun AddDnsDialog(
                     val isNameValid = trimmedName.isNotEmpty()
                     val isPrimaryValid = validateIp(trimmedPrimary)
                     val isSecondaryValid = trimmedSecondary.isEmpty() || validateIp(trimmedSecondary)
+                    dohError = DohEndpointConfiguration.validationError(
+                        primaryDohUrl,
+                        primaryBootstrapIps,
+                        strict = !allowPlaintextFallback
+                    ) ?: DohEndpointConfiguration.validationError(
+                        secondaryDohUrl,
+                        secondaryBootstrapIps,
+                        strict = !allowPlaintextFallback
+                    ) ?: if (!allowPlaintextFallback &&
+                        !DohEndpointConfiguration.hasUsableEncryptedEndpoint(
+                            trimmedPrimary,
+                            trimmedSecondary.takeIf(String::isNotEmpty),
+                            primaryDohUrl.trim().takeIf(String::isNotEmpty),
+                            primaryBootstrapIps.trim(),
+                            secondaryDohUrl.trim().takeIf(String::isNotEmpty),
+                            secondaryBootstrapIps.trim()
+                        )
+                    ) {
+                        DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR
+                    } else {
+                        null
+                    }
 
                     nameError = !isNameValid
                     primaryError = !isPrimaryValid
                     secondaryError = !isSecondaryValid
 
-                    if (isNameValid && isPrimaryValid && isSecondaryValid) {
+                    if (isNameValid && isPrimaryValid && isSecondaryValid && dohError == null) {
                         onConfirm(
                             trimmedName,
                             trimmedPrimary,
-                            trimmedSecondary.takeIf { it.isNotEmpty() }
+                            trimmedSecondary.takeIf { it.isNotEmpty() },
+                            allowPlaintextFallback,
+                            primaryDohUrl.trim().takeIf(String::isNotEmpty),
+                            primaryBootstrapIps.trim().takeIf(String::isNotEmpty),
+                            secondaryDohUrl.trim().takeIf(String::isNotEmpty),
+                            secondaryBootstrapIps.trim().takeIf(String::isNotEmpty)
                         )
                     }
                 },

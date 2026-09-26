@@ -8,7 +8,8 @@ DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標
 
 - 使用 Android `VpnService` 建立僅涵蓋指定 DNS 位址的本機介面。
 - 內建 Google DNS、Cloudflare DNS、AdGuard DNS 與 Quad9 預設值。
-- 已知的內建解析器優先使用 DNS-over-HTTPS；不支援 DoH 的自訂解析器及 DoH 失敗情況會改用標準 UDP DNS。
+- 可為每組解析器選擇「加密優先，允許 UDP/53 降級」或「僅加密」；舊設定升級後保留原本的明文降級行為。
+- 支援自訂 HTTPS DoH 主要與備援端點；自訂主機名稱使用明確的 bootstrap IPv4 位址，並保留 HTTPS 憑證及 hostname 驗證。
 - 依內建規則與 APK 內固定版本的 1Hosts Lite compiled blocklist，以 NXDOMAIN 回覆廣告、追蹤及惡意網域。
 - 阻擋規則已由可單元測試的 `DomainMatcher` 元件處理，並保留既有的決策快取與 VPN DNS 熱路徑行為。
 - APK 內的 `active.bin` 含 102,972 筆固定來源規則；若 App 私有 `blocklists/active.bin` 存在，則作為本機 override。parent-domain matching 受 APK 內已驗證的 Public Suffix List 邊界限制。
@@ -31,6 +32,8 @@ DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆
 ## 隱私
 
 DNS Shield 不包含帳號、分析 SDK、廣告 SDK或開發者營運的後端服務。DNS 查詢會傳送至使用者選擇的第三方解析器；已安裝 App 清單、排除名單與設定不會由 DNS Shield 上傳。
+
+DoH 將 DNS 查詢包在 HTTPS 傳輸中，但 DNS Shield 不會在本機驗證 DNSSEC。選擇「僅加密」時，DoH 端點故障、退避或自訂 bootstrap 不可用都會回覆 SERVFAIL，且不會降級為 UDP/53；「加密優先」會在加密端點失敗時使用未加密 UDP/53。自訂 DoH hostname 的 bootstrap 只使用設定的數字 IP，不會再透過系統 DNS 查詢該 hostname。
 
 完整資料處理方式請參閱 [PRIVACY.md](PRIVACY.md)。
 

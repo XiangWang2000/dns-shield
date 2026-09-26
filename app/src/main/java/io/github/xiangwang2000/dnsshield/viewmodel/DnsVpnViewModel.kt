@@ -14,6 +14,7 @@ import io.github.xiangwang2000.dnsshield.data.BypassedApp
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
+import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
 import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
 import io.github.xiangwang2000.dnsshield.service.VpnToggleAction
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +35,7 @@ data class DnsShieldUiState(
     val blockedAds: Int = 0,
     val savedBytes: Long = 0L,
     val activeDns: String = "None",
+    val dnsTransportStatus: String = "尚無上游查詢",
     val logs: List<String> = emptyList(),
     val dnsServers: List<DnsServer> = emptyList(),
     val activeDnsServer: DnsServer? = null,
@@ -55,6 +57,7 @@ data class VpnMetricsState(
 data class VpnStatusAndDnsState(
     val lifecycleState: VpnLifecycleState,
     val activeDns: String,
+    val dnsTransportStatus: String,
     val dnsServers: List<DnsServer>,
     val activeDnsServer: DnsServer?
 ) {
@@ -109,6 +112,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _activeDns = MutableStateFlow(DnsVpnService.activeDnsFlow.value)
     val activeDns = _activeDns.asStateFlow()
+
+    private val _dnsTransportStatus = MutableStateFlow(DnsVpnService.dnsTransportStatusFlow.value)
 
     private val _liveLogs = MutableStateFlow<List<String>>(DnsVpnService.liveLogsFlow.value)
     val liveLogs = _liveLogs.asStateFlow()
@@ -175,10 +180,11 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     private val vpnStatusAndDnsStateFlow: Flow<VpnStatusAndDnsState> = combine(
         _vpnLifecycleState,
         _activeDns,
+        _dnsTransportStatus,
         dnsServers,
         activeDnsServer
-    ) { lifecycleState, activeDns, servers, activeServer ->
-        VpnStatusAndDnsState(lifecycleState, activeDns, servers, activeServer)
+    ) { lifecycleState, activeDns, transportStatus, servers, activeServer ->
+        VpnStatusAndDnsState(lifecycleState, activeDns, transportStatus, servers, activeServer)
     }
 
     private val appListStateFlow: Flow<AppListState> = combine(
@@ -203,6 +209,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             blockedAds = metrics.blockedAds,
             savedBytes = metrics.savedBytes,
             activeDns = statusDns.activeDns,
+            dnsTransportStatus = statusDns.dnsTransportStatus,
             logs = metrics.logs,
             dnsServers = statusDns.dnsServers,
             activeDnsServer = statusDns.activeDnsServer,
@@ -229,6 +236,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             blockedAds = _blockedAds.value,
             savedBytes = _savedBytes.value,
             activeDns = _activeDns.value,
+            dnsTransportStatus = _dnsTransportStatus.value,
             logs = _liveLogs.value,
             dnsServers = emptyList(),
             activeDnsServer = null,
@@ -266,6 +274,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         collectServiceFlow(DnsVpnService.blockedAdsFlow, _blockedAds)
         collectServiceFlow(DnsVpnService.savedBytesFlow, _savedBytes)
         collectServiceFlow(DnsVpnService.activeDnsFlow, _activeDns)
+        collectServiceFlow(DnsVpnService.dnsTransportStatusFlow, _dnsTransportStatus)
         collectServiceFlow(DnsVpnService.liveLogsFlow, _liveLogs)
         collectServiceFlow(DnsVpnService.rulePolicyStatusFlow, _rulePolicyStatus)
 
@@ -372,24 +381,100 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                 // Use cross-process UPDATE_DNS intent command
                 val intent = Intent(getApplication(), DnsVpnService::class.java).apply {
                     action = DnsVpnService.ACTION_UPDATE_DNS
-                    putExtra("primary", selected.primaryIp)
-                    putExtra("secondary", selected.secondaryIp)
-                    putExtra("dnsName", selected.name)
+                    putExtra("resolverId", selected.id)
                 }
                 getApplication<Application>().startService(intent)
             }
         }
     }
 
-    fun addCustomDnsServer(name: String, primaryIp: String, secondaryIp: String?) {
+    fun setPlaintextFallback(server: DnsServer, allow: Boolean) {
+        if (!allow && !DohEndpointConfiguration.hasUsableEncryptedEndpoint(server)) {
+            val message = DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR
+            addLog("無法啟用僅加密模式：$message")
+            Toast.makeText(getApplication(), message, Toast.LENGTH_LONG).show()
+            return
+        }
+
+        // Fence sends synchronously; the Room write and service update happen below.
+        DnsVpnService.setPlaintextFallbackAllowed(server.id, allow)
+        viewModelScope.launch(Dispatchers.IO) {
+            if (dnsDao.updatePlaintextFallback(server.id, allow) == 0) return@launch
+            addLog(
+                if (allow) "DNS 傳輸政策已設為加密優先，可在 DoH 失敗時降級 UDP/53"
+                else "DNS 傳輸政策已設為僅加密；DoH 無法使用時將回覆 SERVFAIL"
+            )
+            val activeServer = dnsDao.getActiveDnsServer()
+            if (activeServer?.id == server.id) {
+                getApplication<Application>().startService(
+                    Intent(getApplication(), DnsVpnService::class.java).apply {
+                        action = DnsVpnService.ACTION_UPDATE_DNS
+                        putExtra("resolverId", server.id)
+                    }
+                )
+            }
+        }
+    }
+
+    fun addCustomDnsServer(
+        name: String,
+        primaryIp: String,
+        secondaryIp: String?,
+        allowPlaintextFallback: Boolean = true,
+        primaryDohUrl: String? = null,
+        primaryDohBootstrapIps: String? = null,
+        secondaryDohUrl: String? = null,
+        secondaryDohBootstrapIps: String? = null
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             val trimmedName = name.trim()
             val trimmedPrimary = primaryIp.trim()
             val trimmedSec = secondaryIp?.trim()?.let { if (it.isBlank()) null else it }
+            val trimmedPrimaryDohUrl = primaryDohUrl?.trim()?.takeIf(String::isNotEmpty)
+            val trimmedPrimaryBootstrap = primaryDohBootstrapIps?.trim().orEmpty()
+            val trimmedSecondaryDohUrl = secondaryDohUrl?.trim()?.takeIf(String::isNotEmpty)
+            val trimmedSecondaryBootstrap = secondaryDohBootstrapIps?.trim().orEmpty()
 
             if (trimmedName.isEmpty() || trimmedPrimary.isEmpty()) {
                 withContext(Dispatchers.Main) {
                     Toast.makeText(getApplication(), "名稱與主要 IP 不可空白", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            val dohError = sequenceOf(
+                DohEndpointConfiguration.validationError(
+                    trimmedPrimaryDohUrl.orEmpty(),
+                    trimmedPrimaryBootstrap,
+                    strict = !allowPlaintextFallback
+                ),
+                DohEndpointConfiguration.validationError(
+                    trimmedSecondaryDohUrl.orEmpty(),
+                    trimmedSecondaryBootstrap,
+                    strict = !allowPlaintextFallback
+                )
+            ).filterNotNull().firstOrNull()
+            if (dohError != null) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(getApplication(), dohError, Toast.LENGTH_LONG).show()
+                }
+                return@launch
+            }
+            if (!allowPlaintextFallback && !DohEndpointConfiguration.hasUsableEncryptedEndpoint(
+                    trimmedPrimary,
+                    trimmedSec,
+                    trimmedPrimaryDohUrl,
+                    trimmedPrimaryBootstrap,
+                    trimmedSecondaryDohUrl,
+                    trimmedSecondaryBootstrap
+                )
+            ) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        getApplication(),
+                        DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR,
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
                 return@launch
             }
@@ -419,7 +504,18 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                 primaryIp = trimmedPrimary,
                 secondaryIp = trimmedSec,
                 isCustom = true,
-                isActive = false
+                isActive = false,
+                allowPlaintextFallback = allowPlaintextFallback,
+                primaryDohUrl = trimmedPrimaryDohUrl,
+                primaryDohBootstrapIps = DohEndpointConfiguration
+                    .parseBootstrapIpv4Addresses(trimmedPrimaryBootstrap)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.joinToString(","),
+                secondaryDohUrl = trimmedSecondaryDohUrl,
+                secondaryDohBootstrapIps = DohEndpointConfiguration
+                    .parseBootstrapIpv4Addresses(trimmedSecondaryBootstrap)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.joinToString(",")
             )
             dnsDao.insertDnsServer(newDns)
             addLog("新增自訂 DNS：${newDns.name} (${newDns.primaryIp})")
@@ -447,9 +543,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                     // Use cross-process UPDATE_DNS intent command
                     val intent = Intent(getApplication(), DnsVpnService::class.java).apply {
                         action = DnsVpnService.ACTION_UPDATE_DNS
-                        putExtra("primary", newActive.primaryIp)
-                        putExtra("secondary", newActive.secondaryIp)
-                        putExtra("dnsName", newActive.name)
+                        putExtra("resolverId", newActive.id)
                     }
                     getApplication<Application>().startService(intent)
                 }

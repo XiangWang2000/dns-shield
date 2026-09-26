@@ -13,6 +13,7 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import io.github.xiangwang2000.dnsshield.BuildConfig
 import io.github.xiangwang2000.dnsshield.MainActivity
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
@@ -25,6 +26,7 @@ import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
 import io.github.xiangwang2000.dnsshield.blocking.RuleBlocklistSource
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
+import io.github.xiangwang2000.dnsshield.data.DnsServer
 import kotlin.coroutines.resume
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -75,7 +77,13 @@ class DnsVpnService : VpnService() {
         val blockedAdsFlow = MutableStateFlow(0)
         val savedBytesFlow = MutableStateFlow(0L)
         val activeDnsFlow = MutableStateFlow("None")
+        val dnsTransportStatusFlow = MutableStateFlow("尚無上游查詢")
         val liveLogsFlow = MutableStateFlow<List<String>>(emptyList())
+        private val plaintextFallbackFence = DnsPlaintextFallbackFence()
+
+        fun setPlaintextFallbackAllowed(resolverId: Int, allowed: Boolean) {
+            plaintextFallbackFence.setAllowed(resolverId, allowed)
+        }
         val rulePolicyStatusFlow = MutableStateFlow(RulePolicyStatus.NotLoaded)
 
         // Atomic counters for perfectly thread-safe, concurrent statistics updates
@@ -158,13 +166,7 @@ class DnsVpnService : VpnService() {
         }
 
         fun getDoHUrl(ip: String): String? {
-            return when (ip) {
-                "8.8.8.8", "8.8.4.4" -> "https://dns.google/dns-query"
-                "1.1.1.1", "1.0.0.1" -> "https://cloudflare-dns.com/dns-query"
-                "94.140.14.14", "94.140.15.15" -> "https://dns.adguard-dns.com/dns-query"
-                "9.9.9.9", "149.112.112.112" -> "https://dns.quad9.net/dns-query"
-                else -> null
-            }
+            return DohEndpointConfiguration.defaultUrlForIp(ip)
         }
 
         private fun putCache(key: DnsQueryKey, responseData: ByteArray, query: ParsedDnsQuery) {
@@ -419,12 +421,7 @@ class DnsVpnService : VpnService() {
         data class Start(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
         data class Stop(val startId: Int) : LifecycleCommand()
         data class Restart(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
-        data class UpdateDns(
-            val startId: Int,
-            val primary: String,
-            val secondary: String?,
-            val dnsName: String
-        ) : LifecycleCommand()
+        data class UpdateDns(val startId: Int, val resolverId: Int) : LifecycleCommand()
         data class ClearLogs(val startId: Int) : LifecycleCommand()
         data class TunnelEnded(
             val generation: Long,
@@ -434,8 +431,7 @@ class DnsVpnService : VpnService() {
     }
 
     private data class DnsStateSnapshot(
-        val primary: String,
-        val secondary: String?,
+        val server: DnsServer,
         val resolverGeneration: Int,
         val policyAssembly: DomainPolicyAssembly
     )
@@ -469,16 +465,19 @@ class DnsVpnService : VpnService() {
 
     @Volatile private var isVpnRunning = false
 
-    private var upstreamDnsPrimary: String = "8.8.8.8"
-    private var upstreamDnsSecondary: String? = "8.8.4.4"
+    private var upstreamDnsServer = DnsServer(
+        name = "Google DNS",
+        primaryIp = "8.8.8.8",
+        secondaryIp = "8.8.4.4"
+    )
 
-    private fun updateResolverState(primary: String, secondary: String?) {
+    private fun updateResolverState(server: DnsServer) {
         synchronized(dnsStateLock) {
-            upstreamDnsPrimary = primary
-            upstreamDnsSecondary = secondary
+            upstreamDnsServer = server
             resolverGeneration++
             clearDnsStateLocked()
         }
+        dnsTransportStatusFlow.value = "設定已更新，等待下一次查詢"
     }
 
     private fun invalidatePolicyState() {
@@ -533,8 +532,7 @@ class DnsVpnService : VpnService() {
 
     private fun snapshotDnsState(): DnsStateSnapshot = synchronized(dnsStateLock) {
         DnsStateSnapshot(
-            primary = upstreamDnsPrimary,
-            secondary = upstreamDnsSecondary,
+            server = upstreamDnsServer,
             resolverGeneration = resolverGeneration,
             policyAssembly = domainPolicy.snapshot()
         )
@@ -569,12 +567,18 @@ class DnsVpnService : VpnService() {
                         }
                     }
                     is LifecycleCommand.UpdateDns -> {
-                        updateResolverState(command.primary, command.secondary)
-                        activeDnsFlow.value = command.dnsName + " (" + command.primary + ")"
-                        addLog(
-                            "[DNS 變更同步] 已即時套用新 DNS 設定：" +
-                                command.dnsName + " (" + command.primary + ")"
-                        )
+                        val server = withContext(Dispatchers.IO) {
+                            AppDatabase.getDatabase(this@DnsVpnService)
+                                .dnsDao()
+                                .getDnsServerById(command.resolverId)
+                        }
+                        if (server != null) {
+                            updateResolverState(server)
+                            activeDnsFlow.value = "${server.name} (${server.primaryIp})"
+                            addLog("[DNS 變更同步] 已即時套用新 DNS 設定：${server.name} (${server.primaryIp})")
+                        } else {
+                            addLog("[DNS 變更同步] 找不到 DNS 設定 id=${command.resolverId}")
+                        }
                         stopSelfIfIdle(command.startId)
                     }
                     is LifecycleCommand.ClearLogs -> {
@@ -606,12 +610,10 @@ class DnsVpnService : VpnService() {
                 lifecycleCommands.trySend(LifecycleCommand.Restart(startId, requestGeneration))
             }
             ACTION_UPDATE_DNS -> {
-                val primary = intent.getStringExtra("primary") ?: "8.8.8.8"
-                val secondary = intent.getStringExtra("secondary")
-                val dnsName = intent.getStringExtra("dnsName") ?: "Google DNS"
-                lifecycleCommands.trySend(
-                    LifecycleCommand.UpdateDns(startId, primary, secondary, dnsName)
-                )
+                val resolverId = intent.getIntExtra("resolverId", -1)
+                if (resolverId >= 0) {
+                    lifecycleCommands.trySend(LifecycleCommand.UpdateDns(startId, resolverId))
+                }
             }
             ACTION_CLEAR_LOGS -> {
                 lifecycleCommands.trySend(LifecycleCommand.ClearLogs(startId))
@@ -673,12 +675,15 @@ class DnsVpnService : VpnService() {
                 abandonSupersededStartup()
                 return
             }
-            val primary = activeServer?.primaryIp ?: "8.8.8.8"
-            val secondary = activeServer?.secondaryIp
-            updateResolverState(primary, secondary)
-            val dnsName = activeServer?.name ?: "Google DNS"
-            activeDnsFlow.value = "$dnsName ($primary)"
-            addLog("Database loaded. Upstream DNS: " + dnsName + " (" + primary + ")")
+            val resolver = activeServer ?: DnsServer(
+                name = "Google DNS",
+                primaryIp = "8.8.8.8",
+                secondaryIp = "8.8.4.4"
+            )
+            updateResolverState(resolver)
+            dnsTransportStatusFlow.value = "尚無上游查詢"
+            activeDnsFlow.value = "${resolver.name} (${resolver.primaryIp})"
+            addLog("Database loaded. Upstream DNS: ${resolver.name} (${resolver.primaryIp})")
             addLog("Loaded " + bypassedList.size + " apps to exempt/bypass DNS VPN")
 
             // Keep establish() on the service dispatcher so destruction cannot race descriptor ownership.
@@ -879,14 +884,10 @@ class DnsVpnService : VpnService() {
             return true
         }
         if (cachedResponse != null) {
-            sendResponsePacket(
-                cachedResponse,
-                dnsPacket.sourceIp,
-                dnsPacket.destinationIp,
-                dnsPacket.sourcePort,
-                outputStream,
-                transactionIdSource = dnsPacket.payload
-            )
+            if (!sendResolvedResponseIfCurrent(dnsPacket, dnsState, cachedResponse, outputStream)) {
+                sendServFailResponse(dnsPacket, outputStream)
+                return true
+            }
             recordResolvedQuery()
             val domain = dnsPacket.query.question.domainName ?: "Unknown"
             addDnsQueryLog {
@@ -918,6 +919,27 @@ class DnsVpnService : VpnService() {
         return true
     }
 
+    private fun sendResolvedResponseIfCurrent(
+        dnsPacket: ParsedIpv4UdpDnsQuery,
+        dnsState: DnsStateSnapshot,
+        response: ByteArray,
+        outputStream: FileOutputStream
+    ): Boolean = synchronized(dnsStateLock) {
+        if (!isCurrentDnsState(dnsState)) {
+            false
+        } else {
+            sendResponsePacket(
+                responseData = response,
+                clientIp = dnsPacket.sourceIp,
+                mockDnsIp = dnsPacket.destinationIp,
+                clientPort = dnsPacket.sourcePort,
+                outputStream = outputStream,
+                transactionIdSource = dnsPacket.payload
+            )
+            true
+        }
+    }
+
     private fun sendServFailResponse(
         dnsPacket: ParsedIpv4UdpDnsQuery,
         outputStream: FileOutputStream
@@ -932,7 +954,8 @@ class DnsVpnService : VpnService() {
     }
 
     private suspend fun performDohLookup(
-        dohUrl: String,
+        endpoint: DnsDohEndpoint,
+        resolverEndpoints: List<DnsDohEndpoint>,
         query: ParsedDnsQuery,
         deadline: DnsRequestDeadline
     ): ByteArray? {
@@ -943,13 +966,13 @@ class DnsVpnService : VpnService() {
         val requestBody = DnsMessageValidator.prepareUpstreamQuery(query).toRequestBody(mediaType)
 
         val request = Request.Builder()
-            .url(dohUrl)
+            .url(endpoint.url)
             .header("Content-Type", "application/dns-message")
             .header("Accept", "application/dns-message")
             .post(requestBody)
             .build()
 
-        val client = getOkHttpClient()
+        val client = getOkHttpClient().forDohEndpoints(resolverEndpoints)
         val call = client.newCall(request)
         call.timeout().timeout(remainingMillis, TimeUnit.MILLISECONDS)
 
@@ -965,7 +988,7 @@ class DnsVpnService : VpnService() {
             call.enqueue(object : okhttp3.Callback {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                     if (continuation.isActive) {
-                        logDnsTransportFailure("DoH resolution failed for $dohUrl", e)
+                        logDnsTransportFailure("DoH resolution failed for ${endpoint.url}", e)
                         continuation.resume(null)
                     }
                 }
@@ -973,7 +996,7 @@ class DnsVpnService : VpnService() {
                 override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                     try {
                         if (continuation.isActive) {
-                            if (response.isSuccessful) {
+                            if (response.isSuccessful && response.request.url.isHttps) {
                                 val body = response.body
                                 val bytes = DnsDohResponseValidator.readValidatedBody(
                                     contentType = response.header("Content-Type"),
@@ -983,7 +1006,7 @@ class DnsVpnService : VpnService() {
                                 )
                                 continuation.resume(bytes)
                             } else {
-                                logDnsTransportFailure("DoH resolution error: HTTP ${response.code} for $dohUrl")
+                                logDnsTransportFailure("DoH resolution error: HTTP ${response.code} for ${endpoint.url}")
                                 continuation.resume(null)
                             }
                         } else {
@@ -1073,14 +1096,10 @@ class DnsVpnService : VpnService() {
         }
 
         if (sharedResponse != null) {
-            sendResponsePacket(
-                responseData = sharedResponse,
-                clientIp = dnsPacket.sourceIp,
-                mockDnsIp = dnsPacket.destinationIp,
-                clientPort = dnsPacket.sourcePort,
-                outputStream = outputStream,
-                transactionIdSource = dnsPayload
-            )
+            if (!sendResolvedResponseIfCurrent(dnsPacket, dnsState, sharedResponse, outputStream)) {
+                sendServFailResponse(dnsPacket, outputStream)
+                return
+            }
             recordResolvedQuery()
             addDnsQueryLog {
                 "✓ 解析成功 [ID=${formatTxId(dnsPayload)}]: $domain (${sharedResponse.size} bytes)"
@@ -1102,45 +1121,55 @@ class DnsVpnService : VpnService() {
         dnsState: DnsStateSnapshot,
         deadline: DnsRequestDeadline
     ): ByteArray? {
-        val primaryDoHUrl = getDoHUrl(dnsState.primary)
-        return DnsTransportFallback.resolve(
+        val endpoints = DohEndpointConfiguration.endpoints(dnsState.server)
+        val outcome = DnsTransportPolicy.resolve(
+            allowPlaintextFallback = dnsState.server.allowPlaintextFallback,
+            endpoints = endpoints,
             deadline = deadline,
-            primary = {
-                if (primaryDoHUrl == null || !dohFailureBackoff.tryAcquire(primaryDoHUrl)) {
+            dohQuery = { endpoint ->
+                if (!dohFailureBackoff.tryAcquire(endpoint.url)) {
                     null
                 } else {
                     val response = try {
-                        performDohLookup(primaryDoHUrl, query, deadline)
+                        performDohLookup(endpoint, endpoints, query, deadline)
                     } catch (exception: CancellationException) {
-                        dohFailureBackoff.cancelAttempt(primaryDoHUrl)
+                        dohFailureBackoff.cancelAttempt(endpoint.url)
                         throw exception
                     } catch (exception: Exception) {
-                        dohFailureBackoff.recordFailure(primaryDoHUrl)
-                        logDnsTransportFailure("DoH resolution failed for $primaryDoHUrl", exception)
+                        dohFailureBackoff.recordFailure(endpoint.url)
+                        logDnsTransportFailure("DoH resolution failed for ${endpoint.url}", exception)
                         null
                     }
                     if (response == null) {
-                        dohFailureBackoff.recordFailure(primaryDoHUrl)
+                        dohFailureBackoff.recordFailure(endpoint.url)
                     } else {
-                        dohFailureBackoff.recordSuccess(primaryDoHUrl)
-                        addDnsQueryLog {
-                            "🌐 [DoH 解析] [ID=${formatTxId(dnsPayload)}]: 透過安全 HTTPS 連線成功解析 $domain"
-                        }
+                        dohFailureBackoff.recordSuccess(endpoint.url)
                     }
                     response
                 }
             },
-            fallback = {
-                if (deadline.remainingMillis() <= 0L) {
+            udpQuery = {
+                if (!dnsState.server.allowPlaintextFallback ||
+                    !plaintextFallbackFence.allows(dnsState.server.id) ||
+                    !isCurrentDnsState(dnsState) ||
+                    deadline.remainingMillis() <= 0L
+                ) {
                     null
                 } else {
-                    val socket = DatagramSocket()
+                    val socket = PolicyFencedDatagramSocket(
+                        resolverId = dnsState.server.id,
+                        snapshotAllowsPlaintext = dnsState.server.allowPlaintextFallback,
+                        fence = plaintextFallbackFence,
+                        currentPolicyAllowsPlaintext = {
+                            isCurrentDnsState(dnsState) && deadline.remainingMillis() > 0L
+                        }
+                    )
                     try {
                         if (!protect(socket)) throw IOException("Failed to protect DNS UDP socket from the VPN.")
                         val upstreams = buildList {
-                            add(DnsUdpUpstreamEndpoint(InetAddress.getByName(dnsState.primary)))
-                            dnsState.secondary?.let { address ->
-                                add(DnsUdpUpstreamEndpoint(InetAddress.getByName(address)))
+                            add(createDnsUdpEndpoint(dnsState.server.primaryIp))
+                            dnsState.server.secondaryIp?.let { address ->
+                                add(createDnsUdpEndpoint(address))
                             }
                         }
                         DnsUdpUpstreamClient.queryWithFallback(socket, query, upstreams, deadline)
@@ -1149,7 +1178,42 @@ class DnsVpnService : VpnService() {
                     }
                 }
             }
-        )?.takeIf { deadline.remainingMillis() > 0L }
+        )
+
+        when (outcome.transport) {
+            DnsTransport.ENCRYPTED_HTTPS -> {
+                dnsTransportStatusFlow.value = "DoH 加密"
+                addDnsQueryLog {
+                    "🌐 [DoH 解析] [ID=${formatTxId(dnsPayload)}]: 透過 HTTPS 解析 $domain"
+                }
+            }
+            DnsTransport.PLAINTEXT_UDP -> {
+                dnsTransportStatusFlow.value = "UDP/53 明文降級"
+                addDnsQueryLog(important = true) {
+                    "⚠️ [DNS 降級] [ID=${formatTxId(dnsPayload)}]: DoH 不可用，改用 UDP/53 解析 $domain"
+                }
+            }
+            DnsTransport.UNAVAILABLE -> {
+                dnsTransportStatusFlow.value = if (dnsState.server.allowPlaintextFallback) {
+                    "上游不可用 · SERVFAIL"
+                } else {
+                    "僅加密 · DoH 不可用 · SERVFAIL"
+                }
+            }
+        }
+        return outcome.response?.takeIf { deadline.remainingMillis() > 0L }
+    }
+
+    private fun createDnsUdpEndpoint(ip: String): DnsUdpUpstreamEndpoint {
+        val address = InetAddress.getByName(ip)
+        val port = if (
+            BuildConfig.APPLICATION_ID.endsWith(".d08test") && address.isLoopbackAddress
+        ) {
+            BuildConfig.DNS_UDP_PORT
+        } else {
+            53
+        }
+        return DnsUdpUpstreamEndpoint(address, port)
     }
 
     private fun formatTxId(dnsPayload: ByteArray): String {
