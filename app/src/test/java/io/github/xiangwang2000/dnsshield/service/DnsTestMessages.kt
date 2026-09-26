@@ -61,6 +61,30 @@ internal object DnsTestMessages {
         }
     }
 
+    fun responseWithARecords(
+        query: ByteArray,
+        answerCount: Int,
+        authorityCount: Int = 0,
+        additionalCount: Int = 0
+    ): ByteArray {
+        val response = response(query)
+        val record = byteArrayOf(
+            0xC0.toByte(), 12, // owner name points to the question
+            0, 1, 0, 1,       // A, IN
+            0, 0, 0, 60,      // TTL
+            0, 4, 192.toByte(), 0, 2, 1
+        )
+        val recordCount = answerCount + authorityCount + additionalCount
+        return response.copyOf(response.size + record.size * recordCount).also { message ->
+            writeShort(message, 6, answerCount)
+            writeShort(message, 8, authorityCount)
+            writeShort(message, 10, additionalCount)
+            repeat(recordCount) { index ->
+                System.arraycopy(record, 0, message, response.size + index * record.size, record.size)
+            }
+        }
+    }
+
     fun responseWithOpt(
         query: ByteArray,
         extendedRcode: Int,

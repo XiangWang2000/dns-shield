@@ -35,6 +35,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -689,6 +690,7 @@ class DnsVpnService : VpnService() {
             val builder = Builder()
                 .setSession("DNS Shield")
                 .setBlocking(true)
+                .setMtu(DnsResponsePacketBuilder.TUN_MTU_BYTES)
                 .addAddress(VPN_IP, 32)
                 .addRoute(DUMMY_DNS_IP, 32)
                 .addDnsServer(DUMMY_DNS_IP)
@@ -938,7 +940,8 @@ class DnsVpnService : VpnService() {
             dnsPacket.sourceIp,
             dnsPacket.destinationIp,
             dnsPacket.sourcePort,
-            outputStream
+            outputStream,
+            query = dnsPacket.query
         )
         recordBlockedQuery(estimateSavedBytes(domain))
         addDnsQueryLog { "🛡️ [真正攔截] $domain -> NXDOMAIN" }
@@ -960,7 +963,8 @@ class DnsVpnService : VpnService() {
                 mockDnsIp = dnsPacket.destinationIp,
                 clientPort = dnsPacket.sourcePort,
                 outputStream = outputStream,
-                transactionIdSource = dnsPacket.payload
+                transactionIdSource = dnsPacket.payload,
+                query = dnsPacket.query
             )
             true
         }
@@ -975,7 +979,8 @@ class DnsVpnService : VpnService() {
             clientIp = dnsPacket.sourceIp,
             mockDnsIp = dnsPacket.destinationIp,
             clientPort = dnsPacket.sourcePort,
-            outputStream = outputStream
+            outputStream = outputStream,
+            query = dnsPacket.query
         )
     }
 
@@ -1059,14 +1064,22 @@ class DnsVpnService : VpnService() {
         mockDnsIp: ByteArray,
         clientPort: Int,
         outputStream: FileOutputStream,
-        transactionIdSource: ByteArray? = null
+        transactionIdSource: ByteArray? = null,
+        query: ParsedDnsQuery? = null
     ) {
+        val clientResponse = query?.let { dnsQuery ->
+            DnsMessageValidator.truncateResponseForClient(
+                responseData,
+                dnsQuery,
+                DnsMessageValidator.maxClientUdpResponseBytes(dnsQuery)
+            ) ?: DnsMessageValidator.buildServFailResponse(dnsQuery)
+        } ?: responseData
         val responseIpPacket = DnsResponsePacketBuilder.build(
             srcIp = mockDnsIp, // 10.0.0.1
             dstIp = clientIp,   // Client IP
             srcPort = 53,
             dstPort = clientPort,
-            payload = responseData,
+            payload = clientResponse,
             transactionIdSource = transactionIdSource
         )
 
@@ -1174,7 +1187,7 @@ class DnsVpnService : VpnService() {
                     response
                 }
             },
-            udpQuery = {
+            plaintextQuery = {
                 if (!dnsState.server.allowPlaintextFallback ||
                     !plaintextFallbackFence.allows(dnsState.server.id) ||
                     !isCurrentDnsState(dnsState) ||
@@ -1198,7 +1211,69 @@ class DnsVpnService : VpnService() {
                                 add(DnsUdpUpstreamEndpoint(InetAddress.getByName(address)))
                             }
                         }
-                        DnsUdpUpstreamClient.queryWithFallback(socket, query, upstreams, deadline)
+                        DnsUdpUpstreamClient.queryWithFallback(
+                            socket = socket,
+                            query = query,
+                            upstreams = upstreams,
+                            deadline = deadline,
+                            tcpQuery = { upstream ->
+                                if (!dnsState.server.allowPlaintextFallback ||
+                                    !plaintextFallbackFence.allows(dnsState.server.id) ||
+                                    !isCurrentDnsState(dnsState) ||
+                                    deadline.remainingMillis() <= 0L
+                                ) {
+                                    null
+                                } else {
+                                    val tcpSocket = Socket()
+                                    try {
+                                        DnsTcpUpstreamClient.query(
+                                            socket = tcpSocket,
+                                            query = query,
+                                            server = upstream.address,
+                                            port = upstream.port,
+                                            deadline = deadline,
+                                            prepareSocket = { candidate ->
+                                                if (!plaintextFallbackFence.registerTcpSocketIfAllowed(
+                                                        resolverId = dnsState.server.id,
+                                                        snapshotAllowsPlaintext = dnsState.server.allowPlaintextFallback,
+                                                        currentPolicyAllowsPlaintext = {
+                                                            isCurrentDnsState(dnsState) && deadline.remainingMillis() > 0L
+                                                        },
+                                                        socket = candidate
+                                                    )
+                                                ) {
+                                                    false
+                                                } else if (!protect(candidate)) {
+                                                    throw IOException("Failed to protect DNS TCP socket from the VPN.")
+                                                } else {
+                                                    true
+                                                }
+                                            },
+                                            sendQueryFrame = { candidate, frame ->
+                                                plaintextFallbackFence.writeTcpFrameIfAllowed(
+                                                    resolverId = dnsState.server.id,
+                                                    snapshotAllowsPlaintext = dnsState.server.allowPlaintextFallback,
+                                                    currentPolicyAllowsPlaintext = {
+                                                        isCurrentDnsState(dnsState) && deadline.remainingMillis() > 0L
+                                                    },
+                                                    socket = candidate,
+                                                    frame = frame
+                                                )
+                                            }
+                                        )
+                                    } finally {
+                                        try {
+                                            tcpSocket.close()
+                                        } finally {
+                                            plaintextFallbackFence.unregisterTcpSocket(
+                                                dnsState.server.id,
+                                                tcpSocket
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        )
                     } finally {
                         socket.close()
                     }
@@ -1217,6 +1292,12 @@ class DnsVpnService : VpnService() {
                 dnsTransportStatusFlow.value = "UDP/53 明文降級"
                 addDnsQueryLog(important = true) {
                     "⚠️ [DNS 降級] [ID=${formatTxId(dnsPayload)}]: DoH 不可用，改用 UDP/53 解析 $domain"
+                }
+            }
+            DnsTransport.PLAINTEXT_TCP -> {
+                dnsTransportStatusFlow.value = "TCP/53 明文降級"
+                addDnsQueryLog(important = true) {
+                    "⚠️ [DNS 降級] [ID=${formatTxId(dnsPayload)}]: UDP 回應遭截短，改用 TCP/53 解析 $domain"
                 }
             }
             DnsTransport.UNAVAILABLE -> {

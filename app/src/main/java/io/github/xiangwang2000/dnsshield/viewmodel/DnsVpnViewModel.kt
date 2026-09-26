@@ -396,9 +396,9 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        // Fence sends synchronously; the Room write and service update happen below.
-        DnsVpnService.setPlaintextFallbackAllowed(server.id, allow)
         viewModelScope.launch(Dispatchers.IO) {
+            // Fence before persistence without waiting on socket I/O on the UI thread.
+            DnsVpnService.setPlaintextFallbackAllowed(server.id, allow)
             if (dnsDao.updatePlaintextFallback(server.id, allow) == 0) return@launch
             addLog(
                 if (allow) "DNS 傳輸政策已設為加密優先，可在 DoH 失敗時降級 UDP/53"

@@ -53,9 +53,11 @@ internal object DnsUdpUpstreamClient {
         socket: DatagramSocket,
         query: ParsedDnsQuery,
         upstreams: List<DnsUdpUpstreamEndpoint>,
-        deadline: DnsRequestDeadline
-    ): ByteArray? {
+        deadline: DnsRequestDeadline,
+        tcpQuery: suspend (DnsUdpUpstreamEndpoint) -> ByteArray? = { null }
+    ): DnsResolutionOutcome? {
         var lastFailure: Exception? = null
+        var lastTruncatedResponse: ByteArray? = null
         upstreams.forEachIndexed { index, upstream ->
             val remainingMillis = deadline.remainingMillis()
             if (remainingMillis <= 0L) return null
@@ -74,13 +76,28 @@ internal object DnsUdpUpstreamClient {
                     deadline = deadline,
                     attemptTimeoutMillis = attemptBudgetMillis
                 )
-                if (response != null) return response
+                if (response != null) {
+                    if (DnsMessageValidator.isTruncatedResponse(response, query)) {
+                        if (DnsMessageValidator.isValidResponse(response, query)) {
+                            lastTruncatedResponse = response
+                        }
+                        if (deadline.remainingMillis() > 0L) {
+                            val tcpResponse = tcpQuery(upstream)
+                            if (tcpResponse != null && DnsMessageValidator.isValidResponse(tcpResponse, query)) {
+                                return DnsResolutionOutcome(tcpResponse, DnsTransport.PLAINTEXT_TCP)
+                            }
+                        }
+                    } else {
+                        return DnsResolutionOutcome(response, DnsTransport.PLAINTEXT_UDP)
+                    }
+                }
             } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
                 lastFailure = exception
             }
         }
+        lastTruncatedResponse?.let { return DnsResolutionOutcome(it, DnsTransport.PLAINTEXT_UDP) }
         lastFailure?.let { throw it }
         return null
     }
@@ -131,6 +148,11 @@ internal object DnsUdpUpstreamClient {
                 responsePacket.offset,
                 responsePacket.offset + responsePacket.length
             )
+            if (responsePacket.length >= buffer.size) {
+                if (DnsMessageValidator.isTruncatedResponse(response, query)) return response
+                continue
+            }
+            if (DnsMessageValidator.isTruncatedResponse(response, query)) return response
             if (response.size <= query.maxUdpResponseBytes && DnsMessageValidator.isValidResponse(response, query)) {
                 return response
             }
