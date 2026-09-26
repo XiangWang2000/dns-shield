@@ -13,6 +13,7 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import io.github.xiangwang2000.dnsshield.BuildConfig
 import io.github.xiangwang2000.dnsshield.MainActivity
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
@@ -1193,9 +1194,9 @@ class DnsVpnService : VpnService() {
                     try {
                         if (!protect(socket)) throw IOException("Failed to protect DNS UDP socket from the VPN.")
                         val upstreams = buildList {
-                            add(DnsUdpUpstreamEndpoint(InetAddress.getByName(dnsState.server.primaryIp)))
+                            add(createDnsUdpEndpoint(dnsState.server.primaryIp))
                             dnsState.server.secondaryIp?.let { address ->
-                                add(DnsUdpUpstreamEndpoint(InetAddress.getByName(address)))
+                                add(createDnsUdpEndpoint(address))
                             }
                         }
                         DnsUdpUpstreamClient.queryWithFallback(socket, query, upstreams, deadline)
@@ -1228,6 +1229,18 @@ class DnsVpnService : VpnService() {
             }
         }
         return outcome.response?.takeIf { deadline.remainingMillis() > 0L }
+    }
+
+    private fun createDnsUdpEndpoint(ip: String): DnsUdpUpstreamEndpoint {
+        val address = InetAddress.getByName(ip)
+        val port = if (
+            BuildConfig.APPLICATION_ID.endsWith(".d08test") && address.isLoopbackAddress
+        ) {
+            BuildConfig.DNS_UDP_PORT
+        } else {
+            53
+        }
+        return DnsUdpUpstreamEndpoint(address, port)
     }
 
     private fun formatTxId(dnsPayload: ByteArray): String {

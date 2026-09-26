@@ -58,6 +58,7 @@ android {
     targetSdk = 37
     versionCode = 5
     versionName = "1.2.2"
+    buildConfigField("int", "DNS_UDP_PORT", "53")
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     if (d08InstrumentationRequested) testBuildType = "d08test"
     if (d12InstrumentationRequested) testBuildType = "d12test"
@@ -117,6 +118,7 @@ android {
     create("d08test") {
       initWith(getByName("debug"))
       applicationIdSuffix = ".d08test"
+      buildConfigField("int", "DNS_UDP_PORT", "15353")
       matchingFallbacks += listOf("debug")
     }
     create("d12test") {
@@ -131,6 +133,7 @@ android {
   }
   buildFeatures {
     compose = true
+    buildConfig = true
   }
   sourceSets {
     getByName("androidTest") {

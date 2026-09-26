@@ -52,3 +52,20 @@ defaults, bypass state, and existing user rules plus their unique index passed.
 Both isolated APKs built successfully; the application and instrumentation packages
 were removed after the run. The production package remained installed; this run
 did not start a VPN or reboot the device. Strict TUN/TLS/UI acceptance is unchanged.
+
+
+## TLS policy through TUN (2026-09-27)
+
+ASUS_Z01RD / Android 10: `DohTlsFallbackInstrumentedTest` passed 2/2 in
+10.884 s. Both cases reach a loopback TLS server with a self-signed certificate
+using the production trust checks. Strict mode returns SERVFAIL with zero
+matching plaintext UDP queries; allowed fallback returns the fake UDP answer
+with exactly one matching query. No production trust override was added.
+
+The fixture uses legacy PKCS12 encryption compatible with Android 10. The
+unprivileged loopback port 15353 applies only to `.d08test`. Client UDP uses
+bounded retries during VPN startup; ambient phone DNS does not affect QNAME
+counts. `verify.ps1` and both isolated APK builds passed; the final retry-only
+instrumentation edit was compiled and exercised on the phone.
+Raw local result: `captures/d08-tls-device-retry.txt` (not tracked).
+Custom endpoint UI, bootstrap failure and network/error matrices remain pending.
