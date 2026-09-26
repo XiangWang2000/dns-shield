@@ -21,16 +21,18 @@ sealed class CompiledBlocklistStatus {
 data class DomainPolicyAssembly(
     val matcher: DomainMatcher,
     val compiledBlocklistStatus: CompiledBlocklistStatus,
+    val userRuleMatcher: UserDomainRuleMatcher = UserDomainRuleMatcher(emptyList()),
     val displayStatus: RulePolicyStatus = RulePolicyStatus()
 )
 
 /**
- * Assembles allowlist-first blocking policy without depending on the VPN lifecycle.
+ * Assembles user-rule-first blocking policy without depending on the VPN lifecycle.
  *
  * Built-in blocking is always present. A configured compiled blocklist is added only after it is
  * loaded and validated successfully. When a registrable-domain resolver is available, only the
  * compiled blocklist matcher is extended through [ParentDomainMatcher]; built-in and exact
- * allowlist semantics remain unchanged.
+ * allowlist semantics remain unchanged. User rules override built-in and compiled matchers; the
+ * most-specific matching user rule decides, with an exact rule winning on its apex.
  *
  * The resolver provider is invoked only after a compiled blocklist has loaded and validated. A
  * recoverable resolver-provider failure keeps the validated compiled matcher exact-only instead of
@@ -40,12 +42,14 @@ object DomainPolicyAssembler {
     fun assemble(
         compiledBlocklistFile: File? = null,
         allowlist: DomainAllowlist = DomainAllowlist.NONE,
+        userRules: Iterable<UserDomainRule> = emptyList(),
         builtInMatcher: DomainMatcher = BuiltInDomainMatcher(),
         loadCompiledBlocklist: (File) -> CompiledBlocklist = CompiledBlocklistLoader::fromFile,
         compiledBlocklistProvider: (() -> CompiledBlocklist)? = null,
         registrableDomainResolverProvider: () -> RegistrableDomainResolver? = { null }
     ): DomainPolicyAssembly {
         val blockers = mutableListOf(builtInMatcher)
+        val userRuleMatcher = UserDomainRuleMatcher(userRules)
         require(compiledBlocklistFile == null || compiledBlocklistProvider == null) {
             "Configure either a blocklist file or a blocklist provider, not both"
         }
@@ -54,8 +58,9 @@ object DomainPolicyAssembler {
 
         if (blocklistProvider == null) {
             return DomainPolicyAssembly(
-                matcher = CompositeDomainMatcher(allowlist, blockers),
-                compiledBlocklistStatus = CompiledBlocklistStatus.NotConfigured
+                matcher = CompositeDomainMatcher(allowlist, blockers, userRuleMatcher),
+                compiledBlocklistStatus = CompiledBlocklistStatus.NotConfigured,
+                userRuleMatcher = userRuleMatcher
             )
         }
 
@@ -65,11 +70,12 @@ object DomainPolicyAssembler {
             loaded
         } catch (exception: Exception) {
             return DomainPolicyAssembly(
-                matcher = CompositeDomainMatcher(allowlist, blockers),
+                matcher = CompositeDomainMatcher(allowlist, blockers, userRuleMatcher),
                 compiledBlocklistStatus = CompiledBlocklistStatus.Rejected(
                     exception.message?.takeIf(String::isNotBlank)
                         ?: exception.javaClass.simpleName
-                )
+                ),
+                userRuleMatcher = userRuleMatcher
             )
         }
 
@@ -84,8 +90,9 @@ object DomainPolicyAssembler {
         blockers += compiledMatcher
 
         return DomainPolicyAssembly(
-            matcher = CompositeDomainMatcher(allowlist, blockers),
-            compiledBlocklistStatus = CompiledBlocklistStatus.Loaded(compiledBlocklist.entryCount)
+            matcher = CompositeDomainMatcher(allowlist, blockers, userRuleMatcher),
+            compiledBlocklistStatus = CompiledBlocklistStatus.Loaded(compiledBlocklist.entryCount),
+            userRuleMatcher = userRuleMatcher
         )
     }
 }
