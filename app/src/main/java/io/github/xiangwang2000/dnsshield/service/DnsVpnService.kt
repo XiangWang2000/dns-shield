@@ -14,6 +14,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.xiangwang2000.dnsshield.MainActivity
+import io.github.xiangwang2000.dnsshield.BuildConfig
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
@@ -1074,11 +1075,15 @@ class DnsVpnService : VpnService() {
                 protect(socket)
 
                 val primaryAddress = InetAddress.getByName(dnsState.primary)
-                responseData = DnsUdpUpstreamClient.query(socket, query, primaryAddress)
+                responseData = DnsUdpUpstreamClient.query(
+                    socket, query, primaryAddress, port = BuildConfig.DNS_UPSTREAM_PORT
+                )
 
                 if (responseData == null && dnsState.secondary != null) {
                     val secondaryAddress = InetAddress.getByName(dnsState.secondary)
-                    responseData = DnsUdpUpstreamClient.query(socket, query, secondaryAddress)
+                    responseData = DnsUdpUpstreamClient.query(
+                        socket, query, secondaryAddress, port = BuildConfig.DNS_UPSTREAM_PORT
+                    )
                 }
             } catch (e: Exception) {
                 logDnsTransportFailure("Standard UDP resolution fallback exception", e)

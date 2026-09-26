@@ -30,3 +30,18 @@ This is database and policy acceptance, not a TUN/UI integration run. Immediate
 application to live DNS traffic, live cache invalidation, UI add/delete/undo, and
 process-recreation behavior still require the service/UI matrix. Keep the issue
 open and In Progress until that evidence is complete.
+
+
+## Live TUN acceptance (2026-09-27)
+
+ASUS_Z01RD / Android 10: `LiveUserDomainRuleTunInstrumentedTest` passed
+1/1 in 0.898 s. The actual VPN path changed BLOCK -> ALLOW -> BLOCK;
+the repeated allowed query used the positive cache, and reload discarded that
+cache entry before blocking again. The fake UDP server runs on loopback port
+15353 only in `.d07test`, continuously answers, and counts the test QNAME only.
+The test awaits Android VPN network readiness. Build both app and test APKs;
+building only the instrumentation APK does not update app manifest permissions.
+
+`verify.ps1`, both isolated APK builds, and `git diff --check` passed.
+Raw local result: `captures/d07-live-policy-device2.txt` (not tracked).
+UI add/delete/undo and process recreation remain separate pending acceptance.
