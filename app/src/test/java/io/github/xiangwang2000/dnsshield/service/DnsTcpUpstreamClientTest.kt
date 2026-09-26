@@ -72,6 +72,7 @@ class DnsTcpUpstreamClientTest {
                 port = server.localPort,
                 timeoutMillis = 1_500,
                 prepareSocket = { candidate ->
+                    assertTrue(candidate.isBound, "protect requires an allocated socket descriptor")
                     preparedBeforeConnect.set(!candidate.isConnected)
                     true
                 }

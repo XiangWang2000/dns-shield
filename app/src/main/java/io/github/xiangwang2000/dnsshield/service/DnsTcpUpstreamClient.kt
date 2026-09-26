@@ -92,6 +92,8 @@ internal object DnsTcpUpstreamClient {
     ): ByteArray? {
         val upstreamQuery = DnsMessageValidator.prepareUpstreamQuery(query)
         if (upstreamQuery.size !in 12..DnsMessageValidator.MAX_DNS_MESSAGE_BYTES) return null
+        // Android VpnService.protect needs an allocated descriptor before connect.
+        if (!socket.isBound) socket.bind(InetSocketAddress(0))
         if (!prepareSocket(socket)) return null
 
         val initialTimeout = remainingTimeoutMillis(deadlineNanos) ?: return null
