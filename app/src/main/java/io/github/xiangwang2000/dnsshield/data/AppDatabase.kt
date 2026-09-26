@@ -2,15 +2,47 @@ package io.github.xiangwang2000.dnsshield.data
 
 import android.content.Context
 import androidx.room.Database
+import androidx.room.migration.Migration
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [BypassedApp::class, DnsServer::class], version = 1, exportSchema = false)
+@Database(entities = [BypassedApp::class, DnsServer::class, UserDomainRuleEntity::class], version = 3, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dnsDao(): DnsDao
 
     companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `user_domain_rules` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `domain` TEXT NOT NULL,
+                        `action` TEXT NOT NULL,
+                        `includeSubdomains` INTEGER NOT NULL,
+                        `revision` TEXT NOT NULL,
+                        `updatedAtMillis` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_user_domain_rules_domain_includeSubdomains` " +
+                        "ON `user_domain_rules` (`domain`, `includeSubdomains`)"
+                )
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN allowPlaintextFallback INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN primaryDohUrl TEXT")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN primaryDohBootstrapIps TEXT")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN secondaryDohUrl TEXT")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN secondaryDohBootstrapIps TEXT")
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -21,6 +53,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "dns_shield_database"
                 )
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         super.onCreate(db)

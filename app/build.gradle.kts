@@ -39,17 +39,33 @@ if (releaseRequested && !releaseSigningReady) {
   )
 }
 
+val d08InstrumentationRequested = gradle.startParameter.taskNames.any {
+  it.contains("D08test", ignoreCase = true)
+}
+
+val d12InstrumentationRequested = gradle.startParameter.taskNames.any {
+  it.contains("D12test", ignoreCase = true)
+}
+
 android {
   namespace = "io.github.xiangwang2000.dnsshield"
   compileSdk = 37
+  ndkVersion = "27.2.12479018"
+  externalNativeBuild { ndkBuild { path = file("src/main/cpp/Android.mk") } }
+  testBuildType = providers.gradleProperty("androidTestBuildType").getOrElse("debug")
 
   defaultConfig {
     applicationId = "io.github.xiangwang2000.dnsshield"
     minSdk = 24
+    buildConfigField("int", "DNS_TEST_UPSTREAM_PORT", "53")
+    ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }
+    externalNativeBuild { ndkBuild { arguments += "NDK_APPLICATION_MK=${projectDir}/src/main/cpp/Application.mk" } }
     targetSdk = 37
     versionCode = 5
     versionName = "1.2.2"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    if (d08InstrumentationRequested) testBuildType = "d08test"
+    if (d12InstrumentationRequested) testBuildType = "d12test"
   }
 
   signingConfigs {
@@ -97,6 +113,23 @@ android {
         signingConfig = signingConfigs.getByName("debugConfig")
       }
     }
+    create("d04DeviceTest") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d04test"
+      versionNameSuffix = "-d04test"
+      buildConfigField("int", "DNS_TEST_UPSTREAM_PORT", "15353")
+      matchingFallbacks += listOf("debug")
+    }
+    create("d08test") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d08test"
+      matchingFallbacks += listOf("debug")
+    }
+    create("d12test") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d12test"
+      matchingFallbacks += listOf("debug")
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -104,6 +137,7 @@ android {
   }
   buildFeatures {
     compose = true
+    buildConfig = true
   }
   sourceSets {
     getByName("androidTest") {
@@ -142,3 +176,19 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
 }
 
+
+// Materialize Windows Git header-link placeholders only in generated sources.
+val prepareNativeSources by tasks.registering(Sync::class) {
+    from("src/main/cpp/hev") {
+        exclude("**/.git", "**/.git/**", "src/hev-jni.c")
+        filesMatching("**/include/*.h") {
+            filter { line: String ->
+                if (line.matches(Regex("\\.\\./[A-Za-z0-9_./-]+\\.h"))) "#include \"$line\"" else line
+            }
+        }
+    }
+    into(layout.buildDirectory.dir("generated/hev"))
+}
+tasks.configureEach {
+    if (name.startsWith("configureNdkBuild") || name.startsWith("buildNdkBuild")) dependsOn(prepareNativeSources)
+}

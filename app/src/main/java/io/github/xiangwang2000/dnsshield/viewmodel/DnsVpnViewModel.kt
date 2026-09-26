@@ -12,7 +12,11 @@ import androidx.lifecycle.viewModelScope
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import io.github.xiangwang2000.dnsshield.data.BypassedApp
 import io.github.xiangwang2000.dnsshield.data.DnsServer
+import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
+import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
+import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
+import io.github.xiangwang2000.dnsshield.service.VpnToggleAction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -26,10 +30,12 @@ data class AppInfo(
 
 data class DnsShieldUiState(
     val isRunning: Boolean = false,
+    val vpnLifecycleState: VpnLifecycleState = VpnLifecycleState.STOPPED,
     val queryCount: Int = 0,
     val blockedAds: Int = 0,
     val savedBytes: Long = 0L,
     val activeDns: String = "None",
+    val dnsTransportStatus: String = "尚無上游查詢",
     val logs: List<String> = emptyList(),
     val dnsServers: List<DnsServer> = emptyList(),
     val activeDnsServer: DnsServer? = null,
@@ -37,7 +43,8 @@ data class DnsShieldUiState(
     val filteredApps: List<AppInfo> = emptyList(),
     val isLoadingApps: Boolean = false,
     val vpnSettingsModified: Boolean = false,
-    val infoCardVisible: Boolean = true
+    val infoCardVisible: Boolean = true,
+    val rulePolicyStatus: RulePolicyStatus = RulePolicyStatus()
 )
 
 data class VpnMetricsState(
@@ -48,11 +55,14 @@ data class VpnMetricsState(
 )
 
 data class VpnStatusAndDnsState(
-    val isRunning: Boolean,
+    val lifecycleState: VpnLifecycleState,
     val activeDns: String,
+    val dnsTransportStatus: String,
     val dnsServers: List<DnsServer>,
     val activeDnsServer: DnsServer?
-)
+) {
+    val isRunning: Boolean get() = lifecycleState.isRunning
+}
 
 data class AppListState(
     val searchQuery: String,
@@ -88,8 +98,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     private val dnsDao = db.dnsDao()
     private val sharedPrefs = application.getSharedPreferences("dns_shield_prefs", Context.MODE_PRIVATE)
 
-    private val _isVpnRunning = MutableStateFlow(DnsVpnService.isRunningFlow.value)
-    val isVpnRunning = _isVpnRunning.asStateFlow()
+    private val _vpnLifecycleState = MutableStateFlow(DnsVpnService.lifecycleStateFlow.value)
+    val vpnLifecycleState = _vpnLifecycleState.asStateFlow()
 
     private val _queryCount = MutableStateFlow(DnsVpnService.queryCountFlow.value)
     val queryCount = _queryCount.asStateFlow()
@@ -103,8 +113,12 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     private val _activeDns = MutableStateFlow(DnsVpnService.activeDnsFlow.value)
     val activeDns = _activeDns.asStateFlow()
 
+    private val _dnsTransportStatus = MutableStateFlow(DnsVpnService.dnsTransportStatusFlow.value)
+
     private val _liveLogs = MutableStateFlow<List<String>>(DnsVpnService.liveLogsFlow.value)
     val liveLogs = _liveLogs.asStateFlow()
+
+    private val _rulePolicyStatus = MutableStateFlow(DnsVpnService.rulePolicyStatusFlow.value)
 
     val vpnSettingsModified = MutableStateFlow(false)
 
@@ -164,12 +178,13 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private val vpnStatusAndDnsStateFlow: Flow<VpnStatusAndDnsState> = combine(
-        _isVpnRunning,
+        _vpnLifecycleState,
         _activeDns,
+        _dnsTransportStatus,
         dnsServers,
         activeDnsServer
-    ) { isRunning, activeDns, servers, activeServer ->
-        VpnStatusAndDnsState(isRunning, activeDns, servers, activeServer)
+    ) { lifecycleState, activeDns, transportStatus, servers, activeServer ->
+        VpnStatusAndDnsState(lifecycleState, activeDns, transportStatus, servers, activeServer)
     }
 
     private val appListStateFlow: Flow<AppListState> = combine(
@@ -180,7 +195,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         AppListState(query, apps, loading)
     }
 
-    val uiState: StateFlow<DnsShieldUiState> = combine(
+    private val baseUiState: Flow<DnsShieldUiState> = combine(
         vpnMetricsStateFlow,
         vpnStatusAndDnsStateFlow,
         appListStateFlow,
@@ -189,10 +204,12 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     ) { metrics, statusDns, appList, settingsModified, infoVisible ->
         DnsShieldUiState(
             isRunning = statusDns.isRunning,
+            vpnLifecycleState = statusDns.lifecycleState,
             queryCount = metrics.queryCount,
             blockedAds = metrics.blockedAds,
             savedBytes = metrics.savedBytes,
             activeDns = statusDns.activeDns,
+            dnsTransportStatus = statusDns.dnsTransportStatus,
             logs = metrics.logs,
             dnsServers = statusDns.dnsServers,
             activeDnsServer = statusDns.activeDnsServer,
@@ -202,15 +219,24 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             vpnSettingsModified = settingsModified,
             infoCardVisible = infoVisible
         )
+    }
+
+    val uiState: StateFlow<DnsShieldUiState> = combine(
+        baseUiState,
+        _rulePolicyStatus
+    ) { state, rulePolicyStatus ->
+        state.copy(rulePolicyStatus = rulePolicyStatus)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = DnsShieldUiState(
-            isRunning = _isVpnRunning.value,
+            isRunning = _vpnLifecycleState.value.isRunning,
+            vpnLifecycleState = _vpnLifecycleState.value,
             queryCount = _queryCount.value,
             blockedAds = _blockedAds.value,
             savedBytes = _savedBytes.value,
             activeDns = _activeDns.value,
+            dnsTransportStatus = _dnsTransportStatus.value,
             logs = _liveLogs.value,
             dnsServers = emptyList(),
             activeDnsServer = null,
@@ -218,7 +244,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             filteredApps = emptyList(),
             isLoadingApps = _isLoadingApps.value,
             vpnSettingsModified = vpnSettingsModified.value,
-            infoCardVisible = _infoCardVisible.value
+            infoCardVisible = _infoCardVisible.value,
+            rulePolicyStatus = _rulePolicyStatus.value
         )
     )
 
@@ -242,12 +269,14 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         // Direct, high-speed StateFlow collections across the same process using clean helper method
-        collectServiceFlow(DnsVpnService.isRunningFlow, _isVpnRunning)
+        collectServiceFlow(DnsVpnService.lifecycleStateFlow, _vpnLifecycleState)
         collectServiceFlow(DnsVpnService.queryCountFlow, _queryCount)
         collectServiceFlow(DnsVpnService.blockedAdsFlow, _blockedAds)
         collectServiceFlow(DnsVpnService.savedBytesFlow, _savedBytes)
         collectServiceFlow(DnsVpnService.activeDnsFlow, _activeDns)
+        collectServiceFlow(DnsVpnService.dnsTransportStatusFlow, _dnsTransportStatus)
         collectServiceFlow(DnsVpnService.liveLogsFlow, _liveLogs)
+        collectServiceFlow(DnsVpnService.rulePolicyStatusFlow, _rulePolicyStatus)
 
         // Observe bypassed apps list database and re-evaluate installed apps isBypassed status
         viewModelScope.launch {
@@ -333,7 +362,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             // If VPN is running, warn that a restart will capture the new split tunnel
-            if (isVpnRunning.value) {
+            if (_vpnLifecycleState.value == VpnLifecycleState.RUNNING) {
                 vpnSettingsModified.value = true
                 addLog("提示：排除規則已更新。請點擊「立即重啟」以套用新設定。")
             }
@@ -352,24 +381,100 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                 // Use cross-process UPDATE_DNS intent command
                 val intent = Intent(getApplication(), DnsVpnService::class.java).apply {
                     action = DnsVpnService.ACTION_UPDATE_DNS
-                    putExtra("primary", selected.primaryIp)
-                    putExtra("secondary", selected.secondaryIp)
-                    putExtra("dnsName", selected.name)
+                    putExtra("resolverId", selected.id)
                 }
                 getApplication<Application>().startService(intent)
             }
         }
     }
 
-    fun addCustomDnsServer(name: String, primaryIp: String, secondaryIp: String?) {
+    fun setPlaintextFallback(server: DnsServer, allow: Boolean) {
+        if (!allow && !DohEndpointConfiguration.hasUsableEncryptedEndpoint(server)) {
+            val message = DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR
+            addLog("無法啟用僅加密模式：$message")
+            Toast.makeText(getApplication(), message, Toast.LENGTH_LONG).show()
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            // Fence before persistence without waiting on socket I/O on the UI thread.
+            DnsVpnService.setPlaintextFallbackAllowed(server.id, allow)
+            if (dnsDao.updatePlaintextFallback(server.id, allow) == 0) return@launch
+            addLog(
+                if (allow) "DNS 傳輸政策已設為加密優先，可在 DoH 失敗時降級 UDP/53"
+                else "DNS 傳輸政策已設為僅加密；DoH 無法使用時將回覆 SERVFAIL"
+            )
+            val activeServer = dnsDao.getActiveDnsServer()
+            if (activeServer?.id == server.id) {
+                getApplication<Application>().startService(
+                    Intent(getApplication(), DnsVpnService::class.java).apply {
+                        action = DnsVpnService.ACTION_UPDATE_DNS
+                        putExtra("resolverId", server.id)
+                    }
+                )
+            }
+        }
+    }
+
+    fun addCustomDnsServer(
+        name: String,
+        primaryIp: String,
+        secondaryIp: String?,
+        allowPlaintextFallback: Boolean = true,
+        primaryDohUrl: String? = null,
+        primaryDohBootstrapIps: String? = null,
+        secondaryDohUrl: String? = null,
+        secondaryDohBootstrapIps: String? = null
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             val trimmedName = name.trim()
             val trimmedPrimary = primaryIp.trim()
             val trimmedSec = secondaryIp?.trim()?.let { if (it.isBlank()) null else it }
+            val trimmedPrimaryDohUrl = primaryDohUrl?.trim()?.takeIf(String::isNotEmpty)
+            val trimmedPrimaryBootstrap = primaryDohBootstrapIps?.trim().orEmpty()
+            val trimmedSecondaryDohUrl = secondaryDohUrl?.trim()?.takeIf(String::isNotEmpty)
+            val trimmedSecondaryBootstrap = secondaryDohBootstrapIps?.trim().orEmpty()
 
             if (trimmedName.isEmpty() || trimmedPrimary.isEmpty()) {
                 withContext(Dispatchers.Main) {
                     Toast.makeText(getApplication(), "名稱與主要 IP 不可空白", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            val dohError = sequenceOf(
+                DohEndpointConfiguration.validationError(
+                    trimmedPrimaryDohUrl.orEmpty(),
+                    trimmedPrimaryBootstrap,
+                    strict = !allowPlaintextFallback
+                ),
+                DohEndpointConfiguration.validationError(
+                    trimmedSecondaryDohUrl.orEmpty(),
+                    trimmedSecondaryBootstrap,
+                    strict = !allowPlaintextFallback
+                )
+            ).filterNotNull().firstOrNull()
+            if (dohError != null) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(getApplication(), dohError, Toast.LENGTH_LONG).show()
+                }
+                return@launch
+            }
+            if (!allowPlaintextFallback && !DohEndpointConfiguration.hasUsableEncryptedEndpoint(
+                    trimmedPrimary,
+                    trimmedSec,
+                    trimmedPrimaryDohUrl,
+                    trimmedPrimaryBootstrap,
+                    trimmedSecondaryDohUrl,
+                    trimmedSecondaryBootstrap
+                )
+            ) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        getApplication(),
+                        DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR,
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
                 return@launch
             }
@@ -399,7 +504,18 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                 primaryIp = trimmedPrimary,
                 secondaryIp = trimmedSec,
                 isCustom = true,
-                isActive = false
+                isActive = false,
+                allowPlaintextFallback = allowPlaintextFallback,
+                primaryDohUrl = trimmedPrimaryDohUrl,
+                primaryDohBootstrapIps = DohEndpointConfiguration
+                    .parseBootstrapIpv4Addresses(trimmedPrimaryBootstrap)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.joinToString(","),
+                secondaryDohUrl = trimmedSecondaryDohUrl,
+                secondaryDohBootstrapIps = DohEndpointConfiguration
+                    .parseBootstrapIpv4Addresses(trimmedSecondaryBootstrap)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.joinToString(",")
             )
             dnsDao.insertDnsServer(newDns)
             addLog("新增自訂 DNS：${newDns.name} (${newDns.primaryIp})")
@@ -427,9 +543,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                     // Use cross-process UPDATE_DNS intent command
                     val intent = Intent(getApplication(), DnsVpnService::class.java).apply {
                         action = DnsVpnService.ACTION_UPDATE_DNS
-                        putExtra("primary", newActive.primaryIp)
-                        putExtra("secondary", newActive.secondaryIp)
-                        putExtra("dnsName", newActive.name)
+                        putExtra("resolverId", newActive.id)
                     }
                     getApplication<Application>().startService(intent)
                 }
@@ -439,29 +553,23 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleVpn(context: Context) {
         try {
-            if (isVpnRunning.value) {
-                // Instantly update the state so UI reflecting the state is immediate and simulation stops
-                _isVpnRunning.value = false
-                vpnSettingsModified.value = false
-                addLog("[安全防護] 已由使用者操作請求關閉防護服務...")
-
-                // Send action ACTION_STOP to trigger internal cleanup and self-termination (stopSelf)
-                try {
+            when (_vpnLifecycleState.value.toggleAction()) {
+                VpnToggleAction.NONE -> return
+                VpnToggleAction.STOP -> {
+                    vpnSettingsModified.value = false
+                    addLog("[安全防護] 已送出關閉防護服務的要求…")
                     val intent = Intent(context, DnsVpnService::class.java).apply {
                         action = DnsVpnService.ACTION_STOP
                     }
                     context.startService(intent)
-                } catch (e: Exception) {
-                    Log.w("DnsVpnViewModel", "Could not send stop intent directly: ${e.message}")
                 }
-            } else {
-                vpnSettingsModified.value = false
-                val intent = Intent(context, DnsVpnService::class.java).apply {
-                    action = DnsVpnService.ACTION_START
+                VpnToggleAction.START -> {
+                    vpnSettingsModified.value = false
+                    val intent = Intent(context, DnsVpnService::class.java).apply {
+                        action = DnsVpnService.ACTION_START
+                    }
+                    ContextCompat.startForegroundService(context, intent)
                 }
-                // Use startService first; if needed, foreground is triggered inside onStartCommand.
-                // Under modern Android, calling ContextCompat.startForegroundService is standard.
-                ContextCompat.startForegroundService(context, intent)
             }
         } catch (e: Exception) {
             Log.e("DnsVpnViewModel", "Failed to start/stop VPN service", e)

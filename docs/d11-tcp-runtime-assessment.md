@@ -1,7 +1,8 @@
 # D11 client-facing TCP runtime assessment
 
-Issue #44 / PR #62. Assessed 2026-09-23. This is a design assessment, not a
-working TUN TCP implementation. The framing codec remains disconnected from TUN.
+Issue #44 / PR #62. Original assessment: 2026-09-23. The historical
+assessment below is superseded by the implementation record in
+[d11-runtime-validation.md](d11-runtime-validation.md), dated 2026-09-27.
 
 ## Candidates and decision
 
