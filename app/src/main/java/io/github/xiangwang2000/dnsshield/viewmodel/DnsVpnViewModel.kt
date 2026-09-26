@@ -14,6 +14,8 @@ import io.github.xiangwang2000.dnsshield.data.BypassedApp
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
+import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
+import io.github.xiangwang2000.dnsshield.service.VpnToggleAction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -27,6 +29,7 @@ data class AppInfo(
 
 data class DnsShieldUiState(
     val isRunning: Boolean = false,
+    val vpnLifecycleState: VpnLifecycleState = VpnLifecycleState.STOPPED,
     val queryCount: Int = 0,
     val blockedAds: Int = 0,
     val savedBytes: Long = 0L,
@@ -50,11 +53,13 @@ data class VpnMetricsState(
 )
 
 data class VpnStatusAndDnsState(
-    val isRunning: Boolean,
+    val lifecycleState: VpnLifecycleState,
     val activeDns: String,
     val dnsServers: List<DnsServer>,
     val activeDnsServer: DnsServer?
-)
+) {
+    val isRunning: Boolean get() = lifecycleState.isRunning
+}
 
 data class AppListState(
     val searchQuery: String,
@@ -90,8 +95,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     private val dnsDao = db.dnsDao()
     private val sharedPrefs = application.getSharedPreferences("dns_shield_prefs", Context.MODE_PRIVATE)
 
-    private val _isVpnRunning = MutableStateFlow(DnsVpnService.isRunningFlow.value)
-    val isVpnRunning = _isVpnRunning.asStateFlow()
+    private val _vpnLifecycleState = MutableStateFlow(DnsVpnService.lifecycleStateFlow.value)
+    val vpnLifecycleState = _vpnLifecycleState.asStateFlow()
 
     private val _queryCount = MutableStateFlow(DnsVpnService.queryCountFlow.value)
     val queryCount = _queryCount.asStateFlow()
@@ -168,12 +173,12 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private val vpnStatusAndDnsStateFlow: Flow<VpnStatusAndDnsState> = combine(
-        _isVpnRunning,
+        _vpnLifecycleState,
         _activeDns,
         dnsServers,
         activeDnsServer
-    ) { isRunning, activeDns, servers, activeServer ->
-        VpnStatusAndDnsState(isRunning, activeDns, servers, activeServer)
+    ) { lifecycleState, activeDns, servers, activeServer ->
+        VpnStatusAndDnsState(lifecycleState, activeDns, servers, activeServer)
     }
 
     private val appListStateFlow: Flow<AppListState> = combine(
@@ -193,6 +198,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     ) { metrics, statusDns, appList, settingsModified, infoVisible ->
         DnsShieldUiState(
             isRunning = statusDns.isRunning,
+            vpnLifecycleState = statusDns.lifecycleState,
             queryCount = metrics.queryCount,
             blockedAds = metrics.blockedAds,
             savedBytes = metrics.savedBytes,
@@ -217,7 +223,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = DnsShieldUiState(
-            isRunning = _isVpnRunning.value,
+            isRunning = _vpnLifecycleState.value.isRunning,
+            vpnLifecycleState = _vpnLifecycleState.value,
             queryCount = _queryCount.value,
             blockedAds = _blockedAds.value,
             savedBytes = _savedBytes.value,
@@ -254,7 +261,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         // Direct, high-speed StateFlow collections across the same process using clean helper method
-        collectServiceFlow(DnsVpnService.isRunningFlow, _isVpnRunning)
+        collectServiceFlow(DnsVpnService.lifecycleStateFlow, _vpnLifecycleState)
         collectServiceFlow(DnsVpnService.queryCountFlow, _queryCount)
         collectServiceFlow(DnsVpnService.blockedAdsFlow, _blockedAds)
         collectServiceFlow(DnsVpnService.savedBytesFlow, _savedBytes)
@@ -346,7 +353,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             // If VPN is running, warn that a restart will capture the new split tunnel
-            if (isVpnRunning.value) {
+            if (_vpnLifecycleState.value == VpnLifecycleState.RUNNING) {
                 vpnSettingsModified.value = true
                 addLog("提示：排除規則已更新。請點擊「立即重啟」以套用新設定。")
             }
@@ -452,29 +459,23 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleVpn(context: Context) {
         try {
-            if (isVpnRunning.value) {
-                // Instantly update the state so UI reflecting the state is immediate and simulation stops
-                _isVpnRunning.value = false
-                vpnSettingsModified.value = false
-                addLog("[安全防護] 已由使用者操作請求關閉防護服務...")
-
-                // Send action ACTION_STOP to trigger internal cleanup and self-termination (stopSelf)
-                try {
+            when (_vpnLifecycleState.value.toggleAction()) {
+                VpnToggleAction.NONE -> return
+                VpnToggleAction.STOP -> {
+                    vpnSettingsModified.value = false
+                    addLog("[安全防護] 已送出關閉防護服務的要求…")
                     val intent = Intent(context, DnsVpnService::class.java).apply {
                         action = DnsVpnService.ACTION_STOP
                     }
                     context.startService(intent)
-                } catch (e: Exception) {
-                    Log.w("DnsVpnViewModel", "Could not send stop intent directly: ${e.message}")
                 }
-            } else {
-                vpnSettingsModified.value = false
-                val intent = Intent(context, DnsVpnService::class.java).apply {
-                    action = DnsVpnService.ACTION_START
+                VpnToggleAction.START -> {
+                    vpnSettingsModified.value = false
+                    val intent = Intent(context, DnsVpnService::class.java).apply {
+                        action = DnsVpnService.ACTION_START
+                    }
+                    ContextCompat.startForegroundService(context, intent)
                 }
-                // Use startService first; if needed, foreground is triggered inside onStartCommand.
-                // Under modern Android, calling ContextCompat.startForegroundService is standard.
-                ContextCompat.startForegroundService(context, intent)
             }
         } catch (e: Exception) {
             Log.e("DnsVpnViewModel", "Failed to start/stop VPN service", e)

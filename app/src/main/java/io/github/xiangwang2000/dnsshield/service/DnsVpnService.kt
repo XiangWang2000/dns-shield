@@ -27,6 +27,7 @@ import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import kotlin.coroutines.resume
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -71,8 +72,8 @@ class DnsVpnService : VpnService() {
         const val VPN_IP = "10.0.0.2"
         const val DUMMY_DNS_IP = "10.0.0.1"
 
-        // Static status flows for real-time UI tracking
-        val isRunningFlow = MutableStateFlow(false)
+        // Publish one lifecycle state for the UI and service notification.
+        val lifecycleStateFlow = MutableStateFlow(VpnLifecycleState.STOPPED)
         val queryCountFlow = MutableStateFlow(0)
         val blockedAdsFlow = MutableStateFlow(0)
         val savedBytesFlow = MutableStateFlow(0L)
@@ -412,6 +413,27 @@ class DnsVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.IO)
+    private val lifecycleCommands = Channel<LifecycleCommand>(Channel.UNLIMITED)
+    private val lifecycleRequests = VpnLifecycleRequestTracker()
+    private var latestLifecycleStartId = 0
+
+    private sealed class LifecycleCommand {
+        data class Start(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
+        data class Stop(val startId: Int) : LifecycleCommand()
+        data class Restart(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
+        data class UpdateDns(
+            val startId: Int,
+            val primary: String,
+            val secondary: String?,
+            val dnsName: String
+        ) : LifecycleCommand()
+        data class ClearLogs(val startId: Int) : LifecycleCommand()
+        data class TunnelEnded(
+            val generation: Long,
+            val descriptor: ParcelFileDescriptor,
+            val failure: String?
+        ) : LifecycleCommand()
+    }
 
     private data class DnsStateSnapshot(
         val primary: String,
@@ -427,6 +449,7 @@ class DnsVpnService : VpnService() {
     // Explicit, clean separation of VPN active running components from the general ServiceScope
     private var tunnelParentJob: Job? = null
     private var tunnelScope: CoroutineScope? = null
+    @Volatile private var tunnelGeneration = 0L
 
     // Robust local concurrency throttle to reduce background burst pressure on CPU and radio.
     private val querySemaphore = Semaphore(MAX_CONCURRENT_DNS_QUERIES)
@@ -465,16 +488,19 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private fun reloadDomainPolicy() {
+    private suspend fun reloadDomainPolicy(requestGeneration: Long) {
         try {
-            val assembly = RuntimeDomainPolicy.assemble(
-                filesDirectory = filesDir,
-                loadBundledBlocklist = productionBlocklistLoader::load,
-                bundledSourceMetadata = productionBlocklistLoader.sourceMetadata,
-                registrableDomainResolverProvider = {
-                    publicSuffixResolverOwner.resolverOrNull()
-                }
-            )
+            val assembly = withContext(Dispatchers.IO) {
+                RuntimeDomainPolicy.assemble(
+                    filesDirectory = filesDir,
+                    loadBundledBlocklist = productionBlocklistLoader::load,
+                    bundledSourceMetadata = productionBlocklistLoader.sourceMetadata,
+                    registrableDomainResolverProvider = {
+                        publicSuffixResolverOwner.resolverOrNull()
+                    }
+                )
+            }
+            if (!lifecycleRequests.isCurrent(requestGeneration)) return
             domainPolicy.install(assembly) {
                 invalidatePolicyState()
             }
@@ -486,7 +512,10 @@ class DnsVpnService : VpnService() {
                 },
                 reloadError = null
             )
+        } catch (exception: CancellationException) {
+            throw exception
         } catch (exception: Exception) {
+            if (!lifecycleRequests.isCurrent(requestGeneration)) return
             val reason = exception.message?.takeIf(String::isNotBlank)
                 ?: exception.javaClass.simpleName
             Log.e(TAG, "Failed to reload domain policy", exception)
@@ -521,48 +550,90 @@ class DnsVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        serviceScope.launch(Dispatchers.Main.immediate) {
+            for (command in lifecycleCommands) {
+                when (command) {
+                    is LifecycleCommand.Start -> {
+                        startVpn(command.requestGeneration)
+                        if (lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
+                            stopSelfResult(command.startId)
+                        }
+                    }
+                    is LifecycleCommand.Stop -> {
+                        stopVpn()
+                        // A later START or RESTART may already be queued under a newer startId.
+                        stopSelfResult(command.startId)
+                    }
+                    is LifecycleCommand.Restart -> {
+                        restartTunnel(command.requestGeneration)
+                        if (lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
+                            stopSelfResult(command.startId)
+                        }
+                    }
+                    is LifecycleCommand.UpdateDns -> {
+                        updateResolverState(command.primary, command.secondary)
+                        activeDnsFlow.value = command.dnsName + " (" + command.primary + ")"
+                        addLog(
+                            "[DNS 變更同步] 已即時套用新 DNS 設定：" +
+                                command.dnsName + " (" + command.primary + ")"
+                        )
+                        stopSelfIfIdle(command.startId)
+                    }
+                    is LifecycleCommand.ClearLogs -> {
+                        clearLogs()
+                        stopSelfIfIdle(command.startId)
+                    }
+                    is LifecycleCommand.TunnelEnded -> handleTunnelEnded(command)
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        latestLifecycleStartId = startId
         when (intent?.action) {
             ACTION_START -> {
                 addLog("Starting service command received")
-                startVpn()
+                val requestGeneration = lifecycleRequests.nextRequest()
+                lifecycleCommands.trySend(LifecycleCommand.Start(startId, requestGeneration))
             }
             ACTION_STOP -> {
                 addLog("Stopping service command received")
-                stopVpn()
-                stopSelf()
+                lifecycleRequests.nextRequest()
+                lifecycleCommands.trySend(LifecycleCommand.Stop(startId))
             }
             ACTION_RESTART -> {
                 addLog("Restarting service command received")
-                restartTunnel()
+                val requestGeneration = lifecycleRequests.nextRequest()
+                lifecycleCommands.trySend(LifecycleCommand.Restart(startId, requestGeneration))
             }
             ACTION_UPDATE_DNS -> {
                 val primary = intent.getStringExtra("primary") ?: "8.8.8.8"
                 val secondary = intent.getStringExtra("secondary")
                 val dnsName = intent.getStringExtra("dnsName") ?: "Google DNS"
-                updateResolverState(primary, secondary)
-                activeDnsFlow.value = "$dnsName ($primary)"
-                addLog("[DNS 變更同步] 已即時套用新 DNS 設定：$dnsName ($primary)")
+                lifecycleCommands.trySend(
+                    LifecycleCommand.UpdateDns(startId, primary, secondary, dnsName)
+                )
             }
             ACTION_CLEAR_LOGS -> {
-                clearLogs()
+                lifecycleCommands.trySend(LifecycleCommand.ClearLogs(startId))
             }
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        stopVpn()
+        lifecycleRequests.nextRequest()
+        lifecycleCommands.close()
+        closeTunnelResources()
         serviceJob.cancel()
         super.onDestroy()
     }
 
     override fun onRevoke() {
         addLog("VPN connection revoked by system settings")
-        stopVpn()
-        stopSelf()
+        lifecycleRequests.nextRequest()
+        lifecycleCommands.trySend(LifecycleCommand.Stop(latestLifecycleStartId))
         super.onRevoke()
     }
 
@@ -578,119 +649,153 @@ class DnsVpnService : VpnService() {
         clearMemoryCache()
     }
 
-    private fun startVpn() {
-        if (isVpnRunning) return
+    private suspend fun startVpn(requestGeneration: Long) {
+        if (!lifecycleRequests.isCurrent(requestGeneration) || !lifecycleStateFlow.value.canStart) return
 
-        val notification = createNotification("DNS Shield VPN 正在啟動中...")
-        if (android.os.Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        updateLifecycleState(VpnLifecycleState.STARTING)
+        var establishedFd: ParcelFileDescriptor? = null
+        try {
+            val notification = createNotification(notificationText(VpnLifecycleState.STARTING))
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
 
-        // Start active background tunnel operations under tunnelParentJob & separate tunnelScope
-        val activeJob = SupervisorJob(serviceJob)
-        tunnelParentJob = activeJob
-        val activeTunnelScope = CoroutineScope(activeJob + Dispatchers.IO)
-        tunnelScope = activeTunnelScope
+            reloadDomainPolicy(requestGeneration)
+            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+                abandonSupersededStartup()
+                return
+            }
+            val (activeServer, bypassedList) = withContext(Dispatchers.IO) {
+                val database = AppDatabase.getDatabase(this@DnsVpnService)
+                database.dnsDao().getActiveDnsServer() to database.dnsDao().getBypassedAppsList()
+            }
+            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+                abandonSupersededStartup()
+                return
+            }
+            val primary = activeServer?.primaryIp ?: "8.8.8.8"
+            val secondary = activeServer?.secondaryIp
+            updateResolverState(primary, secondary)
+            val dnsName = activeServer?.name ?: "Google DNS"
+            activeDnsFlow.value = "$dnsName ($primary)"
+            addLog("Database loaded. Upstream DNS: " + dnsName + " (" + primary + ")")
+            addLog("Loaded " + bypassedList.size + " apps to exempt/bypass DNS VPN")
 
-        activeTunnelScope.launch {
-            try {
-                reloadDomainPolicy()
+            // Keep establish() on the service dispatcher so destruction cannot race descriptor ownership.
+            val builder = Builder()
+                .setSession("DNS Shield")
+                .setBlocking(true)
+                .addAddress(VPN_IP, 32)
+                .addRoute(DUMMY_DNS_IP, 32)
+                .addDnsServer(DUMMY_DNS_IP)
 
-                // Read active DNS from Room Database
-                val db = AppDatabase.getDatabase(this@DnsVpnService)
-                val activeServer = db.dnsDao().getActiveDnsServer()
-                val primary = activeServer?.primaryIp ?: "8.8.8.8"
-                val secondary = activeServer?.secondaryIp
-                updateResolverState(primary, secondary)
-                val dnsName = activeServer?.name ?: "Google DNS"
-                activeDnsFlow.value = "$dnsName ($primary)"
+            for (app in bypassedList) {
+                try {
+                    builder.addDisallowedApplication(app.packageName)
+                    addLog("Exempted app: " + app.appName + " (" + app.packageName + ")")
+                } catch (exception: PackageManager.NameNotFoundException) {
+                    Log.w(TAG, "Exempted app package not found on device: " + app.packageName)
+                } catch (exception: Exception) {
+                    Log.e(TAG, "Error adding disallowed package: " + app.packageName, exception)
+                }
+            }
 
-                addLog("Database loaded. Upstream DNS: $dnsName ($primary)")
-
-                // Read list of bypassed application packages from database
-                val bypassedList = db.dnsDao().getBypassedAppsList()
-                addLog("Loaded ${bypassedList.size} apps to exempt/bypass DNS VPN")
-
-                // Configure VPN interface
-                val builder = Builder()
-                    .setSession("DNS Shield")
-                    // The default non-blocking TUN descriptor busy-spins when no packet is ready.
-                    .setBlocking(true)
-                    .addAddress(VPN_IP, 32)
-                    .addRoute(DUMMY_DNS_IP, 32) // Route dummy DNS requests to TUN interface
-                    .addDnsServer(DUMMY_DNS_IP) // Set dummy IP as DNS server
-
-                // Add disallowed applications (split tunneling)
-                for (app in bypassedList) {
-                    try {
-                        builder.addDisallowedApplication(app.packageName)
-                        addLog("Exempted app: ${app.appName} (${app.packageName})")
-                    } catch (e: PackageManager.NameNotFoundException) {
-                        Log.w(TAG, "Exempted app package not found on device: ${app.packageName}")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error adding disallowed package: ${app.packageName}", e)
+            yield()
+            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+                abandonSupersededStartup()
+                return
+            }
+            val descriptor = establishVpnTunnel(
+                establish = { builder.establish() },
+                onUnavailable = {
+                    if (!lifecycleRequests.isCurrent(requestGeneration)) {
+                        abandonSupersededStartup()
+                    } else {
+                        addLog("Error: Failed to establish VPN interface (null)")
+                        updateLifecycleState(VpnLifecycleState.FAILED)
+                        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
                     }
                 }
+            ) ?: return
 
-                val establishedFd = builder.establish()
-                if (establishedFd == null) {
-                    addLog("Error: Failed to establish VPN interface (null)")
-                    stopVpn()
-                    stopSelf()
-                    return@launch
-                }
-
-                vpnInterface = establishedFd
-                isVpnRunning = true
-                isRunningFlow.value = true
-                addLog("[防護成功] 安全 DNS 防護已成功啟動並建立通道。")
-
-                // Update notification text to active state
-                val activeNotification = createNotification("DNS Shield VPN 正在運作中")
-                val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                manager.notify(NOTIFICATION_ID, activeNotification)
-
-                addLog("VPN Interface Established. Reading packets...")
-                runTunnel()
-
-            } catch (e: Exception) {
-                addLog("VPN crashed: ${e.message}")
-                stopVpn()
-                stopSelf()
+            establishedFd = descriptor
+            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+                runCatching { descriptor.close() }
+                establishedFd = null
+                abandonSupersededStartup()
+                return
             }
+            val generation = ++tunnelGeneration
+            val activeJob = SupervisorJob(serviceJob)
+            val activeTunnelScope = CoroutineScope(activeJob + Dispatchers.IO)
+            vpnInterface = descriptor
+            tunnelParentJob = activeJob
+            tunnelScope = activeTunnelScope
+            updateLifecycleState(VpnLifecycleState.RUNNING)
+            addLog("[防護成功] 安全 DNS 防護已成功啟動並建立通道。")
+
+            val activeNotification = createNotification(notificationText(VpnLifecycleState.RUNNING))
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(NOTIFICATION_ID, activeNotification)
+            addLog("VPN Interface Established. Reading packets...")
+            activeTunnelScope.launch { runTunnel(descriptor, generation) }
+            establishedFd = null
+        } catch (exception: CancellationException) {
+            establishedFd?.let { descriptor ->
+                if (vpnInterface === descriptor) {
+                    tunnelGeneration++
+                    vpnInterface = null
+                    tunnelParentJob?.cancel()
+                    tunnelParentJob = null
+                    tunnelScope = null
+                }
+                runCatching { descriptor.close() }
+            }
+            updateLifecycleState(VpnLifecycleState.STOPPED)
+            throw exception
+        } catch (exception: Exception) {
+            establishedFd?.let { descriptor ->
+                if (vpnInterface === descriptor) {
+                    tunnelGeneration++
+                    vpnInterface = null
+                    tunnelParentJob?.cancel()
+                    tunnelParentJob = null
+                    tunnelScope = null
+                }
+                runCatching { descriptor.close() }
+            }
+            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+                abandonSupersededStartup()
+                return
+            }
+            addLog("VPN failed to start: " + exception.message)
+            updateLifecycleState(VpnLifecycleState.FAILED)
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         }
     }
 
-    private fun runTunnel() {
-        vpnInterface?.let { pfd ->
-            val inputStream = FileInputStream(pfd.fileDescriptor)
-            val outputStream = FileOutputStream(pfd.fileDescriptor)
-
-            val buffer = ByteArray(4096)
-            try {
-                while (isVpnRunning) {
-                    val readBytes = inputStream.read(buffer)
-                    if (readBytes > 0) {
-                        handlePacket(buffer, readBytes, outputStream)
-                    } else if (readBytes < 0) {
-                        break
-                    }
-                }
-            } catch (e: IOException) {
-                addLog("Tunnel read error: ${e.message}")
-            } finally {
-                try {
-                    inputStream.close()
-                } catch (e: Exception) {}
-                try {
-                    outputStream.close()
-                } catch (e: Exception) {}
-            }
-        }
+    private fun abandonSupersededStartup() {
+        updateLifecycleState(VpnLifecycleState.STOPPED)
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
     }
 
+    private fun runTunnel(descriptor: ParcelFileDescriptor, generation: Long) {
+        runVpnTunnelReader(
+            openInput = { FileInputStream(descriptor.fileDescriptor) },
+            openOutput = { FileOutputStream(descriptor.fileDescriptor) },
+            isActive = { isVpnRunning && generation == tunnelGeneration },
+            handlePacket = { buffer, readBytes, outputStream ->
+                handlePacket(buffer, readBytes, outputStream)
+            },
+            onEnded = { failure ->
+                lifecycleCommands.trySend(
+                    LifecycleCommand.TunnelEnded(generation, descriptor, failure)
+                )
+            }
+        )
+    }
     private fun handlePacket(packet: ByteArray, length: Int, outputStream: FileOutputStream) {
         when (val parsed = DnsIpv4UdpQueryParser.parse(packet, length)) {
             is Ipv4UdpDnsParseResult.Query -> {
@@ -1003,77 +1108,126 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    // Gracefully and synchronously shutdown tunnel resources to prevent leakage
+    private fun resolveQuery(
+        socket: DatagramSocket,
+        dnsPayload: ByteArray,
+        dnsServer: InetAddress,
+        recvBuffer: ByteArray
+    ): DatagramPacket? {
+        try {
+            val sendPacket = DatagramPacket(dnsPayload, dnsPayload.size, dnsServer, 53)
+            socket.send(sendPacket)
+
+            val recvPacket = DatagramPacket(recvBuffer, recvBuffer.size)
+            socket.receive(recvPacket)
+            return recvPacket
+        } catch (e: Exception) {
+            logDnsTransportFailure("DNS lookup failed on ${dnsServer.hostAddress}", e)
+            return null
+        }
+    }
+
+    private suspend fun handleTunnelEnded(command: LifecycleCommand.TunnelEnded) {
+        if (!isCurrentTunnelEnded(
+                endedGeneration = command.generation,
+                currentGeneration = tunnelGeneration,
+                endedDescriptor = command.descriptor,
+                currentDescriptor = vpnInterface,
+                lifecycleState = lifecycleStateFlow.value
+            )
+        ) return
+
+        addLog(command.failure ?: "VPN tunnel stopped unexpectedly")
+        stopVpn(finalState = VpnLifecycleState.FAILED)
+    }
+
+    private fun updateLifecycleState(state: VpnLifecycleState) {
+        lifecycleStateFlow.value = state
+        isVpnRunning = state.isRunning
+    }
+
+    private fun stopSelfIfIdle(startId: Int) {
+        if (
+            lifecycleStateFlow.value == VpnLifecycleState.STOPPED ||
+            lifecycleStateFlow.value == VpnLifecycleState.FAILED
+        ) {
+            stopSelfResult(startId)
+        }
+    }
+
+    private fun notificationText(state: VpnLifecycleState): String = when (state) {
+        VpnLifecycleState.STOPPED -> "DNS Shield 防護已關閉"
+        VpnLifecycleState.STARTING -> "DNS Shield 正在啟動防護…"
+        VpnLifecycleState.RUNNING -> "DNS Shield 防護中"
+        VpnLifecycleState.STOPPING -> "DNS Shield 正在停止防護…"
+        VpnLifecycleState.FAILED -> "DNS Shield 防護異常"
+    }
+
+    // Service destruction cannot suspend, so it closes the owned descriptor and cancels its session directly.
     private fun closeTunnelResources() {
-        isVpnRunning = false
-        isRunningFlow.value = false
         rulePolicyStatusFlow.value = RulePolicyStatus.NotLoaded
-
-        try {
-            vpnInterface?.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing vpnInterface descriptor", e)
+        val finalState = lifecycleStateFlow.value.stateAfterServiceDestroy()
+        tunnelGeneration++
+        if (finalState != VpnLifecycleState.FAILED) {
+            updateLifecycleState(VpnLifecycleState.STOPPING)
         }
+        val descriptor = vpnInterface
+        val sessionJob = tunnelParentJob
         vpnInterface = null
-
-        tunnelParentJob?.cancel()
         tunnelParentJob = null
         tunnelScope = null
+
+        try {
+            descriptor?.close()
+        } catch (exception: Exception) {
+            Log.e(TAG, "Error closing vpnInterface descriptor", exception)
+        }
+        sessionJob?.cancel()
+        updateLifecycleState(finalState)
     }
 
-    // Gracefully and asynchronously join tunnel routines before starting a new one
-    private suspend fun closeTunnelResourcesAndJoin() {
-        isVpnRunning = false
-        isRunningFlow.value = false
+    private suspend fun restartTunnel(requestGeneration: Long) {
+        addLog("[安全防護] 正在重新啟動 DNS 隧道以套用新名單…")
+        stopVpn()
+        startVpn(requestGeneration)
+    }
+
+    private suspend fun stopVpn(finalState: VpnLifecycleState = VpnLifecycleState.STOPPED) {
         rulePolicyStatusFlow.value = RulePolicyStatus.NotLoaded
-
-        try {
-            vpnInterface?.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing vpnInterface descriptor", e)
+        addLog("正在關閉安全 DNS 防護隧道並釋放資源…")
+        if (lifecycleStateFlow.value != VpnLifecycleState.STOPPED) {
+            updateLifecycleState(VpnLifecycleState.STOPPING)
+            val notification = createNotification(notificationText(VpnLifecycleState.STOPPING))
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(NOTIFICATION_ID, notification)
         }
+
+        // Invalidate the ending callback before closing the descriptor or joining its job.
+        tunnelGeneration++
+        val descriptor = vpnInterface
+        val sessionJob = tunnelParentJob
         vpnInterface = null
-
-        try {
-            tunnelParentJob?.cancelAndJoin()
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception cancelling tunnelParentJob during shutdown", e)
-        }
         tunnelParentJob = null
         tunnelScope = null
-    }
 
-    private fun restartTunnel() {
-        // Run on Main so state changes and logs settle smoothly
-        serviceScope.launch(Dispatchers.Main) {
-            addLog("[安全防護] 正在重新啟動 DNS 隧道以套用新名單...")
+        closeVpnTunnelThenJoin(
+            closeDescriptor = { descriptor?.close() },
+            joinSession = { sessionJob?.cancelAndJoin() },
+            onCloseFailure = { exception ->
+                Log.e(TAG, "Error closing vpnInterface descriptor", exception)
+            },
+            onJoinFailure = { exception ->
+                Log.e(TAG, "Exception cancelling tunnel session during shutdown", exception)
+            }
+        )
 
-            // 1. Mark as not running & notify
-            isRunningFlow.value = false
-
-            // 2. Tear down everything and wait safely
-            closeTunnelResourcesAndJoin()
-
-            // 3. Delay gracefully to allow system teardown to settle perfectly
-            delay(400)
-
-            // 4. Start tunnel again
-            startVpn()
-        }
-    }
-
-    private fun stopVpn() {
-        addLog("正在關閉安全 DNS 防護隧道並釋放資源...")
-
-        closeTunnelResources()
-
-        // Stop foreground and remove the banner notification
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping foreground service", e)
+        } catch (exception: Exception) {
+            Log.e(TAG, "Error stopping foreground service", exception)
         }
 
+        updateLifecycleState(finalState)
         Log.i(TAG, "VPN stopped completely")
     }
 
