@@ -1231,9 +1231,9 @@ class DnsVpnService : VpnService() {
                     try {
                         if (!protect(socket)) throw IOException("Failed to protect DNS UDP socket from the VPN.")
                         val upstreams = buildList {
-                            add(DnsUdpUpstreamEndpoint(InetAddress.getByName(dnsState.primary)))
+                            add(DnsUdpUpstreamEndpoint(InetAddress.getByName(dnsState.primary), BuildConfig.DNS_UPSTREAM_PORT))
                             dnsState.secondary?.let { address ->
-                                add(DnsUdpUpstreamEndpoint(InetAddress.getByName(address)))
+                                add(DnsUdpUpstreamEndpoint(InetAddress.getByName(address), BuildConfig.DNS_UPSTREAM_PORT))
                             }
                         }
                         DnsUdpUpstreamClient.queryWithFallback(socket, query, upstreams, deadline)
