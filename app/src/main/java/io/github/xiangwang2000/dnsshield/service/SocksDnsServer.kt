@@ -265,18 +265,28 @@ internal class SocksDnsServer(
             writeReply(output, REP_GENERAL_FAILURE)
             return false
         }
+        val addressType = request[3].toInt() and 0xFF
+        // Consume known address forms before rejecting; unread request bytes can reset the reply.
+        val addressLength = when (addressType) {
+            ATYP_IPV4 -> 4
+            ATYP_DOMAIN -> input.readUnsignedByte()
+            ATYP_IPV6 -> 16
+            else -> {
+                writeReply(output, REP_ADDRESS_NOT_SUPPORTED)
+                return false
+            }
+        }
+        val address = ByteArray(addressLength)
+        input.readFully(address)
+        val destinationPort = input.readUnsignedShort()
         if ((request[1].toInt() and 0xFF) != CMD_CONNECT) {
             writeReply(output, REP_COMMAND_NOT_SUPPORTED)
             return false
         }
-        if ((request[3].toInt() and 0xFF) != ATYP_IPV4) {
+        if (addressType != ATYP_IPV4) {
             writeReply(output, REP_ADDRESS_NOT_SUPPORTED)
             return false
         }
-
-        val address = ByteArray(4)
-        input.readFully(address)
-        val destinationPort = (input.read() shl 8) or input.read()
         if (!address.contentEquals(DNS_IPV4) || destinationPort != DNS_PORT) {
             writeReply(output, REP_NOT_ALLOWED)
             return false
@@ -355,6 +365,8 @@ internal class SocksDnsServer(
         const val AUTH_FAILURE = 1
         const val CMD_CONNECT = 1
         const val ATYP_IPV4 = 1
+        const val ATYP_DOMAIN = 3
+        const val ATYP_IPV6 = 4
         const val REP_SUCCEEDED = 0
         const val REP_GENERAL_FAILURE = 1
         const val REP_NOT_ALLOWED = 2
