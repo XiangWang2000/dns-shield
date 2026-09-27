@@ -87,7 +87,7 @@ internal class SocksDnsServer(
         synchronized(lifecycleLock) {
             if (!stopped.compareAndSet(false, true)) return
             listener?.let(::closeQuietly)
-            sessions.toList().forEach(Session::close)
+            sessions.forEach(Session::close)
             watchdog.shutdownNow()
             workers.shutdownNow()
         }

@@ -50,7 +50,8 @@ internal class NativeDnsTcpRuntime(
                   username: '${bridge.username}'
                   password: '${bridge.password}'
                 misc:
-                  max-session-count: 32
+                  # Hev evicts at count >= limit; 33 retains 32 active sessions.
+                  max-session-count: 33
                   tcp-buffer-size: 16384
                   connect-timeout: 6000
                   tcp-read-write-timeout: 10000

@@ -52,3 +52,40 @@ defaults, bypass state, and existing user rules plus their unique index passed.
 Both isolated APKs built successfully; the application and instrumentation packages
 were removed after the run. The production package remained installed; this run
 did not start a VPN or reboot the device. Strict TUN/TLS/UI acceptance is unchanged.
+
+
+## TLS policy through TUN (2026-09-27)
+
+ASUS_Z01RD / Android 10: `DohTlsFallbackInstrumentedTest` passed 2/2 in
+10.884 s. Both cases reach a loopback TLS server with a self-signed certificate
+using the production trust checks. Strict mode returns SERVFAIL with zero
+matching plaintext UDP queries; allowed fallback returns the fake UDP answer
+with exactly one matching query. No production trust override was added.
+
+The fixture uses legacy PKCS12 encryption compatible with Android 10. The
+unprivileged loopback port 15353 applies only to `.d08test`. Client UDP uses
+bounded retries during VPN startup; ambient phone DNS does not affect QNAME
+counts. `verify.ps1` and both isolated APK builds passed; the final retry-only
+instrumentation edit was compiled and exercised on the phone.
+Raw local result: `captures/d08-tls-device-retry.txt` (not tracked).
+Custom endpoint UI, bootstrap failure and network/error matrices remain pending.
+
+## Fresh-checkout test certificate setup
+
+The PKCS12 fixture contains a disposable private key and is intentionally ignored;
+it is not uploaded. Generate a local test identity before building D08 APKs:
+
+```powershell
+$fixture = Join-Path $PWD 'app/src/androidTestD08test/assets/d08-test-server.p12'
+New-Item -ItemType Directory -Force (Split-Path $fixture) | Out-Null
+if (-not (Test-Path -LiteralPath $fixture)) {
+    & "$env:JAVA_HOME/bin/keytool.exe" '-J-Dkeystore.pkcs12.legacy=true' -genkeypair -alias d08-test-server -keyalg RSA -keysize 2048 -validity 3650 -dname "CN=DNS Shield disposable test" -ext "SAN=ip:127.0.0.2" -storetype PKCS12 -keystore $fixture -storepass d08-test-only-password -keypass d08-test-only-password -noprompt
+    if ($LASTEXITCODE -ne 0) { throw 'Test certificate generation failed' }
+}
+.\gradlew.bat -PandroidTestBuildType=d08test :app:assembleD08test :app:assembleD08testAndroidTest
+```
+
+The password is a public test constant. Never substitute a real service identity.
+The certificate must be self-signed and rejected by production trust checks;
+its exact bytes are not a test expectation. CI verify does not execute these
+physical-device cases or generate this optional fixture automatically.

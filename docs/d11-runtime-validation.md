@@ -45,7 +45,7 @@ reject before accept on Windows; the capacity test verifies the first admitted
 connection remains usable. Earlier Android 15 emulator native/basic TUN tests
 passed 3/3; the final large-response/fix combination has not been rerun there.
 
-## Remaining before merge/readiness
+## Remaining at the UDP lock checkpoint
 
 - Integrate latest D04/D05 helper changes and later validated D08 dependency
   updates, resolving service lifecycle changes and rerunning affected checks.
@@ -73,3 +73,46 @@ write and transaction-ID preservation. Existing strict-mode fence and transport
 tests passed. Full `verify.ps1` passed with 195 JVM tests, zero failures/errors,
 lint and APK builds (`captures/d11-udp-lock-verify.log`, local ignored evidence).
 This slice does not complete the remaining D11 integration or device matrix.
+
+## Integrated D11 acceptance checkpoint — 2026-09-27
+
+D05's latest D04 tunnel I/O helper is merged into D11 at 60ec52e. The reader
+keeps native TCP ownership active until before the TUN output stream closes.
+D08's later TLS through-TUN test is also integrated; its isolated build uses
+the existing test-only loopback UDP port setting. The disposable PKCS12
+fixture is generated locally and ignored.
+
+A real TUN capacity test exposed Hev's limit semantics: it evicts the oldest
+session when count reaches the configured threshold. The previous threshold
+of 32 therefore retained only 31 sessions. Configuring 33 retains 32; the
+Android 15 test verified the 32nd client, overflow behavior and continued
+service for an active connection. The real TUN idle test verified timeout and
+a subsequent fresh client. The SOCKS shutdown path now iterates its concurrent
+session set directly; a prior full verification caught a race while copying
+that set to a list. The unsupported SOCKS request path now consumes known
+address forms before sending rejection, avoiding Windows TCP resets with
+unread request bytes.
+
+Android 15 emulator dns_shield_api35, isolated .d04test: 9/9 tests
+passed in 17.855 s (captures/d11-api35-final-device2.txt). This includes
+native segment order/retransmission, malformed/reset packets, real TUN client
+TCP, UDP truncation and shared full-response cache, multiple frames, half-close,
+stop, capacity, idle timeout and descriptor cleanup. Isolated .d08test:
+strict TLS failure sent zero plaintext UDP queries, while allowed fallback sent
+one matching UDP query; 2/2 passed in 2.137 s
+(captures/d11-api35-d08-final.txt). The first D08 emulator attempt
+timed out waiting for Android VPN consent; granting the test package VPN
+permission and rerunning passed. The earlier Android 10 physical-device D11
+4/4 result remains separate evidence.
+
+Final local verify.ps1 passed 29 Python tests, both production assets,
+201 JVM tests with zero failures/errors, Android lint, and Debug plus isolated
+D04 app/test APK builds (captures/d11-final-integrated-verify2.log).
+D08 isolated app/test APKs built separately with the local test certificate
+(captures/d11-d08-final-apk.log). The immediately preceding verification
+caught the SOCKS concurrent-close race; the final run passed after its fix.
+
+Remaining release steps: check CI on the pushed head, refresh the PR and issue
+descriptions, review dependency PR order and merge readiness. This checkpoint
+does not merge main or claim the broader D03/D04/D05/D08 network and UI matrices
+are complete.

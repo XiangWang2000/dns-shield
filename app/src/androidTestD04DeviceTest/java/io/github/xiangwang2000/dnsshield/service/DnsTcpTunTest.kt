@@ -166,6 +166,84 @@ class DnsTcpTunTest {
         }
     }
 
+    @Test fun idleTcpSessionClosesAndNextConnectionStillWorks() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        assertTrue(context.packageName.endsWith(".d04test"))
+        assertNull(VpnService.prepare(context))
+        ContextCompat.startForegroundService(context,
+            Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_START))
+        withTimeout(30_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.RUNNING } }
+        try {
+            Socket().use { idle ->
+                idle.soTimeout = 15_000
+                idle.connect(InetSocketAddress("10.0.0.1", 53), 5_000)
+                val started = System.nanoTime()
+                try { assertEquals(-1, idle.getInputStream().read()) }
+                catch (_: SocketException) { /* A TCP reset also closes the idle session. */ }
+                assertTrue("Idle session closed before its timeout",
+                    System.nanoTime() - started >= java.util.concurrent.TimeUnit.SECONDS.toNanos(5))
+            }
+            Socket().use { active ->
+                active.soTimeout = 10_000
+                active.connect(InetSocketAddress("10.0.0.1", 53), 5_000)
+                DnsTcpFrameCodec.writeFrame(active.getOutputStream(), query(71))
+                val answer = requireNotNull(DnsTcpFrameCodec.readFrame(active.getInputStream()))
+                assertEquals(71, answer[1].toInt() and 255)
+                assertEquals(3, answer[3].toInt() and 15)
+            }
+        } finally {
+            context.startService(Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP))
+            withTimeout(15_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.STOPPED } }
+        }
+    }
+
+    @Test fun exhaustedTcpSessionsKeepThe32ndClientAndBoundOverflow() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        assertTrue(context.packageName.endsWith(".d04test"))
+        assertNull(VpnService.prepare(context))
+        ContextCompat.startForegroundService(context,
+            Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_START))
+        withTimeout(30_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.RUNNING } }
+        val held = mutableListOf<Socket>()
+        try {
+            repeat(32) {
+                held += Socket().apply {
+                    soTimeout = 3_000
+                    connect(InetSocketAddress("10.0.0.1", 53), 2_000)
+                }
+            }
+            DnsTcpFrameCodec.writeFrame(held.first().getOutputStream(), query(72))
+            val first = requireNotNull(DnsTcpFrameCodec.readFrame(held.first().getInputStream()))
+            assertEquals(3, first[3].toInt() and 15)
+            Socket().use { excess ->
+                excess.soTimeout = 2_000
+                val overflowAnswered = try {
+                    excess.connect(InetSocketAddress("10.0.0.1", 53), 1_000)
+                    DnsTcpFrameCodec.writeFrame(excess.getOutputStream(), query(73))
+                    DnsTcpFrameCodec.readFrame(excess.getInputStream()) != null
+                } catch (_: java.io.IOException) {
+                    false
+                }
+                if (overflowAnswered) {
+                    val oldestClosed = try {
+                        DnsTcpFrameCodec.writeFrame(held[1].getOutputStream(), query(75))
+                        DnsTcpFrameCodec.readFrame(held[1].getInputStream()) == null
+                    } catch (_: java.io.IOException) {
+                        true
+                    }
+                    assertTrue("Overflow was admitted without evicting an older session", oldestClosed)
+                }
+            }
+            DnsTcpFrameCodec.writeFrame(held.first().getOutputStream(), query(74))
+            val surviving = requireNotNull(DnsTcpFrameCodec.readFrame(held.first().getInputStream()))
+            assertEquals(74, surviving[1].toInt() and 255)
+            assertEquals(3, surviving[3].toInt() and 15)
+        } finally {
+            held.forEach { it.close() }
+            context.startService(Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP))
+            withTimeout(15_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.STOPPED } }
+        }
+    }
     private fun query(id: Int): ByteArray = (listOf<Byte>(0, id.toByte(), 1, 0, 0, 1, 0, 0, 0, 0, 0, 0) +
         "doubleclick.net".split('.').flatMap { listOf(it.length.toByte()) + it.toByteArray().toList() } +
         listOf<Byte>(0, 0, 1, 0, 1)).toByteArray()

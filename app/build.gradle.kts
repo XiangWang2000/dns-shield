@@ -123,6 +123,7 @@ android {
     create("d08test") {
       initWith(getByName("debug"))
       applicationIdSuffix = ".d08test"
+      buildConfigField("int", "DNS_TEST_UPSTREAM_PORT", "15353")
       matchingFallbacks += listOf("debug")
     }
     create("d12test") {
