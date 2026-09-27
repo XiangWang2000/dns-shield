@@ -41,16 +41,25 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.DnsServer
+import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
+import io.github.xiangwang2000.dnsshield.service.DnsDecision
+import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
+import io.github.xiangwang2000.dnsshield.service.DnsDecisionReason
+import io.github.xiangwang2000.dnsshield.blocking.DomainRuleAction
+import io.github.xiangwang2000.dnsshield.blocking.DomainNameNormalizer
 import io.github.xiangwang2000.dnsshield.ui.theme.*
 import io.github.xiangwang2000.dnsshield.viewmodel.AppInfo
+import io.github.xiangwang2000.dnsshield.viewmodel.DomainRuleUndoToken
 import io.github.xiangwang2000.dnsshield.viewmodel.DnsShieldUiState
 import io.github.xiangwang2000.dnsshield.viewmodel.DnsVpnViewModel
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onStart() {
@@ -148,6 +157,11 @@ fun DnsShieldDashboard(
         onClearLogs = { viewModel.clearVpnLogs() },
         onRestartVpn = { viewModel.restartVpn(context) },
         onLoadAppsIfNeeded = { viewModel.refreshInstalledAppsIfNeeded() },
+        onDomainRuleSearchChange = viewModel::setDomainRuleSearchQuery,
+        onSaveDomainRule = viewModel::saveDomainRule,
+        onDeleteDomainRule = viewModel::deleteDomainRule,
+        onAllowBlockedDomain = viewModel::allowBlockedDomain,
+        onUndoDomainRule = viewModel::undoDomainRule,
         modifier = modifier
     )
 }
@@ -166,9 +180,14 @@ fun DnsShieldScreen(
     onClearLogs: () -> Unit,
     onRestartVpn: () -> Unit,
     onLoadAppsIfNeeded: () -> Unit,
+    onDomainRuleSearchChange: (String) -> Unit,
+    onSaveDomainRule: suspend (String, DomainRuleAction, Boolean) -> String?,
+    onDeleteDomainRule: suspend (UserDomainRuleEntity) -> Unit,
+    onAllowBlockedDomain: suspend (String) -> DomainRuleUndoToken,
+    onUndoDomainRule: suspend (DomainRuleUndoToken) -> Boolean,
     modifier: Modifier = Modifier
 ) {
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 控制中心, 1: 排除名單, 2: 運作日誌
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 控制中心, 1: 排除名單, 2: 網域規則, 3: 運作日誌
     var showAddDnsDialog by remember { mutableStateOf(false) }
 
     Box(
@@ -232,9 +251,21 @@ fun DnsShieldScreen(
                         )
                     }
                     2 -> {
+                        DomainRulesTab(
+                            rules = uiState.userDomainRules,
+                            searchQuery = uiState.domainRuleSearchQuery,
+                            onSearchChange = onDomainRuleSearchChange,
+                            onSaveRule = onSaveDomainRule,
+                            onDeleteRule = onDeleteDomainRule
+                        )
+                    }
+                    3 -> {
                         LogsTab(
                             logs = uiState.logs,
-                            onClearLogs = onClearLogs
+                            blockedEvents = uiState.blockedEvents,
+                            onClearLogs = onClearLogs,
+                            onAllowBlockedDomain = onAllowBlockedDomain,
+                            onUndoDomainRule = onUndoDomainRule
                         )
                     }
                 }
@@ -475,6 +506,15 @@ fun DashboardTabs(
         Tab(
             selected = selectedTab == 2,
             onClick = { onTabSelected(2) },
+            text = { Text("網域規則", fontSize = 14.sp) },
+            icon = { Icon(Icons.Default.Dns, contentDescription = null, modifier = Modifier.size(20.dp)) },
+            selectedContentColor = CyberEmerald,
+            unselectedContentColor = ColorTextSecondary,
+            modifier = Modifier.testTag("tab_domain_rules")
+        )
+        Tab(
+            selected = selectedTab == 3,
+            onClick = { onTabSelected(3) },
             text = { Text("運作日誌", fontSize = 14.sp) },
             icon = { Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(20.dp)) },
             selectedContentColor = CyberEmerald,
@@ -1028,15 +1068,190 @@ fun AppIconAsync(packageName: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun LogsTab(
-    logs: List<String>,
-    onClearLogs: () -> Unit
+fun DomainRulesTab(
+    rules: List<UserDomainRuleEntity>,
+    searchQuery: String,
+    onSearchChange: (String) -> Unit,
+    onSaveRule: suspend (String, DomainRuleAction, Boolean) -> String?,
+    onDeleteRule: suspend (UserDomainRuleEntity) -> Unit
 ) {
+    var showAddDialog by rememberSaveable { mutableStateOf(false) }
+    var domainInput by rememberSaveable { mutableStateOf("") }
+    var selectedAction by remember { mutableStateOf(DomainRuleAction.ALLOW) }
+    var includeSubdomains by rememberSaveable { mutableStateOf(false) }
+    var validationError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    val filteredRules = remember(rules, searchQuery) {
+        if (searchQuery.isBlank()) {
+            rules
+        } else {
+            val searchTerms = listOfNotNull(
+                searchQuery.trim().takeIf { it.isNotEmpty() },
+                DomainNameNormalizer.normalize(searchQuery)
+            ).distinct()
+            rules.filter { rule ->
+                searchTerms.any { term -> rule.domain.contains(term, ignoreCase = true) }
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("網域規則", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = ColorTextPrimary)
+                Text("使用者規則優先於防護名單；較精確的規則優先。", fontSize = 12.sp, color = ColorTextSecondary)
+            }
+            Button(onClick = {
+                validationError = null
+                showAddDialog = true
+            }) {
+                Icon(Icons.Default.Add, contentDescription = null)
+                Spacer(Modifier.width(4.dp))
+                Text("新增")
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = onSearchChange,
+            modifier = Modifier.fillMaxWidth().testTag("domain_rules_search"),
+            singleLine = true,
+            label = { Text("搜尋網域") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) }
+        )
+        Spacer(Modifier.height(8.dp))
+
+        if (filteredRules.isEmpty()) {
+            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                Text(
+                    if (searchQuery.isBlank()) "尚未建立網域規則" else "找不到符合的網域規則",
+                    color = ColorTextSecondary
+                )
+            }
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(filteredRules, key = { "${it.domain}:${it.includeSubdomains}" }) { rule ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(rule.domain, color = ColorTextPrimary, fontWeight = FontWeight.Medium)
+                                val actionLabel = if (rule.action.equals("ALLOW", ignoreCase = true)) "允許" else "封鎖"
+                                val scopeLabel = if (rule.includeSubdomains) "包含子網域" else "僅此網域"
+                                Text("$actionLabel · $scopeLabel", color = ColorTextSecondary, fontSize = 12.sp)
+                            }
+                            IconButton(
+                                onClick = { scope.launch { onDeleteRule(rule) } },
+                                modifier = Modifier.testTag("delete_domain_rule_${rule.id}")
+                            ) {
+                                Icon(Icons.Default.DeleteOutline, contentDescription = "刪除 ${rule.domain}", tint = ColorTextSecondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showAddDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = { Text("新增網域規則") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = domainInput,
+                        onValueChange = { domainInput = it; validationError = null },
+                        modifier = Modifier.fillMaxWidth().testTag("domain_rule_input"),
+                        label = { Text("網域名稱") },
+                        placeholder = { Text("example.com") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { selectedAction = DomainRuleAction.ALLOW },
+                            colors = if (selectedAction == DomainRuleAction.ALLOW) {
+                                ButtonDefaults.outlinedButtonColors(contentColor = CyberEmerald)
+                            } else ButtonDefaults.outlinedButtonColors()
+                        ) { Text("允許") }
+                        OutlinedButton(
+                            onClick = { selectedAction = DomainRuleAction.BLOCK },
+                            colors = if (selectedAction == DomainRuleAction.BLOCK) {
+                                ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                            } else ButtonDefaults.outlinedButtonColors()
+                        ) { Text("封鎖") }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("包含子網域", color = ColorTextPrimary)
+                            Text("套用至此網域及其子網域", color = ColorTextSecondary, fontSize = 12.sp)
+                        }
+                        Switch(
+                            checked = includeSubdomains,
+                            onCheckedChange = { includeSubdomains = it },
+                            modifier = Modifier.testTag("domain_rule_include_subdomains")
+                        )
+                    }
+                    if (validationError != null) {
+                        Text(validationError!!, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    scope.launch {
+                        validationError = try {
+                            onSaveRule(domainInput, selectedAction, includeSubdomains)
+                        } catch (exception: Exception) {
+                            "儲存失敗：${exception.localizedMessage ?: "請稍後再試"}"
+                        }
+                        if (validationError == null) {
+                            showAddDialog = false
+                            domainInput = ""
+                        }
+                    }
+                }, modifier = Modifier.testTag("save_domain_rule_button")) {
+                    Text("儲存")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddDialog = false }) { Text("取消") }
+            }
+        )
+    }
+}
+
+@Composable
+fun LogsTab(
+    logs: List<String>,
+    blockedEvents: List<DnsDecisionEvent>,
+    onClearLogs: () -> Unit,
+    onAllowBlockedDomain: suspend (String) -> DomainRuleUndoToken,
+    onUndoDomainRule: suspend (DomainRuleUndoToken) -> Boolean
+) {
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    Box(modifier = Modifier.fillMaxSize()) {
+      Column(
+          modifier = Modifier
+              .fillMaxSize()
+              .padding(horizontal = 12.dp, vertical = 8.dp)
+      ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1062,10 +1277,66 @@ fun LogsTab(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        if (blockedEvents.isNotEmpty()) {
+            Text("近期攔截事件", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ColorTextPrimary)
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().weight(0.45f).testTag("blocked_events"),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(blockedEvents, key = { it.id }) { event ->
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(event.domain, color = ColorTextPrimary, fontWeight = FontWeight.Medium)
+                                val decisionLabel = if (event.decision == DnsDecision.BLOCK) "已封鎖" else "已允許"
+                                val reasonLabel = when (event.reason) {
+                                    DnsDecisionReason.USER_RULE -> "使用者規則"
+                                    DnsDecisionReason.PROTECTION_LIST -> "防護名單"
+                                }
+                                val time = java.text.SimpleDateFormat("HH:mm:ss", androidx.compose.ui.platform.LocalConfiguration.current.locales[0])
+                                    .format(java.util.Date(event.occurredAtMillis))
+                                Text("$decisionLabel · $reasonLabel · $time", color = ColorTextSecondary, fontSize = 11.sp)
+                            }
+                            if (event.decision == DnsDecision.BLOCK) {
+                                TextButton(onClick = {
+                                    scope.launch {
+                                        try {
+                                            val token = onAllowBlockedDomain(event.domain)
+                                            val result = snackbarHostState.showSnackbar(
+                                                message = "已精確允許 ${event.domain}",
+                                                actionLabel = "復原",
+                                                withDismissAction = true
+                                            )
+                                            if (result == SnackbarResult.ActionPerformed) {
+                                                val restored = onUndoDomainRule(token)
+                                                snackbarHostState.showSnackbar(
+                                                    if (restored) "已復原規則變更" else "規則已再度變更，無法復原"
+                                                )
+                                            }
+                                        } catch (exception: Exception) {
+                                            snackbarHostState.showSnackbar(
+                                                "允許失敗：${exception.localizedMessage ?: "請稍後再試"}"
+                                            )
+                                        }
+                                    }
+                                }, modifier = Modifier.testTag("allow_blocked_${event.id}")) {
+                                    Text("一鍵允許")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
+                .weight(if (blockedEvents.isEmpty()) 1f else 0.55f)
                 .clip(RoundedCornerShape(12.dp))
                 .background(Color(0xFF020617)) // Deep black console
                 .border(1.dp, ColorBorder, RoundedCornerShape(12.dp))
@@ -1110,6 +1381,11 @@ fun LogsTab(
                 }
             }
         }
+      }
+      SnackbarHost(
+          hostState = snackbarHostState,
+          modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)
+      )
     }
 }
 

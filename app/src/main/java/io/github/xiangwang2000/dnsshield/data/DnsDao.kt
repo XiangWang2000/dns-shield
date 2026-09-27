@@ -5,6 +5,46 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface DnsDao {
+    // User domain rules
+    @Query("SELECT * FROM user_domain_rules ORDER BY domain COLLATE NOCASE ASC, includeSubdomains ASC")
+    fun getUserDomainRulesFlow(): Flow<List<UserDomainRuleEntity>>
+
+    @Query("SELECT * FROM user_domain_rules ORDER BY domain COLLATE NOCASE ASC, includeSubdomains ASC")
+    suspend fun getUserDomainRulesList(): List<UserDomainRuleEntity>
+
+    @Query("SELECT * FROM user_domain_rules WHERE domain = :domain AND includeSubdomains = :includeSubdomains LIMIT 1")
+    suspend fun getUserDomainRule(domain: String, includeSubdomains: Boolean): UserDomainRuleEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertUserDomainRule(rule: UserDomainRuleEntity)
+
+    @Query("DELETE FROM user_domain_rules WHERE domain = :domain AND includeSubdomains = :includeSubdomains")
+    suspend fun deleteUserDomainRule(domain: String, includeSubdomains: Boolean): Int
+
+    @Transaction
+    suspend fun replaceUserDomainRule(rule: UserDomainRuleEntity): UserDomainRuleEntity? {
+        val previous = getUserDomainRule(rule.domain, rule.includeSubdomains)
+        insertUserDomainRule(rule)
+        return previous
+    }
+
+    @Transaction
+    suspend fun restoreUserDomainRule(
+        domain: String,
+        includeSubdomains: Boolean,
+        expectedRevision: String,
+        previous: UserDomainRuleEntity?
+    ): Boolean {
+        val current = getUserDomainRule(domain, includeSubdomains) ?: return false
+        if (current.revision != expectedRevision) return false
+        if (previous == null) {
+            deleteUserDomainRule(domain, includeSubdomains)
+        } else {
+            insertUserDomainRule(previous)
+        }
+        return true
+    }
+
     // Bypassed Apps
     @Query("SELECT * FROM bypassed_apps ORDER BY appName COLLATE NOCASE ASC")
     fun getBypassedAppsFlow(): Flow<List<BypassedApp>>
