@@ -990,17 +990,13 @@ class DnsVpnService : VpnService() {
         dnsState: DnsStateSnapshot,
         response: ByteArray,
         responseWriter: DnsResponseWriter
-    ): Boolean = synchronized(dnsStateLock) {
-        if (!isCurrentDnsState(dnsState)) {
-            false
-        } else {
-            responseWriter.send(response.copyOf().also {
-                it[0] = dnsPacket.payload[0]
-                it[1] = dnsPacket.payload[1]
-            })
-            true
-        }
-    }
+    ): Boolean = DnsResolvedResponseCommitter.sendIfCurrent(
+        stateLock = dnsStateLock,
+        isCurrent = { isCurrentDnsState(dnsState) },
+        response = response,
+        transactionIdSource = dnsPacket.payload,
+        responseWriter = responseWriter
+    )
 
     private fun sendServFailResponse(
         dnsPacket: ParsedIpv4UdpDnsQuery,

@@ -14,8 +14,9 @@ not a release or a completed whole-project acceptance claim.
   the policy, cache, admission/deadline and resolver pipeline with UDP.
 - 32 native/bridge sessions, 10-second bridge timeouts, explicit stop/FD cleanup,
   and process-wide native ownership prevent overlapping native runtimes.
-- TCP response I/O occurs outside the resolver-state lock. UDP truncation remains
-  at its packet writer; full TCP answers remain available to both cache consumers.
+- Resolved TCP and UDP response I/O occurs outside the resolver-state lock.
+  UDP truncation remains at its packet writer; full TCP answers remain available
+  to both cache consumers.
 - Windows symlink placeholders are converted to forwarding includes only in the
   generated build copy. Upstream sample JNI is excluded. Dependency notices are
   packaged in `app/src/main/assets/native-tcp-NOTICES.txt`.
@@ -53,12 +54,22 @@ passed 3/3; the final large-response/fix combination has not been rerun there.
 - Recheck final CI and dependency order before merging. No main merge or release
   is included in this checkpoint. Broader network/power matrices remain separate.
 
-## Independent review checkpoint
+## UDP response lock review resolution
 
-Luna found no high-confidence native FD/start-stop defect, but identified the
-inherited UDP response writer performing blocking TUN I/O under `dnsStateLock`
-(`sendResolvedResponseIfCurrent` -> `sendResponsePacket`). A slow write can block
-resolver/policy updates. TCP uses an immutable deferred response outside this
-lock. The UDP concern remains open: fix must preserve stale-response/strict-mode
-fencing, not simply move writes past validation. This is a merge blocker recorded
-for the next work slice; the user requested stopping expansion at this checkpoint.
+The inherited UDP response writer performed blocking TUN I/O under
+`dnsStateLock` (`sendResolvedResponseIfCurrent` -> `sendResponsePacket`), which
+could delay resolver and policy updates. The response path now checks the
+resolver generation and policy assembly and commits an immutable response with
+the client's transaction ID under that lock. TUN I/O runs after the commit,
+outside the lock, matching the existing TCP handoff. An update before commit
+rejects the old response and returns SERVFAIL; a response committed before an
+update may finish writing afterward as an in-flight response. The separate
+plaintext fallback fence still prevents new UDP/TCP upstream plaintext sends
+after strict mode takes effect.
+
+`DnsResolvedResponseCommitterTest` reproduced the lock blockage before the fix
+and passed afterward. It also checks stale-response rejection during a blocked
+write and transaction-ID preservation. Existing strict-mode fence and transport
+tests passed. Full `verify.ps1` passed with 195 JVM tests, zero failures/errors,
+lint and APK builds (`captures/d11-udp-lock-verify.log`, local ignored evidence).
+This slice does not complete the remaining D11 integration or device matrix.
