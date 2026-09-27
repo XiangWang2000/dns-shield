@@ -44,4 +44,22 @@ building only the instrumentation APK does not update app manifest permissions.
 
 `verify.ps1`, both isolated APK builds, and `git diff --check` passed.
 Raw local result: `captures/d07-live-policy-device2.txt` (not tracked).
-UI add/delete/undo and process recreation remain separate pending acceptance.
+UI add/delete/undo and process recreation were pending at this stage; see the emulator run below.
+
+## Android 15 emulator UI and live policy acceptance (2026-09-27)
+
+On `dns_shield_api35`, the isolated `.d07test` app and instrumentation APKs
+were built and installed. Migration and file-backed policy persistence passed
+2/2; `LiveUserDomainRuleTunInstrumentedTest` passed 1/1 through the actual VPN
+TUN, including BLOCK -> ALLOW -> BLOCK and positive-cache invalidation.
+
+Using the app UI, a rule was added, found with search, retained after an
+`am force-stop` and activity relaunch, and deleted. With the VPN running, a
+separate `adb shell ping d07-undo.example` produced an NXDOMAIN and a
+structured blocked event in the Logs tab. Tapping `一鍵允許` showed the exact
+allow action; tapping `復原` reported success and the Rules tab again displayed
+`封鎖 · 僅此網域`. A repeated query was blocked. The temporary rule was deleted
+and VPN stopped; the isolated app displayed `防護關閉` and no user rules.
+
+This emulator evidence complements the earlier ASUS Android 10 migration,
+persistence and live TUN results. No new physical-device run was possible.
