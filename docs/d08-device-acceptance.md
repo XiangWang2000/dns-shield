@@ -69,3 +69,23 @@ counts. `verify.ps1` and both isolated APK builds passed; the final retry-only
 instrumentation edit was compiled and exercised on the phone.
 Raw local result: `captures/d08-tls-device-retry.txt` (not tracked).
 Custom endpoint UI, bootstrap failure and network/error matrices remain pending.
+
+## Fresh-checkout test certificate setup
+
+The PKCS12 fixture contains a disposable private key and is intentionally ignored;
+it is not uploaded. Generate a local test identity before building D08 APKs:
+
+```powershell
+$fixture = Join-Path $PWD 'app/src/androidTestD08test/assets/d08-test-server.p12'
+New-Item -ItemType Directory -Force (Split-Path $fixture) | Out-Null
+if (-not (Test-Path -LiteralPath $fixture)) {
+    & "$env:JAVA_HOME/bin/keytool.exe" -J-Dkeystore.pkcs12.legacy -genkeypair -alias d08-test-server -keyalg RSA -keysize 2048 -validity 3650 -dname "CN=DNS Shield disposable test" -ext "SAN=ip:127.0.0.2" -storetype PKCS12 -keystore $fixture -storepass d08-test-only-password -keypass d08-test-only-password -noprompt
+    if ($LASTEXITCODE -ne 0) { throw 'Test certificate generation failed' }
+}
+.\gradlew.bat -PandroidTestBuildType=d08test :app:assembleD08test :app:assembleD08testAndroidTest
+```
+
+The password is a public test constant. Never substitute a real service identity.
+The certificate must be self-signed and rejected by production trust checks;
+its exact bytes are not a test expectation. CI verify does not execute these
+physical-device cases or generate this optional fixture automatically.
