@@ -14,9 +14,12 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.xiangwang2000.dnsshield.MainActivity
+import io.github.xiangwang2000.dnsshield.BuildConfig
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembly
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyCacheKey
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
+import io.github.xiangwang2000.dnsshield.blocking.DomainNameNormalizer
+import io.github.xiangwang2000.dnsshield.blocking.DomainRuleAction
 import io.github.xiangwang2000.dnsshield.blocking.ProductionBlocklistAssetLoader
 import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverOwner
 import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverStatus
@@ -24,11 +27,15 @@ import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
 import io.github.xiangwang2000.dnsshield.blocking.RuntimeDomainPolicy
 import io.github.xiangwang2000.dnsshield.blocking.RuleBlocklistSource
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
+import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidation
+import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidator
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import kotlin.coroutines.resume
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
@@ -57,6 +64,7 @@ class DnsVpnService : VpnService() {
         const val ACTION_RESTART = "io.github.xiangwang2000.dnsshield.service.RESTART"
         const val ACTION_UPDATE_DNS = "io.github.xiangwang2000.dnsshield.service.UPDATE_DNS"
         const val ACTION_CLEAR_LOGS = "io.github.xiangwang2000.dnsshield.service.CLEAR_LOGS"
+        const val ACTION_RELOAD_DOMAIN_POLICY = "io.github.xiangwang2000.dnsshield.service.RELOAD_DOMAIN_POLICY"
         private const val CHANNEL_ID = "dns_vpn_channel"
         private const val NOTIFICATION_ID = 5543
         private const val MAX_CONCURRENT_DNS_QUERIES = 24
@@ -76,6 +84,7 @@ class DnsVpnService : VpnService() {
         val savedBytesFlow = MutableStateFlow(0L)
         val activeDnsFlow = MutableStateFlow("None")
         val liveLogsFlow = MutableStateFlow<List<String>>(emptyList())
+        val liveDecisionEventsFlow = MutableStateFlow<List<DnsDecisionEvent>>(emptyList())
         val rulePolicyStatusFlow = MutableStateFlow(RulePolicyStatus.NotLoaded)
 
         // Atomic counters for perfectly thread-safe, concurrent statistics updates
@@ -202,6 +211,8 @@ class DnsVpnService : VpnService() {
         }
 
         private val logList = mutableListOf<String>()
+        private val decisionEvents = mutableListOf<DnsDecisionEvent>()
+        private val decisionEventId = AtomicInteger(0)
 
         fun setUiForeground(isForeground: Boolean) {
             synchronized(flushLock) {
@@ -261,6 +272,10 @@ class DnsVpnService : VpnService() {
                     liveLogsFlow.value = emptyList()
                 }
             }
+            synchronized(decisionEvents) {
+                decisionEvents.clear()
+                liveDecisionEventsFlow.value = emptyList()
+            }
             queryCounter.set(0)
             blockedAdsCounter.set(0)
             savedBytesCounter.set(0L)
@@ -279,6 +294,29 @@ class DnsVpnService : VpnService() {
             savedBytesCounter.addAndGet(savedInBytes)
             queryCounter.incrementAndGet()
             scheduleStatsFlush()
+        }
+
+        private fun recordBlockedDomain(
+            domain: String,
+            reason: DnsDecisionReason
+        ) {
+            val normalized = DomainNameNormalizer.normalize(domain) ?: return
+            synchronized(decisionEvents) {
+                decisionEvents.add(
+                    0,
+                    DnsDecisionEvent(
+                        id = decisionEventId.incrementAndGet().toLong(),
+                        domain = normalized,
+                        decision = DnsDecision.BLOCK,
+                        reason = reason,
+                        occurredAtMillis = System.currentTimeMillis()
+                    )
+                )
+                if (decisionEvents.size > MAX_LOG_LINES) {
+                    decisionEvents.removeAt(decisionEvents.lastIndex)
+                }
+                liveDecisionEventsFlow.value = decisionEvents.toList()
+            }
         }
 
         private fun scheduleLogFlush() {
@@ -432,6 +470,7 @@ class DnsVpnService : VpnService() {
             val failure: String?
         ) : LifecycleCommand()
     }
+    private val domainPolicyReloadMutex = Mutex()
 
     private data class DnsStateSnapshot(
         val primary: String,
@@ -487,38 +526,83 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private suspend fun reloadDomainPolicy(requestGeneration: Long) {
+    private suspend fun reloadDomainPolicy(requestGeneration: Long? = null) {
+        domainPolicyReloadMutex.withLock {
+            reloadDomainPolicySnapshot(requestGeneration)
+        }
+    }
+
+    private suspend fun reloadDomainPolicySnapshot(requestGeneration: Long?) {
         try {
-            val assembly = withContext(Dispatchers.IO) {
-                RuntimeDomainPolicy.assemble(
+            val (assembly, rejectedRuleCount) = withContext(Dispatchers.IO) {
+                val storedRules = AppDatabase.getDatabase(this@DnsVpnService).dnsDao().getUserDomainRulesList()
+                val ruleResolver = if (storedRules.any { it.includeSubdomains }) {
+                    publicSuffixResolverOwner.resolverOrNull()
+                } else {
+                    null
+                }
+                var rejectedRuleCount = 0
+                val userRules = storedRules.mapNotNull { entity ->
+                    val action = runCatching { DomainRuleAction.valueOf(entity.action) }.getOrNull()
+                    if (action == null) {
+                        rejectedRuleCount++
+                        return@mapNotNull null
+                    }
+                    when (
+                        val validation = UserDomainRuleValidator.validate(
+                            domain = entity.domain,
+                            action = action,
+                            includeSubdomains = entity.includeSubdomains,
+                            resolver = ruleResolver
+                        )
+                    ) {
+                        is UserDomainRuleValidation.Valid -> validation.rule
+                        is UserDomainRuleValidation.Invalid -> {
+                            rejectedRuleCount++
+                            null
+                        }
+                    }
+                }
+                val assembly = RuntimeDomainPolicy.assemble(
                     filesDirectory = filesDir,
+                    userRules = userRules,
                     loadBundledBlocklist = productionBlocklistLoader::load,
                     bundledSourceMetadata = productionBlocklistLoader.sourceMetadata,
                     registrableDomainResolverProvider = {
                         publicSuffixResolverOwner.resolverOrNull()
                     }
                 )
+                assembly to rejectedRuleCount
             }
-            if (!lifecycleRequests.isCurrent(requestGeneration)) return
-            domainPolicy.install(assembly) {
-                invalidatePolicyState()
+            if (requestGeneration != null && !lifecycleRequests.isCurrent(requestGeneration)) return
+            withContext(Dispatchers.Main.immediate) {
+                if (requestGeneration != null && !lifecycleRequests.isCurrent(requestGeneration)) return@withContext
+                domainPolicy.install(assembly) {
+                    invalidatePolicyState()
+                }
+                if (rejectedRuleCount > 0) {
+                    addLog("[網域規則] 有 $rejectedRuleCount 條無效或無法通過 PSL 驗證的規則未套用。")
+                }
+                rulePolicyStatusFlow.value = assembly.displayStatus.copy(
+                    publicSuffixStatus = if (assembly.displayStatus.source == RuleBlocklistSource.BUILT_IN) {
+                        PublicSuffixResolverStatus.NotLoaded
+                    } else {
+                        publicSuffixResolverOwner.status()
+                    },
+                    reloadError = null
+                )
             }
-            rulePolicyStatusFlow.value = assembly.displayStatus.copy(
-                publicSuffixStatus = if (assembly.displayStatus.source == RuleBlocklistSource.BUILT_IN) {
-                    PublicSuffixResolverStatus.NotLoaded
-                } else {
-                    publicSuffixResolverOwner.status()
-                },
-                reloadError = null
-            )
+            if (requestGeneration != null && !lifecycleRequests.isCurrent(requestGeneration)) return
         } catch (exception: CancellationException) {
             throw exception
         } catch (exception: Exception) {
-            if (!lifecycleRequests.isCurrent(requestGeneration)) return
+            if (requestGeneration != null && !lifecycleRequests.isCurrent(requestGeneration)) return
             val reason = exception.message?.takeIf(String::isNotBlank)
                 ?: exception.javaClass.simpleName
             Log.e(TAG, "Failed to reload domain policy", exception)
-            rulePolicyStatusFlow.value = rulePolicyStatusFlow.value.copy(reloadError = reason)
+            withContext(Dispatchers.Main.immediate) {
+                rulePolicyStatusFlow.value = rulePolicyStatusFlow.value.copy(reloadError = reason)
+            }
             addLog("[攔截規則] 重新載入失敗，保留目前規則：$reason")
             return
         }
@@ -615,6 +699,9 @@ class DnsVpnService : VpnService() {
             }
             ACTION_CLEAR_LOGS -> {
                 lifecycleCommands.trySend(LifecycleCommand.ClearLogs(startId))
+            }
+            ACTION_RELOAD_DOMAIN_POLICY -> {
+                serviceScope.launch { reloadDomainPolicy() }
             }
         }
         return START_NOT_STICKY
@@ -719,6 +806,8 @@ class DnsVpnService : VpnService() {
             ) ?: return
 
             establishedFd = descriptor
+            // Include rules saved while the VPN interface was being established.
+            reloadDomainPolicy(requestGeneration)
             if (!lifecycleRequests.isCurrent(requestGeneration)) {
                 runCatching { descriptor.close() }
                 establishedFd = null
@@ -914,6 +1003,10 @@ class DnsVpnService : VpnService() {
             outputStream
         )
         recordBlockedQuery(estimateSavedBytes(domain))
+        val reason = if (
+            dnsState.policyAssembly.userRuleMatcher.decisionFor(domain) == DomainRuleAction.BLOCK
+        ) DnsDecisionReason.USER_RULE else DnsDecisionReason.PROTECTION_LIST
+        recordBlockedDomain(domain, reason)
         addDnsQueryLog { "🛡️ [真正攔截] $domain -> NXDOMAIN" }
         return true
     }

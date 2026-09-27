@@ -39,6 +39,9 @@ if (releaseRequested && !releaseSigningReady) {
   )
 }
 
+val d07InstrumentationRequested = gradle.startParameter.taskNames.any {
+  it.contains("D07test", ignoreCase = true)
+}
 val d12InstrumentationRequested = gradle.startParameter.taskNames.any {
   it.contains("D12test", ignoreCase = true)
 }
@@ -55,6 +58,8 @@ android {
     versionCode = 5
     versionName = "1.2.2"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    buildConfigField("int", "DNS_UPSTREAM_PORT", "53")
+    if (d07InstrumentationRequested) testBuildType = "d07test"
     if (d12InstrumentationRequested) testBuildType = "d12test"
   }
 
@@ -109,6 +114,12 @@ android {
       versionNameSuffix = "-d04test"
       matchingFallbacks += listOf("debug")
     }
+    create("d07test") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d07test"
+      matchingFallbacks += listOf("debug")
+      buildConfigField("int", "DNS_UPSTREAM_PORT", "15353")
+    }
     create("d12test") {
       initWith(getByName("debug"))
       applicationIdSuffix = ".d12test"
@@ -121,6 +132,7 @@ android {
   }
   buildFeatures {
     compose = true
+    buildConfig = true
   }
   sourceSets {
     getByName("androidTest") {
