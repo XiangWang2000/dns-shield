@@ -83,7 +83,7 @@ class LiveUserDomainRuleTunInstrumentedTest {
                 Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_START)
             )
             serviceStarted = true
-            awaitState("VPN did not establish a TUN interface") { DnsVpnService.isRunningFlow.value }
+            awaitState("VPN did not establish a TUN interface") { DnsVpnService.lifecycleStateFlow.value == VpnLifecycleState.RUNNING }
 
             val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             awaitState("Android did not activate the VPN network before DNS queries") {
@@ -124,7 +124,7 @@ class LiveUserDomainRuleTunInstrumentedTest {
                         Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP)
                     )
                     awaitState("VPN service did not stop after the test", 10_000) {
-                        !DnsVpnService.isRunningFlow.value
+                        DnsVpnService.lifecycleStateFlow.value != VpnLifecycleState.RUNNING
                     }
                 }
             } finally {
