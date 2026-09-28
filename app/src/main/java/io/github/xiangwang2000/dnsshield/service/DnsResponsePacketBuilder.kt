@@ -2,6 +2,10 @@ package io.github.xiangwang2000.dnsshield.service
 
 /** Builds the IPv4/UDP envelope and can stamp the client's DNS transaction ID during the copy. */
 internal object DnsResponsePacketBuilder {
+    const val TUN_MTU_BYTES = 1500
+    const val IPV4_HEADER_BYTES = 20
+    const val UDP_HEADER_BYTES = 8
+
     fun build(
         srcIp: ByteArray,
         dstIp: ByteArray,
@@ -10,8 +14,8 @@ internal object DnsResponsePacketBuilder {
         payload: ByteArray,
         transactionIdSource: ByteArray? = null
     ): ByteArray {
-        val ipHeaderLength = 20
-        val udpHeaderLength = 8
+        val ipHeaderLength = IPV4_HEADER_BYTES
+        val udpHeaderLength = UDP_HEADER_BYTES
         val totalLength = ipHeaderLength + udpHeaderLength + payload.size
         val packet = ByteArray(totalLength)
 

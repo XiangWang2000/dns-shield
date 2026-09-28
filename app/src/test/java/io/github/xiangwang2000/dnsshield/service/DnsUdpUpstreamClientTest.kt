@@ -3,6 +3,9 @@ package io.github.xiangwang2000.dnsshield.service
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.io.DataInputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -17,7 +20,9 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DnsUdpUpstreamClientTest {
@@ -102,7 +107,7 @@ class DnsUdpUpstreamClientTest {
     }
 
     @Test
-    fun rejectsDatagramsLargerThanTheDnsMessageLimit() {
+    fun rejectsReceiveBufferSaturatedTcClearDatagramsInsteadOfForwardingThem() {
         val loopback = InetAddress.getByName("127.0.0.1")
         val server = DatagramSocket(0, loopback)
         val client = DatagramSocket()
@@ -298,7 +303,7 @@ class DnsUdpUpstreamClientTest {
         try {
             val deadline = DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 1_000)
             val startedAt = System.nanoTime()
-            val response = DnsUdpUpstreamClient.queryWithFallback(
+            val outcome = DnsUdpUpstreamClient.queryWithFallback(
                 socket = client,
                 query = query,
                 upstreams = listOf(
@@ -309,7 +314,8 @@ class DnsUdpUpstreamClientTest {
             )
             val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L
 
-            assertContentEquals(expectedResponse, response)
+            assertContentEquals(expectedResponse, outcome?.response)
+            assertSame(DnsTransport.PLAINTEXT_UDP, outcome?.transport)
             assertTrue(primaryReceived.await(1, TimeUnit.SECONDS))
             assertTrue(secondaryReceived.await(1, TimeUnit.SECONDS))
             assertTrue(elapsedMillis < 1_000, "UDP fallback exceeded the total deadline: ${elapsedMillis}ms")
@@ -321,6 +327,104 @@ class DnsUdpUpstreamClientTest {
             secondary.close()
             silentPrimary.join(1_000)
             respondingSecondary.join(1_000)
+        }
+    }
+
+    private fun bindDualProtocolServers(loopback: InetAddress): Pair<DatagramSocket, ServerSocket> {
+        // TCP and UDP have separate port namespaces; an ephemeral port in one may be busy in the other.
+        repeat(20) {
+            val tcpServer = ServerSocket(0, 1, loopback)
+            try {
+                return DatagramSocket(tcpServer.localPort, loopback) to tcpServer
+            } catch (_: java.net.BindException) {
+                tcpServer.close()
+            } catch (failure: Exception) {
+                tcpServer.close()
+                throw failure
+            }
+        }
+        throw java.net.BindException("Could not reserve the same loopback port for UDP and TCP")
+    }
+
+    @Test
+    fun truncatedUdpResponseRetriesTheSameUpstreamOverTcpWithinTheDeadline() = runBlocking {
+        val loopback = InetAddress.getByName("127.0.0.1")
+        val (udpServer, tcpServer) = bindDualProtocolServers(loopback)
+        val client = DatagramSocket()
+        val queryBytes = DnsTestMessages.query()
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val truncatedResponse = DnsTestMessages.response(queryBytes, flags = 0x8380).also {
+            it[7] = 1 // TC responses may end partway through the answer section.
+        }
+        val fullResponse = DnsTestMessages.response(queryBytes)
+        val serverFailure = AtomicReference<Throwable?>()
+        val udpResponder = thread(name = "tc-udp-upstream") {
+            try {
+                val request = DatagramPacket(ByteArray(4096), 4096)
+                udpServer.receive(request)
+                udpServer.send(
+                    DatagramPacket(truncatedResponse, truncatedResponse.size, request.address, request.port)
+                )
+            } catch (failure: Throwable) {
+                serverFailure.compareAndSet(null, failure)
+            }
+        }
+        val tcpResponder = thread(name = "tc-tcp-upstream") {
+            try {
+                tcpServer.accept().use { connection ->
+                    val input = DataInputStream(connection.getInputStream())
+                    val queryLength = input.readUnsignedShort()
+                    val upstreamQuery = ByteArray(queryLength)
+                    input.readFully(upstreamQuery)
+                    if (!upstreamQuery.contentEquals(DnsMessageValidator.prepareUpstreamQuery(query))) {
+                        error("TCP fallback query frame did not match the DNS query")
+                    }
+                    val frame = ByteArray(fullResponse.size + 2)
+                    frame[0] = (fullResponse.size ushr 8).toByte()
+                    frame[1] = fullResponse.size.toByte()
+                    System.arraycopy(fullResponse, 0, frame, 2, fullResponse.size)
+                    connection.getOutputStream().write(frame)
+                    connection.getOutputStream().flush()
+                }
+            } catch (failure: Throwable) {
+                serverFailure.compareAndSet(null, failure)
+            }
+        }
+
+        try {
+            val deadline = DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 1_500)
+            val outcome = DnsUdpUpstreamClient.queryWithFallback(
+                socket = client,
+                query = query,
+                upstreams = listOf(DnsUdpUpstreamEndpoint(loopback, udpServer.localPort)),
+                deadline = deadline,
+                tcpQuery = { upstream ->
+                    val tcpClient = Socket()
+                    try {
+                        DnsTcpUpstreamClient.query(
+                            socket = tcpClient,
+                            query = query,
+                            server = upstream.address,
+                            port = upstream.port,
+                            deadline = deadline
+                        )
+                    } finally {
+                        tcpClient.close()
+                    }
+                }
+            )
+
+            assertContentEquals(fullResponse, assertNotNull(outcome).response)
+            assertSame(DnsTransport.PLAINTEXT_TCP, outcome.transport)
+            udpResponder.join(1_000)
+            tcpResponder.join(1_000)
+            assertNull(serverFailure.get())
+        } finally {
+            client.close()
+            udpServer.close()
+            tcpServer.close()
+            udpResponder.join(1_000)
+            tcpResponder.join(1_000)
         }
     }
 }

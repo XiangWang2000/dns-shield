@@ -10,6 +10,7 @@ class DnsTransportPolicyTest {
     fun strictModeNeverCallsUdpAfterEncryptedEndpointsFailOrAreInBackoff() = runBlocking {
         var encryptedAttempts = 0
         var udpAttempts = 0
+        var tcpAttempts = 0
         val endpoints = listOf(
             endpoint("https://one.example/dns-query", "one.example", "192.0.2.1"),
             endpoint("https://two.example/dns-query", "two.example", "192.0.2.2")
@@ -23,14 +24,16 @@ class DnsTransportPolicyTest {
                 encryptedAttempts++
                 null // Includes HTTP, certificate, body-validation and backoff failures.
             },
-            udpQuery = {
+            plaintextQuery = {
                 udpAttempts++
-                byteArrayOf(1)
+                tcpAttempts++
+                DnsResolutionOutcome(byteArrayOf(1), DnsTransport.PLAINTEXT_TCP)
             }
         )
 
         assertEquals(2, encryptedAttempts)
         assertEquals(0, udpAttempts)
+        assertEquals(0, tcpAttempts)
         assertSame(DnsTransport.UNAVAILABLE, result.transport)
     }
 
@@ -51,7 +54,7 @@ class DnsTransportPolicyTest {
                 attempted += endpoint.url
                 if (endpoint.hostname == "secondary.example") expected else null
             },
-            udpQuery = {
+            plaintextQuery = {
                 udpAttempts++
                 null
             }
@@ -85,9 +88,9 @@ class DnsTransportPolicyTest {
                 encryptedAttempts++
                 byteArrayOf(1)
             },
-            udpQuery = {
+            plaintextQuery = {
                 udpAttempts++
-                byteArrayOf(1)
+                DnsResolutionOutcome(byteArrayOf(1), DnsTransport.PLAINTEXT_UDP)
             }
         )
 
@@ -105,14 +108,30 @@ class DnsTransportPolicyTest {
             endpoints = listOf(endpoint("https://one.example/dns-query", "one.example", "192.0.2.1")),
             deadline = newDeadline(),
             dohQuery = { null },
-            udpQuery = {
+            plaintextQuery = {
                 udpAttempts++
-                byteArrayOf(1, 2)
+                DnsResolutionOutcome(byteArrayOf(1, 2), DnsTransport.PLAINTEXT_UDP)
             }
         )
 
         assertEquals(1, udpAttempts)
         assertSame(DnsTransport.PLAINTEXT_UDP, result.transport)
+    }
+
+    @Test
+    fun preferredModeKeepsTcpFallbackAsTheActualTransport() = runBlocking {
+        val result = DnsTransportPolicy.resolve(
+            allowPlaintextFallback = true,
+            endpoints = emptyList(),
+            deadline = newDeadline(),
+            dohQuery = { null },
+            plaintextQuery = {
+                DnsResolutionOutcome(byteArrayOf(3, 4), DnsTransport.PLAINTEXT_TCP)
+            }
+        )
+
+        assertSame(DnsTransport.PLAINTEXT_TCP, result.transport)
+        kotlin.test.assertContentEquals(byteArrayOf(3, 4), result.response)
     }
 
     private fun endpoint(url: String, hostname: String, bootstrap: String) =

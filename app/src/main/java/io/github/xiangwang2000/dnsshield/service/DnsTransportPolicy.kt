@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 internal enum class DnsTransport {
     ENCRYPTED_HTTPS,
     PLAINTEXT_UDP,
+    PLAINTEXT_TCP,
     UNAVAILABLE
 }
 
@@ -20,7 +21,7 @@ internal object DnsTransportPolicy {
         endpoints: List<DnsDohEndpoint>,
         deadline: DnsRequestDeadline,
         dohQuery: suspend (DnsDohEndpoint) -> ByteArray?,
-        udpQuery: suspend () -> ByteArray?
+        plaintextQuery: suspend () -> DnsResolutionOutcome?
     ): DnsResolutionOutcome {
         for (endpoint in endpoints) {
             if (!endpoint.canResolveHost || deadline.remainingMillis() <= 0L) continue
@@ -38,15 +39,13 @@ internal object DnsTransportPolicy {
 
         if (allowPlaintextFallback && deadline.remainingMillis() > 0L) {
             val response = try {
-                udpQuery()
+                plaintextQuery()
             } catch (exception: CancellationException) {
                 throw exception
             } catch (_: Exception) {
                 null
             }
-            if (response != null) {
-                return DnsResolutionOutcome(response, DnsTransport.PLAINTEXT_UDP)
-            }
+            if (response?.response != null) return response
         }
 
         return DnsResolutionOutcome(null, DnsTransport.UNAVAILABLE)
