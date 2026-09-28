@@ -7,11 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(
-    entities = [BypassedApp::class, DnsServer::class, UserDomainRuleEntity::class],
-    version = 2,
-    exportSchema = false
-)
+@Database(entities = [BypassedApp::class, DnsServer::class, UserDomainRuleEntity::class], version = 3, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dnsDao(): DnsDao
 
@@ -37,6 +33,15 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN allowPlaintextFallback INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN primaryDohUrl TEXT")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN primaryDohBootstrapIps TEXT")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN secondaryDohUrl TEXT")
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN secondaryDohBootstrapIps TEXT")
+            }
+        }
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -47,7 +52,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "dns_shield_database"
                 )
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         super.onCreate(db)

@@ -11,6 +11,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.xiangwang2000.dnsshield.BuildConfig
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
+import io.github.xiangwang2000.dnsshield.data.DnsServer
 import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
@@ -42,6 +43,8 @@ class LiveUserDomainRuleTunInstrumentedTest {
         )
 
         val dao = AppDatabase.getDatabase(context).dnsDao()
+        val originalActiveId = requireNotNull(dao.getActiveDnsServer()).id
+        val resolverName = "D07 fake upstream ${System.nanoTime()}"
         val domain = "d07-live-${System.nanoTime()}.example.com"
         assertNull("Test domain unexpectedly already has a rule", dao.getUserDomainRule(domain, false))
 
@@ -73,7 +76,18 @@ class LiveUserDomainRuleTunInstrumentedTest {
 
         var serviceStarted = false
         var ruleInserted = false
+        var resolverId: Int? = null
         try {
+            dao.insertDnsServer(DnsServer(
+                name = resolverName,
+                primaryIp = "127.0.0.1",
+                secondaryIp = null,
+                isCustom = true,
+                isActive = false,
+                allowPlaintextFallback = true
+            ))
+            resolverId = dao.getDnsServersList().first { it.name == resolverName }.id
+            assertTrue(dao.setActiveDnsServer(requireNotNull(resolverId)))
             dao.replaceUserDomainRule(UserDomainRuleEntity(domain = domain, action = "BLOCK", includeSubdomains = false))
             ruleInserted = true
             upstreamThread.start()
@@ -92,14 +106,8 @@ class LiveUserDomainRuleTunInstrumentedTest {
                     ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
             }
 
-            context.startService(
-                Intent(context, DnsVpnService::class.java)
-                    .setAction(DnsVpnService.ACTION_UPDATE_DNS)
-                    .putExtra("primary", "127.0.0.1")
-                    .putExtra("dnsName", "D07 fake upstream")
-            )
             awaitState("VPN did not apply the fake upstream") {
-                DnsVpnService.activeDnsFlow.value == "D07 fake upstream (127.0.0.1)"
+                DnsVpnService.activeDnsFlow.value == "${resolverName} (127.0.0.1)"
             }
 
             val query = dnsQuery(domain)
@@ -133,6 +141,8 @@ class LiveUserDomainRuleTunInstrumentedTest {
                     if (upstreamThread.isAlive) upstreamThread.join(1_000)
                 } finally {
                     if (ruleInserted) dao.deleteUserDomainRule(domain, false)
+                    dao.setActiveDnsServer(originalActiveId)
+                    resolverId?.let { dao.deleteDnsServerById(it) }
                 }
             }
         }

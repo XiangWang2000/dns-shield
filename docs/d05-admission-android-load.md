@@ -33,3 +33,19 @@ Branch `codex/d05-bounded-admission` integrated the merged D04 and D07 main bran
 Final isolated APK SHA-256: app `122438B028015455DBAFA3F505BD0F7B54F8E37B06DFA74EDFA9CBC7C915533D`, instrumentation `92DD1B144060E145A2BF411CD1E205A70A752913E9FFE8ED52D43037CE6AC995`. Raw reports: ignored `captures/d05-port-fix-d07-live-tun.txt`, `captures/d05-tun-load-device4.txt`, `captures/d05-tun-load-device5.txt`, and `captures/d05-tun-load-device6.txt`, and `captures/d05-tun-load-device7.txt`, and `captures/d05-tun-load-device8.txt`; Android `System.out` logcat has the per-run counts and timings.
 
 One final-run process sample, in bytes unless stated otherwise: heap used before/during/after load 4,986,640 / 7,463,344 / 8,255,392; PSS 152,472 / 157,683 / 157,110 KB; post-stop FD count 71. These are observations from one run, without a same-state baseline or GC normalization. They do not establish a leak or a power/performance improvement. The admission-registry device test above provides the exact 24 leaders × 8 waiters bound; this TUN test demonstrates the service ceiling with background device traffic present. Slow/failing DoH is covered by deadline/fallback unit tests and the separate D08 TLS failure device test, but a controlled slow DoH request has not yet been exercised through this D05 TUN build.
+
+## Integrated slow DoH connection evidence (2026-09-28)
+
+D05 PR #56 was merged into main as `0b266edf`, after its isolated D05
+TUN admission, UDP failover, stop, heap/PSS observation, full verification
+and Windows CI passed. The D08 branch subsequently integrated this main
+state and used its custom HTTPS endpoint to exercise a controlled slow TLS
+handshake through the ASUS_Z01RD / Android 10 VPN/TUN path. A four-second
+handshake hold led to one fake UDP request and a valid answer when plaintext
+fallback was allowed; strict mode returned SERVFAIL with zero matching UDP.
+The complete D08 TLS/TUN suite passed 4/4. This is composite evidence on
+the integrated D05+D08 service. It tests a slow DoH connection attempt,
+not a delayed HTTP response body on the exact D05 PR head. The D05-head
+admission/deadline files were retained; D08 changes transport selection.
+See `docs/d08-device-acceptance.md` and the ignored
+`captures/d08-main-device-tls-4.txt` for the exact scope.
