@@ -24,6 +24,7 @@ internal suspend fun OkHttpClient.lookupDoh(
     endpointUrl: String,
     query: ParsedDnsQuery,
     deadline: DnsRequestDeadline,
+    onCallQueued: () -> Unit = {},
     logFailure: (String, Throwable?) -> Unit
 ): ByteArray? {
     val remainingMillis = deadline.remainingMillis()
@@ -80,5 +81,6 @@ internal suspend fun OkHttpClient.lookupDoh(
                 }
             }
         })
+        onCallQueued()
     }
 }
