@@ -17,7 +17,9 @@ internal fun <T : OutputStream> runVpnTunnelReader(
     openInput: () -> InputStream,
     openOutput: () -> T,
     isActive: () -> Boolean,
+    onOutputOpened: (T) -> Unit = {},
     handlePacket: (ByteArray, Int, T) -> Unit,
+    onOutputClosing: (T) -> Unit = {},
     onEnded: (String?) -> Unit
 ) {
     var failure: String? = null
@@ -27,6 +29,7 @@ internal fun <T : OutputStream> runVpnTunnelReader(
         try {
             val outputStream = openOutput()
             try {
+                onOutputOpened(outputStream)
                 val buffer = ByteArray(4096)
                 while (isActive()) {
                     val readBytes = inputStream.read(buffer)
@@ -40,7 +43,11 @@ internal fun <T : OutputStream> runVpnTunnelReader(
                     }
                 }
             } finally {
-                outputStream.close()
+                try {
+                    onOutputClosing(outputStream)
+                } finally {
+                    outputStream.close()
+                }
             }
         } finally {
             inputStream.close()

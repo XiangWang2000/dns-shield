@@ -52,3 +52,5 @@ length/body reads, timeout, UDP TC fallback, and EDNS/no-EDNS truncation.
 Strict mode's zero-plaintext UDP/TCP boundary is covered by the D08 physical
 TLS/TUN cases and transport-policy tests. Client-facing DNS/TCP is a separate
 D11 feature; until D11 is integrated, only upstream TCP fallback is supported.
+The subsequent D11 integration adds client-facing DNS/TCP on the same
+policy/cache pipeline; see [D11 runtime validation](d11-runtime-validation.md).

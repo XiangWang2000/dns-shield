@@ -53,11 +53,15 @@ val d12InstrumentationRequested = gradle.startParameter.taskNames.any {
 android {
   namespace = "io.github.xiangwang2000.dnsshield"
   compileSdk = 37
+  ndkVersion = "27.2.12479018"
+  externalNativeBuild { ndkBuild { path = file("src/main/cpp/Android.mk") } }
   testBuildType = providers.gradleProperty("androidTestBuildType").getOrElse("debug")
 
   defaultConfig {
     applicationId = "io.github.xiangwang2000.dnsshield"
     minSdk = 24
+    ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }
+    externalNativeBuild { ndkBuild { arguments += "NDK_APPLICATION_MK=${projectDir}/src/main/cpp/Application.mk" } }
     targetSdk = 37
     versionCode = 5
     versionName = "1.2.2"
@@ -117,6 +121,7 @@ android {
       initWith(getByName("debug"))
       applicationIdSuffix = ".d04test"
       versionNameSuffix = "-d04test"
+      buildConfigField("int", "DNS_UPSTREAM_PORT", "15353")
       matchingFallbacks += listOf("debug")
     }
     create("d08test") {
@@ -182,3 +187,19 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
 }
 
+
+// Materialize Windows Git header-link placeholders only in generated sources.
+val prepareNativeSources by tasks.registering(Sync::class) {
+    from("src/main/cpp/hev") {
+        exclude("**/.git", "**/.git/**", "src/hev-jni.c")
+        filesMatching("**/include/*.h") {
+            filter { line: String ->
+                if (line.matches(Regex("\\.\\./[A-Za-z0-9_./-]+\\.h"))) "#include \"$line\"" else line
+            }
+        }
+    }
+    into(layout.buildDirectory.dir("generated/hev"))
+}
+tasks.configureEach {
+    if (name.startsWith("configureNdkBuild") || name.startsWith("buildNdkBuild")) dependsOn(prepareNativeSources)
+}

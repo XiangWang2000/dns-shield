@@ -53,6 +53,28 @@ class VpnTunnelIoTest {
     }
 
     @Test
+    fun outputLifecycleClosesNativeOwnerBeforeTunStream() {
+        val events = mutableListOf<String>()
+        val output = object : OutputStream() {
+            override fun write(value: Int) = Unit
+            override fun close() { events.add("stream closed") }
+        }
+        runVpnTunnelReader(
+            openInput = { ByteArrayInputStream(byteArrayOf(7)) },
+            openOutput = { output },
+            isActive = { true },
+            onOutputOpened = { events.add("native started") },
+            handlePacket = { _, _, _ -> events.add("packet handled") },
+            onOutputClosing = { events.add("native closed") },
+            onEnded = { events.add("ended") }
+        )
+        assertEquals(
+            listOf("native started", "packet handled", "native closed", "stream closed", "ended"),
+            events
+        )
+    }
+
+    @Test
     fun eofAfterStopDoesNotReportUnexpectedTunnelFailure() {
         val active = AtomicBoolean(true)
         val input = object : InputStream() {
