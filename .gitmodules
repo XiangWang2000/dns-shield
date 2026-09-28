@@ -1,0 +1,3 @@
+[submodule "app/src/main/cpp/hev"]
+	path = app/src/main/cpp/hev
+	url = https://github.com/heiher/hev-socks5-tunnel.git
