@@ -89,3 +89,39 @@ The password is a public test constant. Never substitute a real service identity
 The certificate must be self-signed and rejected by production trust checks;
 its exact bytes are not a test expectation. CI verify does not execute these
 physical-device cases or generate this optional fixture automatically.
+
+## Main/D05 integration and Android 10 regression (2026-09-28)
+
+PR #56 was merged into main as `0b266edf`. The D08 worktree merged that
+main state, retaining D07 Room v2 rules and D08's Room v3 encrypted DNS
+migration. D08 and D07 isolated builds now use the same
+`BuildConfig.DNS_UPSTREAM_PORT` contract (15353 in their test variants;
+53 in production). The full `verify.ps1` passed after conflict resolution.
+
+On ASUS_Z01RD / Android 10, `DohTlsFallbackInstrumentedTest` passed 4/4
+in 13.349 s on the integrated branch. Two existing cases use an untrusted
+loopback TLS certificate: strict mode returns SERVFAIL with zero matching
+plaintext UDP requests, while allowed fallback returns the fake UDP answer
+after exactly one matching request. Two new cases hold the TLS handshake for
+four seconds. The client attempts the configured HTTPS endpoint through
+the real TUN path for at least two seconds; allowed fallback again uses one
+fake UDP request, and strict mode returns SERVFAIL with zero matching UDP.
+This is a controlled slow **TLS handshake**, not a delayed HTTP response body
+or a successful DoH answer. The test fixture remains ignored and local.
+
+`DnsServerMigrationTest` passed 2/2 in 0.443 s on the same device,
+covering production v1 and D07 v2 upgrades to Room v3. The first merged
+D07 live-rule TUN run failed because its inherited test still sent the
+obsolete `primary`/`dnsName` extras to `ACTION_UPDATE_DNS`. D08 now
+requires a Room `resolverId` so the service loads the complete transport
+policy. The test was updated to create a fake resolver in the isolated
+database, select it before VPN start, and restore the previous active
+resolver afterward. The corrected BLOCK → ALLOW → BLOCK/cache-invalidating
+TUN run passed 1/1 in 0.986 s.
+
+Raw local results: ignored `captures/d08-main-device-tls-4.txt`,
+`captures/d08-main-device-migration.txt`, and
+`captures/d08-main-d07-live-tun2.txt`. These device cases do not yet
+exercise an HTTP error/invalid DNS body through the service, encrypted
+primary-to-secondary failover, custom bootstrap failure, or the live
+Compose transport-status display.
