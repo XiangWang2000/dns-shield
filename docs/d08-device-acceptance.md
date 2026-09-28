@@ -125,3 +125,32 @@ Raw local results: ignored `captures/d08-main-device-tls-4.txt`,
 exercise an HTTP error/invalid DNS body through the service, encrypted
 primary-to-secondary failover, custom bootstrap failure, or the live
 Compose transport-status display.
+
+## DoH HTTP callback and live transport UI (2026-09-28)
+
+The existing OkHttp DoH callback was moved into `DnsDohHttpClient.kt`
+without changing endpoint selection, HTTPS response requirement, redirect
+policy, DNS body validation, or its remaining-budget call timeout. A JVM
+test drives that same callback through an OkHttp interceptor with an HTTPS
+request: HTTP 503 returns no answer, HTTP 200 with a mismatched DNS
+question returns no answer, and HTTP 200 with a valid DNS message succeeds.
+The existing redirect tests still verify that 301/302/303/307/308 do not
+send the DNS body to a new endpoint. These are callback-level tests, not
+a physical-device HTTPS server delivering those HTTP responses.
+
+The isolated Android 10 TLS/TUN suite was rebuilt after that move and
+passed 4/4 in 14.816 s. It additionally checks the service's transport
+status and reads the rendered Compose text from the accessibility tree:
+the allowed-fallback case displayed `UDP/53 明文降級` while the VPN
+remained active. An initial UI assertion used Android's
+`findAccessibilityNodeInfosByText` and failed even though a diagnostic
+tree walk showed the expected text. The final test walks the same
+accessibility tree directly and passed. The final raw result is ignored
+`captures/d08-http-ui-device-tls-final.txt`.
+
+The existing JVM policy/configuration tests cover strict-mode bootstrap
+failure without starting a transport, distinct primary/secondary
+encrypted endpoint selection, and trying the encrypted secondary before
+plaintext fallback. The physical tests above prove invalid TLS and slow
+handshake under strict and fallback policy; they do not prove a successful
+secondary DoH response or a slow HTTP response body on the handset.

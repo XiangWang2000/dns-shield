@@ -9,6 +9,7 @@ import androidx.core.content.ContextCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.xiangwang2000.dnsshield.BuildConfig
+import io.github.xiangwang2000.dnsshield.MainActivity
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import java.io.ByteArrayOutputStream
@@ -115,6 +116,12 @@ class DohTlsFallbackInstrumentedTest {
             }
             assertDnsTransaction(response, transactionId)
             assertDnsResponseCode(response, if (allowPlaintextFallback) 0 else 2)
+            val expectedTransportStatus = if (allowPlaintextFallback) {
+                "UDP/53 明文降級"
+            } else {
+                "僅加密 · DoH 不可用 · SERVFAIL"
+            }
+            assertEquals(expectedTransportStatus, DnsVpnService.dnsTransportStatusFlow.value)
             if (allowPlaintextFallback) {
                 assertTrue("TLS failure did not reach UDP/15353 for the test hostname", udpServer.awaitQuery())
                 assertEquals("Unexpected target-host UDP query count", 1, udpServer.targetQueryCount.get())
@@ -124,6 +131,9 @@ class DohTlsFallbackInstrumentedTest {
                 assertEquals("Strict TLS mode must return an answerless SERVFAIL", 0, dnsAnswerCount(response))
             }
             assertEquals(null, udpServer.failure.get())
+            if (allowPlaintextFallback && handshakeDelayMillis == 0L) {
+                assertTransportStatusRendered(context, expectedTransportStatus)
+            }
         } finally {
             try {
                 stopVpnIfRunning(context)
@@ -140,6 +150,30 @@ class DohTlsFallbackInstrumentedTest {
                 }
             }
         }
+    }
+
+    private fun assertTransportStatusRendered(context: Context, expected: String) {
+        context.startActivity(
+            Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        )
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        val deadline = android.os.SystemClock.elapsedRealtime() + 5_000L
+        var observed = emptyList<String>()
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            val root = automation.rootInActiveWindow
+            val texts = mutableListOf<String>()
+            fun collect(node: android.view.accessibility.AccessibilityNodeInfo?) {
+                if (node == null || texts.size >= 40) return
+                node.text?.toString()?.let(texts::add)
+                for (index in 0 until node.childCount) collect(node.getChild(index))
+            }
+            collect(root)
+            if (texts.any { expected in it }) return
+            observed = texts
+            Thread.sleep(100)
+        }
+        assertTrue("The live Compose transport card did not show $expected; visible=$observed", false)
     }
 
     private suspend fun ensureVpnConsent(context: Context) {

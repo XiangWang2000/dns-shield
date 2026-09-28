@@ -31,7 +31,6 @@ import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidation
 import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidator
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import io.github.xiangwang2000.dnsshield.data.DnsServer
-import kotlin.coroutines.resume
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,9 +49,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import android.util.LruCache
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 
@@ -1051,72 +1047,12 @@ class DnsVpnService : VpnService() {
         query: ParsedDnsQuery,
         deadline: DnsRequestDeadline
     ): ByteArray? {
-        val remainingMillis = deadline.remainingMillis()
-        if (remainingMillis <= 0L) return null
-
-        val mediaType = "application/dns-message".toMediaType()
-        val requestBody = DnsMessageValidator.prepareUpstreamQuery(query).toRequestBody(mediaType)
-
-        val request = Request.Builder()
-            .url(endpoint.url)
-            .header("Content-Type", "application/dns-message")
-            .header("Accept", "application/dns-message")
-            .post(requestBody)
-            .build()
-
-        val client = getOkHttpClient().forDohEndpoints(resolverEndpoints)
-        val call = client.newCall(request)
-        call.timeout().timeout(remainingMillis, TimeUnit.MILLISECONDS)
-
-        return suspendCancellableCoroutine { continuation ->
-            continuation.invokeOnCancellation {
-                try {
-                    call.cancel()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error cancelling call", e)
-                }
+        if (deadline.remainingMillis() <= 0L) return null
+        return getOkHttpClient()
+            .forDohEndpoints(resolverEndpoints)
+            .lookupDoh(endpoint.url, query, deadline) { message, error ->
+                logDnsTransportFailure(message, error)
             }
-
-            call.enqueue(object : okhttp3.Callback {
-                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                    if (continuation.isActive) {
-                        logDnsTransportFailure("DoH resolution failed for ${endpoint.url}", e)
-                        continuation.resume(null)
-                    }
-                }
-
-                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                    try {
-                        if (continuation.isActive) {
-                            if (response.isSuccessful && response.request.url.isHttps) {
-                                val body = response.body
-                                val bytes = DnsDohResponseValidator.readValidatedBody(
-                                    contentType = response.header("Content-Type"),
-                                    contentLength = body.contentLength(),
-                                    stream = body.byteStream(),
-                                    query = query
-                                )
-                                continuation.resume(bytes)
-                            } else {
-                                logDnsTransportFailure("DoH resolution error: HTTP ${response.code} for ${endpoint.url}")
-                                continuation.resume(null)
-                            }
-                        } else {
-                            response.close()
-                        }
-                    } catch (e: Exception) {
-                        logDnsTransportFailure("Failed reading DoH body bytes", e)
-                        if (continuation.isActive) {
-                            continuation.resume(null)
-                        }
-                    } finally {
-                        try {
-                            response.close()
-                        } catch (e: Exception) {}
-                    }
-                }
-            })
-        }
     }
 
     private fun sendResponsePacket(
