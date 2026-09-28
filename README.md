@@ -19,11 +19,20 @@ DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標
 - 支援選擇具有啟動入口的已安裝 App，使其略過 DNS Shield VPN。
 - 在 App 開啟時顯示查詢數、阻擋數、估算節省流量與診斷日誌。
 
+## 使用者網域規則
+
+- 可新增允許或封鎖規則，並以網域名稱搜尋或刪除規則；資料保存在裝置的 Room 資料庫。
+- 精確規則只適用於該網域；「包含子網域」會同時套用於該網域及其子網域，並拒絕公共後綴本身。
+- 規則名稱會轉成小寫 ASCII IDNA 格式並移除一個結尾句點；子網域比對以 DNS 標籤邊界進行，因此 `example.com` 不會匹配 `lookalike-example.com`。
+- 使用者規則優先於內建及編譯防護名單；多條規則同時匹配時，最精確的網域優先。相同網域與範圍的新規則會取代舊規則。
+- 啟用 VPN 時，新增或刪除規則會即時重載不可變政策快照並清除舊決策與 DNS 回應快取；VPN 關閉時，規則會在下次啟動時載入。
+- 偵測到封鎖時，運作日誌提供精確允許操作；短時間內可復原，復原會還原被取代的原規則。子網域範圍只有在已驗證的 PSL 可用時才能新增。
+
 ## 能力邊界
 
 DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆：
 
-- 本開發分支已接入 IPv4 TCP/53 的 TUN runtime，並在 Android 10 實機及 Android 15 模擬器驗證真實 DNS client、UDP TC 後 TCP 重試、32 條連線容量、idle timeout 與停止清理。PR #62 合併前，正式版本仍以已合併的 UDP/53 支援範圍為準；詳見 [D11 驗證紀錄](docs/d11-runtime-validation.md)。
+- 目前原始碼支援送往虛擬 DNS 的 IPv4 UDP/53 與 TCP/53 查詢；TCP/53 已在 Android 10 實機與 Android 15 模擬器驗證真實 TUN 查詢、UDP TC 後重試、32 條連線容量、idle timeout 與停止清理。已安裝的舊版 APK 需更新後才包含此功能；詳見 [D11 驗證紀錄](docs/d11-runtime-validation.md)。
 - App 自行使用 DoH、DoT、非標準連接埠、直接 IP 連線或其他繞過系統 DNS 的方式，不會被此工具攔截。
 - DNS 層規則無法阻擋與正常內容共用網域的廣告，也無法保證涵蓋所有廣告、追蹤或惡意網域。
 - App 不會在執行期間下載遠端規則；production blocklist 只會隨經驗證的新 APK 更新。私有 override 缺失時使用 APK 內規則，格式或排序驗證失敗時也會改用 APK 內已驗證的清單；若該清單同樣無法使用，才退回內建規則。

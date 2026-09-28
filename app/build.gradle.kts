@@ -43,6 +43,9 @@ val d08InstrumentationRequested = gradle.startParameter.taskNames.any {
   it.contains("D08test", ignoreCase = true)
 }
 
+val d07InstrumentationRequested = gradle.startParameter.taskNames.any {
+  it.contains("D07test", ignoreCase = true)
+}
 val d12InstrumentationRequested = gradle.startParameter.taskNames.any {
   it.contains("D12test", ignoreCase = true)
 }
@@ -57,14 +60,15 @@ android {
   defaultConfig {
     applicationId = "io.github.xiangwang2000.dnsshield"
     minSdk = 24
-    buildConfigField("int", "DNS_TEST_UPSTREAM_PORT", "53")
     ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }
     externalNativeBuild { ndkBuild { arguments += "NDK_APPLICATION_MK=${projectDir}/src/main/cpp/Application.mk" } }
     targetSdk = 37
     versionCode = 5
     versionName = "1.2.2"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    buildConfigField("int", "DNS_UPSTREAM_PORT", "53")
     if (d08InstrumentationRequested) testBuildType = "d08test"
+    if (d07InstrumentationRequested) testBuildType = "d07test"
     if (d12InstrumentationRequested) testBuildType = "d12test"
   }
 
@@ -117,14 +121,20 @@ android {
       initWith(getByName("debug"))
       applicationIdSuffix = ".d04test"
       versionNameSuffix = "-d04test"
-      buildConfigField("int", "DNS_TEST_UPSTREAM_PORT", "15353")
+      buildConfigField("int", "DNS_UPSTREAM_PORT", "15353")
       matchingFallbacks += listOf("debug")
     }
     create("d08test") {
       initWith(getByName("debug"))
       applicationIdSuffix = ".d08test"
-      buildConfigField("int", "DNS_TEST_UPSTREAM_PORT", "15353")
+      buildConfigField("int", "DNS_UPSTREAM_PORT", "15353")
       matchingFallbacks += listOf("debug")
+    }
+    create("d07test") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d07test"
+      matchingFallbacks += listOf("debug")
+      buildConfigField("int", "DNS_UPSTREAM_PORT", "15353")
     }
     create("d12test") {
       initWith(getByName("debug"))

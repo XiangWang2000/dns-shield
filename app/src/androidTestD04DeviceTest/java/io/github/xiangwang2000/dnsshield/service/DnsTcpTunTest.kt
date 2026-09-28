@@ -66,8 +66,8 @@ class DnsTcpTunTest {
         val previous = dao.getActiveDnsServer()
         val resolverId = 91001
         val address = java.net.InetAddress.getByName("127.0.0.2")
-        val udp = java.net.DatagramSocket(null).apply { bind(InetSocketAddress(address, io.github.xiangwang2000.dnsshield.BuildConfig.DNS_TEST_UPSTREAM_PORT)) }
-        val tcp = java.net.ServerSocket().apply { bind(InetSocketAddress(address, io.github.xiangwang2000.dnsshield.BuildConfig.DNS_TEST_UPSTREAM_PORT)) }
+        val udp = java.net.DatagramSocket(null).apply { bind(InetSocketAddress(address, io.github.xiangwang2000.dnsshield.BuildConfig.DNS_UPSTREAM_PORT)) }
+        val tcp = java.net.ServerSocket().apply { bind(InetSocketAddress(address, io.github.xiangwang2000.dnsshield.BuildConfig.DNS_UPSTREAM_PORT)) }
         val udpCount = java.util.concurrent.atomic.AtomicInteger()
         val tcpCount = java.util.concurrent.atomic.AtomicInteger()
         val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()

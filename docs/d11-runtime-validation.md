@@ -116,3 +116,38 @@ Remaining release steps: check CI on the pushed head, refresh the PR and issue
 descriptions, review dependency PR order and merge readiness. This checkpoint
 does not merge main or claim the broader D03/D04/D05/D08 network and UI matrices
 are complete.
+## D10 integration and Android 10 rerun — 2026-09-28
+
+D10 PR #60 merged into main as `6c71b12`; its head `0194b50` passed exact-head
+Windows CI run 36378746434, full `verify.ps1`, and the Android 10 TUN
+TC→upstream TCP/cache test. The existing D11 worktree merged that D10 head,
+retaining the D11 lock-safe response commit and plaintext fallback fence.
+The merge resolved the D05/D10 test-port contract to one
+`BuildConfig.DNS_UPSTREAM_PORT`: 15353 in isolated test builds and 53 in
+production. Both UDP and TCP upstream endpoints now use it, including the
+D11 `.d04test` and D08 `.d08test` fake servers. No local TUN TCP acceptance is
+inferred from a localhost ServerSocket alone.
+
+The integrated D11 `verify.ps1` passed: 29 Python tests, both packaged
+production assets, 219 JVM tests / 43 suites, Android lint, Debug and
+isolated D04 app/test APKs (`captures/d11-d10-integration-verify.log`, ignored).
+The D08 isolated app/test APKs also built with the ignored disposable PKCS12
+fixture (`captures/d11-d10-d08-build.log`). On ASUS_Z01RD / Android 10,
+`DnsTcpTunTest` passed 4/4 in 14.923 s, including multiple framed client
+queries, half-close, stop, UDP TC→TCP/full shared cache, 32-session capacity,
+overflow, and idle timeout. `DohTlsFallbackInstrumentedTest` plus
+`DnsUpstreamTcpTunInstrumentedTest` passed 5/5 in 15.596 s on the same
+integrated service: invalid certificate/slow TLS handshake kept strict-mode
+matching UDP at zero, allowed fallback sent one matching UDP query, and a
+separate TC→TCP answer was cached across transaction IDs. Raw ignored logs:
+`captures/d11-d10-android10-tcp-final.txt` and
+`captures/d11-d10-android10-strict-tcp-final.txt`.
+
+The D10 device test first exposed a cached transaction-ID validation issue;
+D10 stamps a response copy before truncation, and D11's immutable commit also
+stamps each client ID before its writer handles the response. D11's
+`DnsResolvedResponseCommitterTest` retains stale-state, blocked-writer and
+transaction-ID regression coverage. The D08 TLS device fixture tests a slow
+handshake, not a delayed HTTP response body. The Android 15 9/9 TUN/native
+and 2/2 strict-mode results above remain evidence from the previous D11 head;
+they were not rerun after this D10 integration.

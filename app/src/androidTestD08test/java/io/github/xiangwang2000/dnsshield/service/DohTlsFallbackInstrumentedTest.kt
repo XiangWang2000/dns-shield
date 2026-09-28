@@ -9,6 +9,7 @@ import androidx.core.content.ContextCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.xiangwang2000.dnsshield.BuildConfig
+import io.github.xiangwang2000.dnsshield.MainActivity
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import java.io.ByteArrayOutputStream
@@ -54,16 +55,29 @@ class DohTlsFallbackInstrumentedTest {
         runTlsFailureScenario(allowPlaintextFallback = true)
     }
 
-    private suspend fun runTlsFailureScenario(allowPlaintextFallback: Boolean) {
+    @Test
+    fun allowedFallbackUsesUdpAfterSlowDohHandshake() = runBlocking {
+        runTlsFailureScenario(allowPlaintextFallback = true, handshakeDelayMillis = 4_000)
+    }
+
+    @Test
+    fun strictModeDoesNotUseUdpAfterSlowDohHandshake() = runBlocking {
+        runTlsFailureScenario(allowPlaintextFallback = false, handshakeDelayMillis = 4_000)
+    }
+
+    private suspend fun runTlsFailureScenario(
+        allowPlaintextFallback: Boolean,
+        handshakeDelayMillis: Long = 0L
+    ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue("This suite must run in the isolated .d08test app", context.packageName.endsWith(".d08test"))
-        assertEquals("The D08 test build must route loopback UDP to its unprivileged test port", 15353, BuildConfig.DNS_TEST_UPSTREAM_PORT)
+        assertEquals("The D08 test build must route loopback UDP to its unprivileged test port", 15353, BuildConfig.DNS_UPSTREAM_PORT)
 
         val dao = AppDatabase.getDatabase(context).dnsDao()
         val originalServers = dao.getDnsServersList()
         val domain = "d08-${UUID.randomUUID().toString().replace("-", "")}.example.test"
-        val tlsServer = RejectingTlsServer(instrumentation.context)
+        val tlsServer = RejectingTlsServer(instrumentation.context, handshakeDelayMillis)
         val udpServer = FakeUdpDnsServer(domain)
         val resolverName = "D08 TLS ${UUID.randomUUID()}"
         var resolverId: Int? = null
@@ -89,11 +103,25 @@ class DohTlsFallbackInstrumentedTest {
             awaitActiveVpnNetwork(context)
 
             val transactionId = System.nanoTime().toInt() and 0xffff
+            val queryStartMillis = android.os.SystemClock.elapsedRealtime()
             val response = sendQueryThroughTun(buildDnsQuery(domain, transactionId))
+            val queryElapsedMillis = android.os.SystemClock.elapsedRealtime() - queryStartMillis
 
-            tlsServer.assertClientRejectedCertificate()
+            if (handshakeDelayMillis > 0L) {
+                tlsServer.assertClientConnected()
+                assertTrue("Slow DoH handshake was not held long enough: ${queryElapsedMillis}ms",
+                    queryElapsedMillis >= 2_000L)
+            } else {
+                tlsServer.assertClientRejectedCertificate()
+            }
             assertDnsTransaction(response, transactionId)
             assertDnsResponseCode(response, if (allowPlaintextFallback) 0 else 2)
+            val expectedTransportStatus = if (allowPlaintextFallback) {
+                "UDP/53 明文降級"
+            } else {
+                "僅加密 · DoH 不可用 · SERVFAIL"
+            }
+            assertEquals(expectedTransportStatus, DnsVpnService.dnsTransportStatusFlow.value)
             if (allowPlaintextFallback) {
                 assertTrue("TLS failure did not reach UDP/15353 for the test hostname", udpServer.awaitQuery())
                 assertEquals("Unexpected target-host UDP query count", 1, udpServer.targetQueryCount.get())
@@ -103,6 +131,9 @@ class DohTlsFallbackInstrumentedTest {
                 assertEquals("Strict TLS mode must return an answerless SERVFAIL", 0, dnsAnswerCount(response))
             }
             assertEquals(null, udpServer.failure.get())
+            if (allowPlaintextFallback && handshakeDelayMillis == 0L) {
+                assertTransportStatusRendered(context, expectedTransportStatus)
+            }
         } finally {
             try {
                 stopVpnIfRunning(context)
@@ -119,6 +150,30 @@ class DohTlsFallbackInstrumentedTest {
                 }
             }
         }
+    }
+
+    private fun assertTransportStatusRendered(context: Context, expected: String) {
+        context.startActivity(
+            Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        )
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        val deadline = android.os.SystemClock.elapsedRealtime() + 5_000L
+        var observed = emptyList<String>()
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            val root = automation.rootInActiveWindow
+            val texts = mutableListOf<String>()
+            fun collect(node: android.view.accessibility.AccessibilityNodeInfo?) {
+                if (node == null || texts.size >= 40) return
+                node.text?.toString()?.let(texts::add)
+                for (index in 0 until node.childCount) collect(node.getChild(index))
+            }
+            collect(root)
+            if (texts.any { expected in it }) return
+            observed = texts
+            Thread.sleep(100)
+        }
+        assertTrue("The live Compose transport card did not show $expected; visible=$observed", false)
     }
 
     private suspend fun ensureVpnConsent(context: Context) {
@@ -241,7 +296,7 @@ class DohTlsFallbackInstrumentedTest {
         return null
     }
 
-    private class RejectingTlsServer(testContext: Context) : Closeable {
+    private class RejectingTlsServer(testContext: Context, private val handshakeDelayMillis: Long) : Closeable {
         private val accepted = CountDownLatch(1)
         private val handshakeFinished = CountDownLatch(1)
         private val handshakeFailure = AtomicReference<Throwable?>()
@@ -269,8 +324,11 @@ class DohTlsFallbackInstrumentedTest {
                     client = serverSocket.accept() as SSLSocket
                     accepted.countDown()
                     client.soTimeout = SERVER_TIMEOUT_MILLIS
+                    if (handshakeDelayMillis > 0L) Thread.sleep(handshakeDelayMillis)
                     client.startHandshake()
                     handshakeSucceeded.set(true)
+                } catch (_: InterruptedException) {
+                    // The test closed the server while the controlled handshake delay was active.
                 } catch (exception: SSLException) {
                     handshakeFailure.set(exception)
                 } catch (exception: IOException) {
@@ -289,9 +347,13 @@ class DohTlsFallbackInstrumentedTest {
             }
         }
 
-        fun assertClientRejectedCertificate() {
+        fun assertClientConnected() {
             assertTrue("DoH client never connected to the local TLS endpoint",
                 accepted.await(SERVER_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS))
+        }
+
+        fun assertClientRejectedCertificate() {
+            assertClientConnected()
             assertTrue("TLS handshake did not finish after the test certificate was presented",
                 handshakeFinished.await(SERVER_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS))
             assertFalse("The client accepted the untrusted test certificate", handshakeSucceeded.get())
@@ -303,6 +365,7 @@ class DohTlsFallbackInstrumentedTest {
                 serverSocket.close()
             } catch (_: IOException) {
             }
+            worker.interrupt()
             worker.join(1_000)
         }
     }
@@ -312,7 +375,7 @@ class DohTlsFallbackInstrumentedTest {
         private val requestReceived = CountDownLatch(1)
         private val socket = DatagramSocket(null).apply {
             reuseAddress = true
-            bind(InetSocketAddress(InetAddress.getByName(RESOLVER_IP), BuildConfig.DNS_TEST_UPSTREAM_PORT))
+            bind(InetSocketAddress(InetAddress.getByName(RESOLVER_IP), BuildConfig.DNS_UPSTREAM_PORT))
             soTimeout = 200
         }
         val targetQueryCount = AtomicInteger(0)

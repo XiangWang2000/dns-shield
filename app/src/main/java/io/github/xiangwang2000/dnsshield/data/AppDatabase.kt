@@ -2,9 +2,9 @@ package io.github.xiangwang2000.dnsshield.data
 
 import android.content.Context
 import androidx.room.Database
-import androidx.room.migration.Migration
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(entities = [BypassedApp::class, DnsServer::class, UserDomainRuleEntity::class], version = 3, exportSchema = false)
@@ -42,7 +42,6 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE dns_servers ADD COLUMN secondaryDohBootstrapIps TEXT")
             }
         }
-
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -83,7 +82,6 @@ abstract class AppDatabase : RoomDatabase() {
                         }
                     }
                 })
-                .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()
                 INSTANCE = instance
                 instance
