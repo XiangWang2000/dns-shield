@@ -29,3 +29,11 @@ configuration feature. CI builds the harness but does not reproduce this network
 
 Test APK SHA-256: `f98414be6aca6501b70140a31b1eb5f58da9998c3460828ae689454e32964af5`.
 Full `verify.ps1` passed, including 98 JVM tests and lint.
+
+## 2026-09-29 current-main integration and IPv4-only run
+
+The existing D03 worktree merged current `main` (`1dbd49d`), retaining the one-line `Builder.allowFamily(AF_INET6)` change in the current VPN lifecycle and D11 UDP/TCP TUN implementation. The isolated `d03test` variant and `verify.ps1` build step were preserved. `Ipv6PassThroughTest` now uses the current lifecycle flow and adds an IPv4-only off/on/off case.
+
+On ASUS_Z01RD / Android 10, the current Wi-Fi had an IPv4 address and only an IPv6 link-local address, with no IPv6 default route (`adb shell ip -6 route show default` returned no route). After granting consent to the reinstalled isolated `.d03test` package, `ipv4OnlyVpnOffOnOff` passed 1/1 (1.536 seconds): direct IPv4 TCP and IPv4 UDP AAAA queries succeeded before, during, and after VPN; AAAA via the virtual IPv4 DNS also succeeded while VPN was on. The first run failed before the test because reinstalling the isolated APK required fresh Android VPN consent; no test behavior failed. Raw ignored output: `captures/d03-main-ipv4-only-device-consented.txt`.
+
+Full `verify.ps1` passed: 29 Python, 222 JVM tests / 44 suites with zero failures/errors, assets, lint, Debug/D04/D03 APKs. Raw ignored output: `captures/d03-main-final-verify.log`. The earlier dual-stack result above was on an older head and is not a claim for this integrated head. IPv6-only/NAT64 cannot be tested on the current network; D03 remains Draft / In Progress pending that matrix; the exact-head CI result is tracked on PR #50.

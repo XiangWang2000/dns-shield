@@ -10,6 +10,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class RuntimeDomainPolicyTest {
@@ -63,6 +64,8 @@ class RuntimeDomainPolicyTest {
 
         assertEquals(1, bundledProviderCalls)
         assertEquals(CompiledBlocklistStatus.Loaded(entryCount = 4), assembly.compiledBlocklistStatus)
+        assertEquals(RuleBlocklistSource.APK_BUNDLED, assembly.displayStatus.source)
+        assertEquals(RuleBlocklistValidation.APK_VERIFIED, assembly.displayStatus.validation)
         assertTrue(assembly.matcher.shouldBlock("github.com"))
     }
 
@@ -90,6 +93,10 @@ class RuntimeDomainPolicyTest {
         val assembly = RuntimeDomainPolicy.assemble(filesDirectory)
 
         assertEquals(CompiledBlocklistStatus.Loaded(entryCount = 4), assembly.compiledBlocklistStatus)
+        assertEquals(RuleBlocklistSource.PRIVATE_OVERRIDE, assembly.displayStatus.source)
+        assertEquals(RuleBlocklistValidation.PRIVATE_STRUCTURE_CHECKED, assembly.displayStatus.validation)
+        assertNull(assembly.displayStatus.sourceRevision)
+        assertNull(assembly.displayStatus.sourceDate)
         assertTrue(assembly.matcher.shouldBlock("admob.com"))
         assertTrue(assembly.matcher.shouldBlock("github.com"))
         assertFalse(assembly.matcher.shouldBlock("example.com"))
@@ -138,6 +145,54 @@ class RuntimeDomainPolicyTest {
 
         assertIs<CompiledBlocklistStatus.Rejected>(assembly.compiledBlocklistStatus)
         assertFalse(resolverProviderCalled)
+        assertTrue(assembly.matcher.shouldBlock("admob.com"))
+        assertFalse(assembly.matcher.shouldBlock("github.com"))
+    }
+
+    @Test
+    fun malformedOverrideFallsBackToBundledBlocklistAndReportsTheSource() {
+        val filesDirectory = createFilesDirectory()
+        val activeFile = RuntimeDomainPolicy.activeBlocklistFile(filesDirectory)
+        prepareParentDirectory(activeFile)
+        activeFile.writeText("not a compiled blocklist")
+
+        val assembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            loadBundledBlocklist = ::loadSharedFixture,
+            bundledSourceMetadata = RuleSourceMetadata(
+                name = "Pinned test list",
+                revision = "a".repeat(40),
+                sourceDate = "2026-08-23"
+            )
+        )
+
+        assertEquals(CompiledBlocklistStatus.Loaded(entryCount = 4), assembly.compiledBlocklistStatus)
+        assertEquals(RuleBlocklistSource.APK_BUNDLED, assembly.displayStatus.source)
+        assertEquals("Pinned test list", assembly.displayStatus.sourceName)
+        assertEquals("a".repeat(40), assembly.displayStatus.sourceRevision)
+        assertEquals("2026-08-23", assembly.displayStatus.sourceDate)
+        assertEquals(4, assembly.displayStatus.entryCount)
+        assertEquals(RuleBlocklistValidation.APK_VERIFIED, assembly.displayStatus.validation)
+        assertTrue(assembly.displayStatus.degradationReason.orEmpty().contains("本機覆寫檔未通過檢查"))
+        assertTrue(assembly.matcher.shouldBlock("github.com"))
+    }
+
+    @Test
+    fun rejectedOverrideAndBundledListLeaveOnlyBuiltinRulesActive() {
+        val filesDirectory = createFilesDirectory()
+        val activeFile = RuntimeDomainPolicy.activeBlocklistFile(filesDirectory)
+        prepareParentDirectory(activeFile)
+        activeFile.writeText("invalid override")
+
+        val assembly = RuntimeDomainPolicy.assemble(
+            filesDirectory = filesDirectory,
+            loadBundledBlocklist = { error("APK asset checksum mismatch") }
+        )
+
+        assertIs<CompiledBlocklistStatus.Rejected>(assembly.compiledBlocklistStatus)
+        assertEquals(RuleBlocklistSource.BUILT_IN, assembly.displayStatus.source)
+        assertTrue(assembly.displayStatus.degradationReason.orEmpty().contains("Blocklist is smaller"))
+        assertTrue(assembly.displayStatus.degradationReason.orEmpty().contains("APK asset checksum mismatch"))
         assertTrue(assembly.matcher.shouldBlock("admob.com"))
         assertFalse(assembly.matcher.shouldBlock("github.com"))
     }

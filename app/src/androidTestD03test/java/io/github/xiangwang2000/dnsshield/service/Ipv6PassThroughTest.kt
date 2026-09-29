@@ -21,33 +21,37 @@ import org.junit.runner.RunWith
 /** Explicitly dual-stack acceptance; this does not claim IPv6-only/NAT64 coverage. */
 @RunWith(AndroidJUnit4::class)
 class Ipv6PassThroughTest {
-    @Test fun dualStackVpnOffOnOff() = runBlocking {
+    @Test fun dualStackVpnOffOnOff() = runOffOnOff(includeIpv6 = true)
+    @Test fun ipv4OnlyVpnOffOnOff() = runOffOnOff(includeIpv6 = false)
+
+    private fun runOffOnOff(includeIpv6: Boolean) = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         assertTrue(context.packageName.endsWith(".d03test"))
         assertNull("Approve isolated test VPN before execution", VpnService.prepare(context))
         fun command(action: String) = ContextCompat.startForegroundService(context,
             Intent(context, DnsVpnService::class.java).setAction(action))
         suspend fun stopped() {
-            if (DnsVpnService.isRunningFlow.value) {
+            if (DnsVpnService.lifecycleStateFlow.value != VpnLifecycleState.STOPPED) {
                 context.startService(Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP))
-                withTimeout(15_000) { DnsVpnService.isRunningFlow.first { !it } }
+                withTimeout(15_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.STOPPED } }
                 delay(300)
             }
         }
         stopped()
-        probe("before")
+        probe("before", includeIpv6)
         try {
             command(DnsVpnService.ACTION_START)
-            withTimeout(30_000) { DnsVpnService.isRunningFlow.first { it } }
-            probe("vpn-on")
+            withTimeout(30_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.RUNNING } }
+            probe("vpn-on", includeIpv6)
             query("10.0.0.1", 28)
             println("D03 virtual IPv4 DNS AAAA response: PASS")
         } finally { stopped() }
-        probe("after")
+        probe("after", includeIpv6)
     }
 
-    private fun probe(phase: String) {
-        for (address in listOf("1.1.1.1", "2606:4700:4700::1111")) {
+    private fun probe(phase: String, includeIpv6: Boolean) {
+        val addresses = if (includeIpv6) listOf("1.1.1.1", "2606:4700:4700::1111") else listOf("1.1.1.1")
+        for (address in addresses) {
             retry {
                 Socket().use { socket ->
                     socket.connect(InetSocketAddress(InetAddress.getByName(address), 443), 5_000)
@@ -56,7 +60,7 @@ class Ipv6PassThroughTest {
             }
             query(address, 28)
         }
-        println("D03 $phase IPv4/IPv6 TCP connect and UDP DNS AAAA: PASS")
+        println("D03 $phase ${if (includeIpv6) "IPv4/IPv6" else "IPv4-only"} TCP connect and UDP DNS AAAA: PASS")
     }
 
     private fun query(address: String, type: Int) = retry {
