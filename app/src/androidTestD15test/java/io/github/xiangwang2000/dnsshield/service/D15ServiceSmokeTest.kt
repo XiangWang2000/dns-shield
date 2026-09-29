@@ -70,6 +70,24 @@ class D15ServiceSmokeTest {
         kotlinx.coroutines.delay(500)
         assertEquals(VpnLifecycleState.STOPPED, DnsVpnService.lifecycleStateFlow.value)
         assertEquals(false, userIntent.getBoolean(VPN_DESIRED_ENABLED_KEY, true))
+
+        ContextCompat.startForegroundService(targetContext, serviceIntent(VpnService.SERVICE_INTERFACE))
+        kotlinx.coroutines.delay(500)
+        assertEquals(VpnLifecycleState.STOPPED, DnsVpnService.lifecycleStateFlow.value)
+        assertEquals(false, userIntent.getBoolean(VPN_DESIRED_ENABLED_KEY, true))
+    }
+
+    @Test
+    fun systemVpnServiceActionRestoresPersistedUserIntent() = runBlocking {
+        assertNull("Approve the isolated D15 VPN before execution", VpnService.prepare(targetContext))
+        userIntent.edit()
+            .putBoolean(VPN_DESIRED_ENABLED_KEY, true)
+            .putBoolean(VPN_EXPLICIT_CHOICE_KEY, true)
+            .commit()
+
+        ContextCompat.startForegroundService(targetContext, serviceIntent(VpnService.SERVICE_INTERFACE))
+        waitForLifecycle(VpnLifecycleState.RUNNING)
+        assertEquals(true, userIntent.getBoolean(VPN_DESIRED_ENABLED_KEY, false))
     }
 
     private fun serviceIntent(action: String): Intent =

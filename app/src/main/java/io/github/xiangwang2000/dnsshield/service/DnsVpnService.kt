@@ -1137,7 +1137,7 @@ class DnsVpnService : VpnService() {
             ACTION_RELOAD_DOMAIN_POLICY -> {
                 serviceScope.launch { reloadDomainPolicy() }
             }
-            null -> {
+            null, VpnService.SERVICE_INTERFACE -> {
                 val userIntent = userIntentStore.snapshot()
                 if (userIntent.shouldRecoverFromSystemStart(systemAlwaysOnEnabled())) {
                     addLog("System recovery command received; restoring the requested VPN state")
