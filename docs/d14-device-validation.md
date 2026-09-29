@@ -30,4 +30,14 @@ During `Run`, keep USB connected and switch Wi-Fi off and back on (or hand off b
 
 The 8–10 hour power A/B remains a separate measurement. Use the same handset, app build, network, screen state, and workload for both runs; separate idle and active periods; start with comparable battery state; and avoid charging during either run. Preserve timestamps, battery start/end readings, device/build details, and the generated D14 workload reports. Do not infer power savings from the short DNS latency workload or from a microbenchmark.
 
-Neither the real network handoff nor the long power A/B is reported as passed until it has been run on the device and its evidence has been saved.
+The integrated short run below records a real Wi-Fi handoff. The long power A/B remains pending.
+
+## Integrated D09/D11 run on Android 10 (2026-09-29)
+
+The existing D14 worktree now includes D09 network recovery and the merged D06/D11 DNS path. The isolated ASUS_Z01RD / Android 10 run `mumn4fdp` passed (`OK (1 test)`, 70.836 seconds). The raw ignored report is `captures/d14/d14-e2e-mumn4fdp.json`, SHA-256 `4C03A98CB69BD42E0E3E2EF26BDDC6DB246C787B01C90063060E51FA231C88FF`; the instrumentation output is `captures/d14-d09-device-instrument-rerun.txt`.
+
+Eight identical clients shared one fake-upstream request and produced seven coalesced-wait samples (p50/p95/p99 428/432/432 ms). Cache hit, block, unique miss, burst, total-upstream-failure SERVFAIL, UDP fallback, and service cleanup passed. Wi-Fi off/on changed the selected validated network ID from `1614018433037` to `1622608367629`; the service observed five transitions and re-queried the previously cached name. Diagnostics ended with 43 received, 35 resolved, one blocked, one expected failed, six rejected (all `INVALID_VERSION`), zero client timeouts, and no pending requests. The test restored Wi-Fi and stopped the VPN; the two isolated packages were then removed while the production package remained installed.
+
+The first integrated run `mummyw78` failed only the coalesced-wait assertion: its early diagnostics-flow snapshot had seven coalesced requests but zero wait samples, while the final raw snapshot already contained seven samples. The test now waits for the wait samples before taking its scenario snapshot. Its raw ignored report is `captures/d14/d14-e2e-mummyw78.json`, SHA-256 `2A6A2DACBC0F05F2352A675840FEEB30B801E511DCA5A6BF53C79C8E9CCF1CF3`; this failed run is retained as diagnostic evidence, not counted as a pass.
+
+This is one short candidate run with the handset AC powered. No paired baseline/candidate latency comparison or 8–10 hour idle/active battery A/B was performed. The reported latency values are workload observations, not improvement estimates. Keep D14 in progress until those comparisons are measured and reviewed.

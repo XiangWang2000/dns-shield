@@ -156,7 +156,8 @@ class D14TunEndToEndBenchmarkTest {
             }
             assertEquals("Concurrent identical misses should share one upstream query.", coalescedBefore + 1, upstream.count(coalescedDomain))
             val afterCoalescing = waitForDiagnostics {
-                it.coalesced >= initial.coalesced + COALESCED_CLIENTS - 1
+                it.coalesced >= initial.coalesced + COALESCED_CLIENTS - 1 &&
+                    it.coalescedWait.sampleCount >= COALESCED_CLIENTS - 1
             }
             scenarioResults.put("coalesced_miss", JSONObject()
                 .put("passed", true)
