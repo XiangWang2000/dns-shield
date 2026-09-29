@@ -2,26 +2,37 @@
 
 ![DNS Shield 應用程式圖示](app/src/main/res/drawable/dns_shield_icon_1780828904628.png)
 
-DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標準 IPv4 UDP DNS 查詢導向本機處理，再依規則阻擋或轉送至使用者選擇的 DNS 解析服務。App 不需要 Root，也不會代理一般網頁、影音或即時通訊流量。
+DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標準 IPv4 UDP/TCP DNS 查詢導向本機處理，再依規則阻擋或轉送至使用者選擇的 DNS 解析服務。App 不需要 Root，也不會代理一般網頁、影音或即時通訊流量。
 
 ## 功能
 
 - 使用 Android `VpnService` 建立僅涵蓋指定 DNS 位址的本機介面。
 - 內建 Google DNS、Cloudflare DNS、AdGuard DNS 與 Quad9 預設值。
-- 已知的內建解析器優先使用 DNS-over-HTTPS；不支援 DoH 的自訂解析器及 DoH 失敗情況會改用標準 UDP DNS。
+- 可為每組解析器選擇「加密優先，允許 UDP/53 降級」或「僅加密」；舊設定升級後保留原本的明文降級行為。
+- 支援自訂 HTTPS DoH 主要與備援端點；自訂主機名稱使用明確的 bootstrap IPv4 位址，並保留 HTTPS 憑證及 hostname 驗證。
 - 依內建規則與 APK 內固定版本的 1Hosts Lite compiled blocklist，以 NXDOMAIN 回覆廣告、追蹤及惡意網域。
 - 阻擋規則已由可單元測試的 `DomainMatcher` 元件處理，並保留既有的決策快取與 VPN DNS 熱路徑行為。
 - APK 內的 `active.bin` 含 102,972 筆固定來源規則；若 App 私有 `blocklists/active.bin` 存在，則作為本機 override。parent-domain matching 受 APK 內已驗證的 Public Suffix List 邊界限制。
 - 控制中心會顯示目前規則來源、revision、日期、筆數、驗證狀態，以及 Public Suffix List 是否降級為精確網域比對。
 - 支援自訂 DNS、DNS 回應快取及同時重複查詢去重。
+- 明文降級模式遇到上游 UDP 截短回應時，會在原請求期限內以 TCP/53 重試；TUN MTU 設為 1500 bytes，送回用戶端的 DNS payload 上限為 min(EDNS/512 bytes, MTU−28 bytes = 1472 bytes)，超出時只保留完整資源記錄、設定 TC 並更新 section counts。
 - 支援選擇具有啟動入口的已安裝 App，使其略過 DNS Shield VPN。
 - 在 App 開啟時顯示查詢數、阻擋數、估算節省流量與診斷日誌。
+
+## 使用者網域規則
+
+- 可新增允許或封鎖規則，並以網域名稱搜尋或刪除規則；資料保存在裝置的 Room 資料庫。
+- 精確規則只適用於該網域；「包含子網域」會同時套用於該網域及其子網域，並拒絕公共後綴本身。
+- 規則名稱會轉成小寫 ASCII IDNA 格式並移除一個結尾句點；子網域比對以 DNS 標籤邊界進行，因此 `example.com` 不會匹配 `lookalike-example.com`。
+- 使用者規則優先於內建及編譯防護名單；多條規則同時匹配時，最精確的網域優先。相同網域與範圍的新規則會取代舊規則。
+- 啟用 VPN 時，新增或刪除規則會即時重載不可變政策快照並清除舊決策與 DNS 回應快取；VPN 關閉時，規則會在下次啟動時載入。
+- 偵測到封鎖時，運作日誌提供精確允許操作；短時間內可復原，復原會還原被取代的原規則。子網域範圍只有在已驗證的 PSL 可用時才能新增。
 
 ## 能力邊界
 
 DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆：
 
-- 目前只處理由系統 VPN DNS 路徑送入的 IPv4 UDP/53 查詢。
+- 目前原始碼支援送往虛擬 DNS 的 IPv4 UDP/53 與 TCP/53 查詢；TCP/53 已在 Android 10 實機與 Android 15 模擬器驗證真實 TUN 查詢、UDP TC 後重試、32 條連線容量、idle timeout 與停止清理。已安裝的舊版 APK 需更新後才包含此功能；詳見 [D11 驗證紀錄](docs/d11-runtime-validation.md)。
 - App 自行使用 DoH、DoT、非標準連接埠、直接 IP 連線或其他繞過系統 DNS 的方式，不會被此工具攔截。
 - DNS 層規則無法阻擋與正常內容共用網域的廣告，也無法保證涵蓋所有廣告、追蹤或惡意網域。
 - App 不會在執行期間下載遠端規則；production blocklist 只會隨經驗證的新 APK 更新。私有 override 缺失時使用 APK 內規則，格式或排序驗證失敗時也會改用 APK 內已驗證的清單；若該清單同樣無法使用，才退回內建規則。
@@ -45,6 +56,8 @@ DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆
 ## 隱私
 
 DNS Shield 不包含帳號、分析 SDK、廣告 SDK或開發者營運的後端服務。DNS 查詢會傳送至使用者選擇的第三方解析器；已安裝 App 清單、排除名單與設定不會由 DNS Shield 上傳。
+
+DoH 將 DNS 查詢包在 HTTPS 傳輸中，但 DNS Shield 不會在本機驗證 DNSSEC。選擇「僅加密」時，DoH 端點故障、退避或自訂 bootstrap 不可用都會回覆 SERVFAIL，且不會降級為 UDP/53 或 TCP/53；「加密優先」會在加密端點失敗時使用未加密 UDP/53，若 UDP 回應設有 TC，則在原請求期限內改用 TCP/53 重試。自訂 DoH hostname 的 bootstrap 只使用設定的數字 IP，不會再透過系統 DNS 查詢該 hostname。
 
 完整資料處理方式請參閱 [PRIVACY.md](PRIVACY.md)。
 
@@ -103,8 +116,8 @@ adb uninstall io.github.xiangwang2000.dnsshield.d15test.test
 adb uninstall io.github.xiangwang2000.dnsshield.d15test
 ```
 
-此 smoke test 只驗證顯式啟動、顯式停止與隔離資料清理；Always-on 重開機、系統回收、
-VPN 切換、授權撤銷及 lockdown 仍需逐項進行實機驗收。
+此 smoke test 驗證隔離套件的實際 VPN 啟動／停止、使用者開關意圖，以及顯式停止後不因空 action 自動恢復；測試前須先同意該隔離套件的 Android VPN 權限。Always-on 重開機、程序回收、
+VPN 切換、授權撤銷及 lockdown 仍需逐項實機驗收；詳見 [D15 驗證紀錄](docs/d15-device-acceptance.md)。
 
 離線 blocklist 編譯器及其測試可獨立執行：
 

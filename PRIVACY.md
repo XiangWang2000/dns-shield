@@ -8,8 +8,10 @@ DNS Shield 是在使用者 Android 裝置上執行的 DNS 防護工具。本專�
 
 啟用 VPN 防護後，DNS Shield 會讀取進入本機 VPN 介面的標準 DNS 查詢，判斷是否阻擋，或將查詢傳送至使用者選擇的第三方 DNS 解析器。
 
-- Google、Cloudflare、AdGuard 與 Quad9 等已知預設解析器會優先使用 DNS-over-HTTPS。
-- 自訂解析器及 DoH 失敗時可能使用未加密的標準 UDP DNS。
+- 每組解析器都可選擇「加密優先，允許 UDP/53 降級」或「僅加密」。既有安裝會以加密優先模式遷移，以保留原本的解析行為。
+- 僅加密模式只會使用設定的 HTTPS DoH 端點；端點故障、退避或 bootstrap 失敗時會回覆 SERVFAIL，不會送出 UDP/53 查詢。加密優先模式在 DoH 端點無法使用時會改用未加密 UDP/53。
+- 使用者可以設定主要及備援 HTTPS DoH URL。自訂 hostname 以使用者輸入的 bootstrap IP 連線，不會用系統 DNS 解析該 hostname；HTTPS 仍使用平台預設的憑證鏈與 hostname 驗證。
+- DoH 只代表 DNS 查詢以 HTTPS 傳輸；DNS Shield 不在本機驗證 DNSSEC。
 - 第三方解析器會依其各自的隱私政策處理收到的 DNS 查詢；DNS Shield 無法控制其保存或使用方式。
 
 DNS Shield 不會把一般網頁內容、訊息、影音或其他非 DNS 流量傳送至開發者伺服器。

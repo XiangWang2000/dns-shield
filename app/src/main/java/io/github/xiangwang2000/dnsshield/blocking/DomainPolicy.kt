@@ -30,20 +30,28 @@ class ExactDomainAllowlist(domains: Iterable<String>) : DomainAllowlist {
 }
 
 /**
- * Applies allowlist precedence before asking blocking matchers in order.
+ * Applies user-domain rules and the exact legacy allowlist before blocking matchers.
  *
  * The matcher list is snapshotted at construction time. Blocking short-circuits on the first
- * positive result, while an allowlist hit bypasses every blocker.
+ * positive result. A matching user rule overrides the protection lists; within the user rules, the
+ * most-specific matching domain wins and an exact rule wins over a same-domain subdomain rule at
+ * the apex.
  */
 class CompositeDomainMatcher(
     private val allowlist: DomainAllowlist = DomainAllowlist.NONE,
-    blockers: Iterable<DomainMatcher>
+    blockers: Iterable<DomainMatcher>,
+    private val userRules: UserDomainRuleMatcher = UserDomainRuleMatcher(emptyList())
 ) : DomainMatcher {
     private val blockers = blockers.toList()
 
     override fun shouldBlock(domain: String): Boolean {
         val normalized = normalizeDomain(domain)
         if (!isUsableDomain(normalized)) return false
+        when (userRules.decisionFor(normalized)) {
+            DomainRuleAction.ALLOW -> return false
+            DomainRuleAction.BLOCK -> return true
+            null -> Unit
+        }
         if (allowlist.isAllowed(normalized)) return false
         return blockers.any { it.shouldBlock(normalized) }
     }

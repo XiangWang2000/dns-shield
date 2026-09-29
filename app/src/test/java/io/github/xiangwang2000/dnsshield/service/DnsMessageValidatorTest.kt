@@ -50,6 +50,84 @@ class DnsMessageValidatorTest {
     }
 
     @Test
+    fun capsClientUdpResponseByEdnsOr512AndTheConfiguredTunMtu() {
+        val noEdns = assertIs<DnsQueryParseResult.Valid>(
+            DnsMessageValidator.parseQuery(DnsTestMessages.query())
+        ).query
+        val advertised600 = assertIs<DnsQueryParseResult.Valid>(
+            DnsMessageValidator.parseQuery(DnsTestMessages.query(edns = true, udpPayloadSize = 600))
+        ).query
+        val advertised4096 = assertIs<DnsQueryParseResult.Valid>(
+            DnsMessageValidator.parseQuery(
+                DnsTestMessages.query(edns = true, udpPayloadSize = DnsMessageValidator.MAX_DNS_MESSAGE_BYTES)
+            )
+        ).query
+
+        assertEquals(512, DnsMessageValidator.maxClientUdpResponseBytes(noEdns))
+        assertEquals(600, DnsMessageValidator.maxClientUdpResponseBytes(advertised600))
+        assertEquals(
+            DnsResponsePacketBuilder.TUN_MTU_BYTES - DnsResponsePacketBuilder.IPV4_HEADER_BYTES -
+                DnsResponsePacketBuilder.UDP_HEADER_BYTES,
+            DnsMessageValidator.maxClientUdpResponseBytes(advertised4096)
+        )
+    }
+
+    @Test
+    fun truncatesAtResourceRecordBoundariesAndUpdatesSectionCounts() {
+        val queryBytes = DnsTestMessages.query()
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val response = DnsTestMessages.responseWithARecords(
+            queryBytes,
+            answerCount = 1,
+            authorityCount = 2,
+            additionalCount = 1
+        )
+        val limit = query.questionEndOffset + 32
+
+        val truncated = kotlin.test.assertNotNull(
+            DnsMessageValidator.truncateResponseForClient(response, query, limit)
+        )
+
+        assertEquals(limit, truncated.size)
+        assertEquals(0x0200, readUnsignedShort(truncated, 2) and 0x0200)
+        assertEquals(1, readUnsignedShort(truncated, 6))
+        assertEquals(1, readUnsignedShort(truncated, 8))
+        assertEquals(0, readUnsignedShort(truncated, 10))
+        assertTrue(DnsMessageValidator.isValidResponse(truncated, query))
+    }
+
+    @Test
+    fun truncationHonorsNoEdns512AndEdnsTunPayloadCaps() {
+        val noEdnsBytes = DnsTestMessages.query()
+        val noEdns = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(noEdnsBytes)).query
+        val noEdnsResponse = DnsTestMessages.responseWithARecords(noEdnsBytes, answerCount = 100)
+        val noEdnsTruncated = kotlin.test.assertNotNull(
+            DnsMessageValidator.truncateResponseForClient(
+                noEdnsResponse,
+                noEdns,
+                DnsMessageValidator.maxClientUdpResponseBytes(noEdns)
+            )
+        )
+        assertTrue(noEdnsTruncated.size <= 512)
+        assertEquals(30, readUnsignedShort(noEdnsTruncated, 6))
+
+        val ednsBytes = DnsTestMessages.query(
+            edns = true,
+            udpPayloadSize = DnsMessageValidator.MAX_DNS_MESSAGE_BYTES
+        )
+        val edns = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(ednsBytes)).query
+        val ednsResponse = DnsTestMessages.responseWithARecords(ednsBytes, answerCount = 100)
+        val ednsLimit = DnsMessageValidator.maxClientUdpResponseBytes(edns)
+        val ednsTruncated = kotlin.test.assertNotNull(
+            DnsMessageValidator.truncateResponseForClient(ednsResponse, edns, ednsLimit)
+        )
+        assertEquals(1472, ednsLimit)
+        assertTrue(ednsTruncated.size <= ednsLimit)
+        assertEquals(90, readUnsignedShort(ednsTruncated, 6))
+        assertTrue(DnsMessageValidator.isValidResponse(ednsTruncated, edns))
+    }
+
+    @Test
     fun rejectsTruncatedHeadersUnsupportedOpcodesAndQuestionCounts() {
         assertIs<DnsQueryParseResult.Rejected>(DnsMessageValidator.parseQuery(ByteArray(11)))
 
