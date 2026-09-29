@@ -53,6 +53,7 @@ class DnsDiagnosticsDeviceTest {
             DnsVpnService.clearLogs()
             withTimeout(5_000) { DnsVpnService.diagnosticsFlow.first { it.received == 0L } }
             automation.executeShellCommand("input keyevent HOME").close()
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
             Thread.sleep(700)
             val backgroundSnapshot = DnsVpnService.diagnosticsFlow.value
 

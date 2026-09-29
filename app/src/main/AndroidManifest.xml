@@ -4,6 +4,7 @@
 
     <!-- Permissions for DNS VPN Split Tunneling App -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" tools:ignore="SystemPermission" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
