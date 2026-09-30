@@ -1,5 +1,6 @@
 package io.github.xiangwang2000.dnsshield.service
 
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
@@ -51,10 +52,12 @@ class D15ServiceSmokeTest {
         ContextCompat.startForegroundService(targetContext, serviceIntent(DnsVpnService.ACTION_START))
         waitForDesiredState(expected = true)
         waitForLifecycle(VpnLifecycleState.RUNNING)
+        waitForRecoveryService(expectedRunning = true)
 
         targetContext.startService(serviceIntent(DnsVpnService.ACTION_STOP))
         waitForDesiredState(expected = false)
         waitForLifecycle(VpnLifecycleState.STOPPED)
+        waitForRecoveryService(expectedRunning = false)
     }
 
     @Test
@@ -75,6 +78,12 @@ class D15ServiceSmokeTest {
         kotlinx.coroutines.delay(500)
         assertEquals(VpnLifecycleState.STOPPED, DnsVpnService.lifecycleStateFlow.value)
         assertEquals(false, userIntent.getBoolean(VPN_DESIRED_ENABLED_KEY, true))
+
+        targetContext.startService(Intent(targetContext, VpnRecoveryService::class.java))
+        kotlinx.coroutines.delay(500)
+        waitForRecoveryService(expectedRunning = false)
+        assertEquals(VpnLifecycleState.STOPPED, DnsVpnService.lifecycleStateFlow.value)
+        assertEquals(false, userIntent.getBoolean(VPN_DESIRED_ENABLED_KEY, true))
     }
 
     @Test
@@ -92,6 +101,22 @@ class D15ServiceSmokeTest {
         ContextCompat.startForegroundService(targetContext, serviceIntent(VpnService.SERVICE_INTERFACE))
         waitForLifecycle(VpnLifecycleState.RUNNING)
         assertEquals(true, userIntent.getBoolean(VPN_DESIRED_ENABLED_KEY, false))
+    }
+
+    // API 26+ still exposes this app's own services; verify the actual FGS record.
+    @Suppress("DEPRECATION")
+    private fun waitForRecoveryService(expectedRunning: Boolean) {
+        val manager = targetContext.getSystemService(ActivityManager::class.java)
+        fun matches(): Boolean {
+            val service = manager.getRunningServices(20)
+                .firstOrNull { it.service.className == VpnRecoveryService::class.java.name }
+            return if (expectedRunning) service?.foreground == true else service == null
+        }
+        repeat(40) {
+            if (matches()) return
+            SystemClock.sleep(50)
+        }
+        assertTrue("D15 recovery foreground service running=$expectedRunning", matches())
     }
 
     private fun serviceIntent(action: String): Intent =

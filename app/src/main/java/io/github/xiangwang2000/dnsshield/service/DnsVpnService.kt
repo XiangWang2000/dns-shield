@@ -72,7 +72,48 @@ class DnsVpnService : VpnService() {
         const val ACTION_CLEAR_LOGS = "io.github.xiangwang2000.dnsshield.service.CLEAR_LOGS"
         const val ACTION_RELOAD_DOMAIN_POLICY = "io.github.xiangwang2000.dnsshield.service.RELOAD_DOMAIN_POLICY"
         private const val CHANNEL_ID = "dns_vpn_channel"
-        private const val NOTIFICATION_ID = 5543
+        internal const val NOTIFICATION_ID = 5543
+        internal fun createVpnNotification(context: Context, content: String): Notification {
+            val stopIntent = Intent(context, DnsVpnService::class.java).apply {
+                action = ACTION_STOP
+            }
+
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+
+            val stopPendingIntent = PendingIntent.getService(context, 1, stopIntent, flags)
+
+            val mainIntent = Intent(context, MainActivity::class.java)
+            val mainPendingIntent = PendingIntent.getActivity(context, 0, mainIntent, flags)
+
+            return NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_lock_lock) // Standard lock icon
+                .setContentTitle("DNS Shield VPN")
+                .setContentText(content)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setContentIntent(mainPendingIntent)
+                .addAction(android.R.drawable.ic_media_pause, "停止服務", stopPendingIntent)
+                .build()
+        }
+
+        internal fun createVpnNotificationChannel(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "DNS Shield ",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "通知使用者 DNS VPN 正在運作中"
+                }
+                val manager = context.getSystemService(NotificationManager::class.java)
+                manager?.createNotificationChannel(channel)
+            }
+        }
+
         private const val MAX_CONCURRENT_DNS_QUERIES = 24
         private const val MAX_COALESCED_DNS_QUERY_WAITERS = 8
         private const val MAX_LOG_LINES = 100
@@ -1066,7 +1107,7 @@ class DnsVpnService : VpnService() {
                     is LifecycleCommand.Start -> {
                         startVpn(command.requestGeneration)
                         if (lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
-                            stopSelfResult(command.startId)
+                            stopSelfIfIdle(command.startId)
                         }
                     }
                     is LifecycleCommand.Stop -> {
@@ -1077,7 +1118,7 @@ class DnsVpnService : VpnService() {
                     is LifecycleCommand.Restart -> {
                         restartTunnel(command.requestGeneration)
                         if (lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
-                            stopSelfResult(command.startId)
+                            stopSelfIfIdle(command.startId)
                         }
                     }
                     is LifecycleCommand.UpdateDns -> {
@@ -1116,6 +1157,7 @@ class DnsVpnService : VpnService() {
             }
             ACTION_STOP -> {
                 userIntentStore.markExplicitStop()
+                stopService(Intent(this, VpnRecoveryService::class.java))
                 addLog("Stopping service command received")
                 lifecycleRequests.nextRequest()
                 lifecycleCommands.trySend(LifecycleCommand.Stop(startId))
@@ -1143,6 +1185,12 @@ class DnsVpnService : VpnService() {
                     addLog("System recovery command received; restoring the requested VPN state")
                     val requestGeneration = lifecycleRequests.nextRequest()
                     lifecycleCommands.trySend(LifecycleCommand.Start(startId, requestGeneration))
+                } else {
+                    if (lifecycleStateFlow.value == VpnLifecycleState.STOPPED ||
+                        lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
+                        enterForeground(createNotification(notificationText(VpnLifecycleState.STOPPED)))
+                    }
+                    stopSelfIfIdle(startId)
                 }
             }
         }
@@ -1164,6 +1212,7 @@ class DnsVpnService : VpnService() {
     override fun onRevoke() {
         addLog("VPN connection revoked by system settings")
         userIntentStore.markAuthorizationRevoke()
+        stopService(Intent(this, VpnRecoveryService::class.java))
         lifecycleRequests.nextRequest()
         lifecycleCommands.trySend(LifecycleCommand.Stop(latestLifecycleStartId))
         super.onRevoke()
@@ -1188,11 +1237,9 @@ class DnsVpnService : VpnService() {
         var establishedFd: ParcelFileDescriptor? = null
         try {
             val notification = createNotification(notificationText(VpnLifecycleState.STARTING))
-            if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
+            enterForeground(notification)
+            // The VPN is already foreground; the keeper promotes itself only while authorized.
+            startService(Intent(this, VpnRecoveryService::class.java))
 
             reloadDomainPolicy(requestGeneration)
             if (!lifecycleRequests.isCurrent(requestGeneration)) {
@@ -1931,11 +1978,20 @@ class DnsVpnService : VpnService() {
         isVpnRunning = state.isRunning
     }
 
+    private fun enterForeground(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
     private fun stopSelfIfIdle(startId: Int) {
         if (
             lifecycleStateFlow.value == VpnLifecycleState.STOPPED ||
             lifecycleStateFlow.value == VpnLifecycleState.FAILED
         ) {
+            stopService(Intent(this, VpnRecoveryService::class.java))
             stopSelfResult(startId)
         }
     }
@@ -1988,6 +2044,7 @@ class DnsVpnService : VpnService() {
     }
 
     private suspend fun stopVpn(finalState: VpnLifecycleState = VpnLifecycleState.STOPPED) {
+        stopService(Intent(this, VpnRecoveryService::class.java))
         unregisterUnderlyingNetworkCallback()
         rulePolicyStatusFlow.value = RulePolicyStatus.NotLoaded
         addLog("正在關閉安全 DNS 防護隧道並釋放資源…")
@@ -2028,44 +2085,8 @@ class DnsVpnService : VpnService() {
         Log.i(TAG, "VPN stopped completely")
     }
 
-    private fun createNotification(content: String): Notification {
-        val stopIntent = Intent(this, DnsVpnService::class.java).apply {
-            action = ACTION_STOP
-        }
+    private fun createNotification(content: String): Notification = createVpnNotification(this, content)
 
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
+    private fun createNotificationChannel() = createVpnNotificationChannel(this)
 
-        val stopPendingIntent = PendingIntent.getService(this, 1, stopIntent, flags)
-
-        val mainIntent = Intent(this, MainActivity::class.java)
-        val mainPendingIntent = PendingIntent.getActivity(this, 0, mainIntent, flags)
-
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_lock_lock) // Standard lock icon
-            .setContentTitle("DNS Shield VPN")
-            .setContentText(content)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setContentIntent(mainPendingIntent)
-            .addAction(android.R.drawable.ic_media_pause, "停止服務", stopPendingIntent)
-            .build()
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "DNS Shield ",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "通知使用者 DNS VPN 正在運作中"
-            }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
-        }
-    }
 }

@@ -45,3 +45,46 @@ App 顯式停止後 `tun0` 消失、`desired_enabled=false`，Always-on 仍指�
 在 Always-on 與 `desired_enabled=true` 仍保留、TUN 尚未恢復的狀態重開 AVD，boot ID 變為 `c8eab05f-950e-41c0-9f2b-70d409db0560`：系統 `android.net.VpnService` action 建立 PID 1368 與前景服務（type `0x400`），`tun0` 恢復，`example.org` 解析至 172.66.157.237 並 ping 1/1。這是再次證實重開機恢復，不是程序回收成功。其後從已核對 ID 的 Settings 詳細頁 Forget VPN，回讀 Always-on=null、lockdown 0、`ACTIVATE_VPN=ignore`、`desired_enabled=false`、TUN 消失；本次暫裝 D15 已卸載，AVD 已關閉。D15 的真正系統回收與其他未驗收矩陣仍待完成。
 
 為排除前次 `crashCount=1` 干擾，再將 `.d15test` 完全卸載後重新安裝，於新 AVD boot ID `27d822b4-eb79-4fa9-a99a-f2197e3a0afc` 明確啟動 VPN、核對 ID 後開啟 Always-on。測前 PID 1856、`tun0`、`desired_enabled=true`，service `startRequested=true`／`stopIfKilled=false`／`startCommandResult=1`，沒有先跑 `am crash`。同 UID `kill -9 1856` 後，前 35 秒每 5 秒觀察，加上後續 45 秒，均無新程序或 TUN；Always-on 仍指向 D15，service 紀錄 `app=null`、`startRequested=true`。這獨立確認「強制終止後約 80 秒未觀察到自動恢復」，仍不是低記憶體回收測試，也不推論 Android 永不重啟。再重開機 boot ID `05de511d-4d1c-45f4-9808-642bc27b5e83`，新 PID 1362 與 `tun0` 重建。最後在核對 ID 的 Settings 頁 Forget VPN，Always-on=null、lockdown 0、`desired_enabled=false`、TUN 消失；D15 測試 App 已卸載、AVD 關閉。此負面觀察保留在 D15 未驗收清單，不標 Done。
+
+## 2026-09-30 程序死亡根因與獨立恢復服務（仍未 Done）
+
+本輪先核對既有工作樹 `codex/d15-always-on`／PR #63，baseline `612a9f7` 的 Windows CI 36679922359 成功。ASUS_Z01RD／Android 10 原設定為 Always-on=null、lockdown=0、AUTO_RUN=ignore；正式版資料保留。手機只有目前 IPv4 Wi-Fi。先補一般跨 App VPN 切換：D15 運作中由暫裝 `.d04test` 接手，D15 的 desired 變 false，D04 前景服務與新 TUN 接手，稍後沒有被 D15 搶回。這項切換發生在新增恢復服務前，不能當作新服務版本的切換驗收；D04 測後停止並移除。證據：ignored `captures/d15-physical-20260930-vpn-switch.txt`。
+
+### 根因與修正界線
+
+Android 10 的 `run-as ... kill -9` 被 SELinux 拒絕，PID／TUN 未消失，不能當作程序死亡。新增僅在 `.d15test` 的 `D15ProcessDeathActivity`：由具 `android.permission.DUMP` 的 shell/system 啟動，延遲五秒以同程序 `Process.killProcess` 終止；期間回 HOME，沒有 instrumentation 留在程序內。正式 APK 不包含此 Activity。這是真實 SIGKILL，仍不是低記憶體 LMK。
+
+修正前實機 PID 30655 在 21:49:29.493 自行 SIGKILL。系統先在 29.591 處理 TUN 移除／VPN unbind 時收到 DeadObjectException，29.670 才處理程序死亡；VPN sticky record 留下 app=null，但未排定重啟，約 88 秒後仍無 TUN。AOSP Android 10 的 `removeConnectionLocked` 例外路徑會經 `serviceProcessGoneLocked` 把服務從 process.services 移除，而 `killServicesLocked` 只遍歷 process.services 排定 sticky 重啟；這是與時間順序及 stack 相符的根因推論，未直接修改系統驗證。官方來源：[ActiveServices.java](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android10-release/services/core/java/com/android/server/am/ActiveServices.java)。原始證據：`captures/d15-physical-20260930-unbind-exception.txt`、`d15-physical-20260930-selfkill-checked.txt`。`selfkill-observation.txt` 曾有空 PID Trim 錯誤，不採信其中 PID 欄。
+
+新增同程序、非匯出的 `VpnRecoveryService`，保留與系統 VPN binding 無關的 START_STICKY 記錄；不加輪詢、工作執行緒或另一個程序。它沿用既有通知 ID，正常啟動保留目前通知；null 重建才要求原 VPN service 以系統 action 恢復，原 user-intent 防護仍會再檢查。STOP、revoke、啟動／重新啟動失敗及 tunnel 停止皆清理恢復服務。DNS 傳輸、D11 回應提交與 strict-mode fence 未改。
+
+Android 15 negative 回歸曾確認：授權撤銷後強制以 SYSTEM_EXEMPTED 提升 helper 會 SecurityException；直接拒絕 `startForegroundService` 又會在 API 29/35 觸發 FGS timeout。最終 helper 由「已完成前景提升」的 VPN 以 `startService` 啟動，再於授權有效時自行提升；STOP／無授權時直接結束。授權在 prepare 與提升之間消失的 SecurityException 僅在再次確認未授權時結束，其他權限錯誤仍拋出。原 VPN 若被 foreground system start 呼叫卻不允許恢復，先履行前景契約再依閒置狀態停止。失敗證據與修正後輸出均保留，沒有將中途成功當成最終驗收。
+
+### 最終候選版驗證
+
+| 案例 | Android 10 實機 | Android 15／API 35 AVD |
+| --- | --- | --- |
+| START→RUNNING→STOP、明確停止後 null／system action／helper 不恢復 | 3/3，3.832 秒 | 3/3，5.015 秒 |
+| 未授權 START／RESTART 到 FAILED、late helper 不留前景服務 | 1/1，3.613 秒 | 1/1，3.212 秒 |
+| 無 instrumentation 的 SIGKILL→sticky null→新 PID／TUN／DNS | 電池豁免下成功：7488→7730，TUN 69→70 | 預設電池設定成功：3051→3160，TUN 34→35 |
+| 運作中 Settings Forget VPN | desired=false、TUN 消失、兩服務消失 | 同左，ACTIVATE_VPN=ignore |
+
+兩個最終 SIGKILL 案例的 Always-on 都為 null，測的是顯式啟用意圖的 sticky 重建；不要與前面 baseline 的真正 Always-on／重開機驗收混為一項。約 10.8 秒採樣已觀察到新 PID／TUN，後續至約 32 秒仍存在；兩機 `example.org` 解析／ping 1/1。
+
+實機在 Always-on 指向 D15、AUTO_RUN=allow、安裝後等 81 秒排除系統 VPN 60 秒暫時白名單的候選版試驗，PID 3660→3959，但 helper 與 VPN 在重建命令前被 AMS 以 app-idle 停止，TUN 未恢復。不同 helper 啟動方式的早期試驗也有同一限制，不能宣稱預設實機已修好。AOSP `stopInBackgroundLocked`／`getAppStartModeLocked` 與此紀錄相符，UID idle 不等於 standby bucket。只對隔離套件暫加 user battery whitelist，再移除 tempwhitelist，PID 5210→5512、TUN 58→59、DNS 1/1；最終 ordinary-start 版本亦如上表成功。這支持電池／背景服務限制是另一個阻斷點，不是產品已能繞過系統政策。[ActivityManagerService.java](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android10-release/services/core/java/com/android/server/am/ActivityManagerService.java)
+
+原始 ignored 記錄：`captures/d15-recovery-ordinary-{smoke,negative}-<serial>.txt`、`d15-recovery-final-death-<serial>-{before,observation,logcat,after}.txt`、`d15-recovery-final-revoke-<serial>.txt`；serial 為 `JCAZB7604377HFP`／`emulator-5554`。背景限制對照為 `d15-recovery-expired-whitelist-*`、`d15-recovery-battery-exempt-isolated-*`。執行 negative class 前必須在核對套件 ID 的 Settings 頁 revoke，smoke class 則需先給隔離套件 VPN consent：
+
+```powershell
+adb -s <serial> shell am instrument -w -r -e class io.github.xiangwang2000.dnsshield.service.D15ServiceSmokeTest io.github.xiangwang2000.dnsshield.d15test.test/androidx.test.runner.AndroidJUnitRunner
+adb -s <serial> shell am instrument -w -r -e class io.github.xiangwang2000.dnsshield.service.D15UnapprovedStartTest io.github.xiangwang2000.dnsshield.d15test.test/androidx.test.runner.AndroidJUnitRunner
+# 啟用 VPN、回 HOME，且沒有正在執行的 instrumentation 後才做死亡觀察。
+adb -s <serial> shell am start -n io.github.xiangwang2000.dnsshield.d15test/io.github.xiangwang2000.dnsshield.D15ProcessDeathActivity
+adb -s <serial> shell input keyevent HOME
+```
+
+本輪測後：實機 Always-on=null、lockdown=0、ACTIVATE_VPN=ignore、desired=false、無 TUN／service；user battery whitelist 已移除，AUTO_RUN 還原 ignore，正式版與既有 D15 app/test 保留，網路 ping 1/1。AVD 本輪新增 D15 app/test 已移除，原有 D04/D07/D08 保留；本任務模擬器及 screen-awake helper 已關閉。
+
+仍缺：Android 10 預設背景限制下可靠重建、真實 LMK、最終版本跨 VPN 切換／重開機矩陣、API 24–27 與 Android 15 實機、即時死亡下 STOP／revoke 的磁碟意圖持久化（目前 SharedPreferences.apply）、D09 #42 依賴。DNS-only lockdown 不宣稱支援。此切片留在 Draft／In Progress，不合併 main、不標 Done。
+
+最終 ordinary-start 版完整 erify.ps1 在不更動程式碼下重跑成功：29 Python、238 JVM／46 suites 零 failure/error、assets、lint、Debug/AndroidTest/D04 APK。第一輪既有 DnsUdpUpstreamClientTest.truncatedUdpResponseRetriesTheSameUpstreamOverTcpWithinTheDeadline 於暫時 UDP/TCP 共用埠發生 BindException，保留 captures/d15-recovery-ordinary-final-verify.log；通過紀錄為 captures/d15-recovery-ordinary-final-verify-rerun.log。沒有新增 warning；D09 測試既有 deprecation 不另當本切片警告。隔離 APK SHA256：App 098BD093DAC054D6F39B1B9E5343BF47023901A5BCA8025E4A7F40BB36CAF506，AndroidTest 361B3F4440C2826A5552581B1B498305230B99B2A4408DF6EC8A231393BECD24。獨立 reviewer 未見確定 bug，保留上述剩餘驗收風險。
