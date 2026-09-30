@@ -80,6 +80,10 @@ class D15ServiceSmokeTest {
     @Test
     fun systemVpnServiceActionRestoresPersistedUserIntent() = runBlocking {
         assertNull("Approve the isolated D15 VPN before execution", VpnService.prepare(targetContext))
+        ContextCompat.startForegroundService(targetContext, serviceIntent(DnsVpnService.ACTION_START))
+        waitForLifecycle(VpnLifecycleState.RUNNING)
+        targetContext.startService(serviceIntent(DnsVpnService.ACTION_STOP))
+        waitForLifecycle(VpnLifecycleState.STOPPED)
         userIntent.edit()
             .putBoolean(VPN_DESIRED_ENABLED_KEY, true)
             .putBoolean(VPN_EXPLICIT_CHOICE_KEY, true)

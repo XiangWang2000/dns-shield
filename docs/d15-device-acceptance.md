@@ -19,3 +19,11 @@ ASUS_Z01RD／Android 10 的 VPN 詳細頁 `AppManagementFragment.mArguments` 實
 修正後重新明確啟用 `.d15test`，再重開機（boot ID `fbd3f1ab-5618-476e-a319-71adaa89cf60` → `3ef3b4b3-edff-4946-b362-4d188313bcf4`）：Android 仍送 `android.net.VpnService` action，服務以前景模式啟動，`tun0` 重建；Connectivity 顯示 VPN `CONNECTED`、DNS `10.0.0.1`，手機成功解析並 ping `example.org`（104.20.26.136，1/1）。App UI 顯示「防護中」。其後從 App 明確停止，等待後 `tun0` 仍不存在且 `desired_enabled=false`，沒有被系統 Always-on 立即重啟。
 
 再次啟用後，在已讀取詳細頁 `package=.d15test` 的系統設定中執行「清除 VPN 設定檔」。結果 `always_on_vpn_app=null`、lockdown `0`、`ACTIVATE_VPN=ignore`、`desired_enabled=false`、`tun0` 消失；正式版與 `.d15test` App 都仍安裝，手機網路仍可用。最後將隔離套件 `AUTO_RUN` 還原為原本的 `ignore`。這證明授權撤銷路徑會清除恢復意圖，但沒有測試切換至其他 VPN、真正系統低記憶體回收、其他 Android 版本的前景服務限制，亦未宣稱 DNS-only 與 lockdown 相容。D09 依賴仍未 Done；D15 保持 Draft／In Progress。
+
+## 2026-09-30 Android 15／API 35 模擬器系統恢復
+
+既有 `dns_shield_api35` AVD（Android 15／API 35）安裝 `.d15test` 隔離 App／AndroidTest APK。初跑 `D15ServiceSmokeTest` 為 2/3：`@Before` 送出的 STOP 仍在佇列時，新案例已寫入 `desired_enabled=true`，稍後到達的 STOP 把它清回 false。這是測試前置狀態競態；在新案例寫入恢復意圖前，先經 START→RUNNING→STOP→STOPPED，同步清空前次停止命令。產品恢復邏輯未改。重跑與另三次重複測試皆 3/3；修正測試後完整 `verify.ps1` 通過（29 Python、238 JVM／46 suites、assets、lint、APK）。原始 ignored 記錄：`captures/d15-system-action-api35-instrument.txt`、`captures/d15-api35-test-sync-rerun.txt`、`captures/d15-api35-test-sync-repeat-1.txt` 至 `-3.txt`、`captures/d15-api35-test-sync-verify.log`。
+
+啟用 `.d15test` 後，以 VPN Settings 唯一顯示 Connected 的項目進入齒輪，並從 `AppManagementFragment.mArguments` 回讀完整套件 ID，才對該項開啟 Always-on；lockdown 保持 0。重開機 boot ID `d786938d-04ae-4ab0-b2a5-9b0cfdfeac80` → `920be004-e84c-427f-89f1-68658d288ff3` 後，系統以 `android.net.VpnService` action 建立新程序，服務為 foreground（type `0x400`），VPN CONNECTED、`tun0` 與 DNS `10.0.0.1` 存在；模擬器解析並 ping `example.org`（104.20.26.136，1/1）。
+
+App 顯式停止後 `tun0` 消失、`desired_enabled=false`，Always-on 仍指向 `.d15test` 且沒有立即重啟。再次啟用後，在已核對套件 ID 的詳細頁執行 Forget VPN：`always_on_vpn_app=null`、lockdown 0、`ACTIVATE_VPN=ignore`、`desired_enabled=false`、`tun0` 不存在。此次新裝的 D15 app/test 套件已從 AVD 移除，模擬器已關閉；原有其他測試套件未動。這補足 Android 15 模擬器的系統啟動、重開機、顯式停止與授權撤銷證據，但不等同 Android 15 實機、低記憶體程序回收、切換其他 VPN、lockdown 或 API 24–27 驗收。D09 依賴仍未 Done，D15 維持 Draft／In Progress。
