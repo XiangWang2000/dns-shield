@@ -27,3 +27,11 @@ ASUS_Z01RD／Android 10 的 VPN 詳細頁 `AppManagementFragment.mArguments` 實
 啟用 `.d15test` 後，以 VPN Settings 唯一顯示 Connected 的項目進入齒輪，並從 `AppManagementFragment.mArguments` 回讀完整套件 ID，才對該項開啟 Always-on；lockdown 保持 0。重開機 boot ID `d786938d-04ae-4ab0-b2a5-9b0cfdfeac80` → `920be004-e84c-427f-89f1-68658d288ff3` 後，系統以 `android.net.VpnService` action 建立新程序，服務為 foreground（type `0x400`），VPN CONNECTED、`tun0` 與 DNS `10.0.0.1` 存在；模擬器解析並 ping `example.org`（104.20.26.136，1/1）。
 
 App 顯式停止後 `tun0` 消失、`desired_enabled=false`，Always-on 仍指向 `.d15test` 且沒有立即重啟。再次啟用後，在已核對套件 ID 的詳細頁執行 Forget VPN：`always_on_vpn_app=null`、lockdown 0、`ACTIVATE_VPN=ignore`、`desired_enabled=false`、`tun0` 不存在。此次新裝的 D15 app/test 套件已從 AVD 移除，模擬器已關閉；原有其他測試套件未動。這補足 Android 15 模擬器的系統啟動、重開機、顯式停止與授權撤銷證據，但不等同 Android 15 實機、低記憶體程序回收、切換其他 VPN、lockdown 或 API 24–27 驗收。D09 依賴仍未 Done，D15 維持 Draft／In Progress。
+
+## 2026-09-30 Android 15 模擬器切換其他 VPN
+
+重新使用同一 API 35 AVD（既有 D04/D07/D08 隔離套件未移除），只安裝 D15 隔離 App。D15 經 App 與系統 VPN consent 啟用後，`desired_enabled=true`、`tun0` 存在。先在已核對 `AppManagementFragment.mArguments` 為 `.d15test` 的詳細頁開啟 Always-on、lockdown 0；此時嘗試啟用既有 `.d04test`，它仍顯示「防護已關閉」，不能列為成功切換。關閉 D15 Always-on 後，系統設定為 null、D15 TUN 消失、`desired_enabled=false`；這一步與後續真正切換分開記錄。
+
+再次由 D15 App 明確啟用，確認 `desired_enabled=true`、UI「防護中」及新 `tun0`。再由已安裝的 `.d04test` App 啟用其 VPN：D15 `desired_enabled` 轉為 false，D04 UI「防護中」、其 `DnsVpnService` 為 foreground（type `0x400`），`tun0` 由介面 19 變為新介面 20；Always-on 保持 null。稍後回讀 D15 仍為 false、D04 仍為前景服務，未觀察到 D15 搶回 VPN。ADB shell 嘗試直接送 `android.net.VpnService` action 到 D15 時被 Android 以 `Requires permission not exported from uid` 拒絕，因此該嘗試不算系統恢復測試；既有同 UID instrumentation 已覆蓋停止後 action 防護。
+
+測後由 D04 App 明確停止，確認 `tun0` 消失；本次安裝的 `.d15test` 已卸載，Always-on=null、lockdown 0，原有 D04/D07/D08 套件保留，AVD 已關閉。這補足 API 35 模擬器「一般 VPN 切換至另一 App」的狀態清理；不聲稱 Always-on 開啟時可切換、Android 10 實機切換、低記憶體程序回收、lockdown 或 API 24–27 已驗收。D09 依賴仍在 In Progress，D15 保持 Draft／In Progress。
