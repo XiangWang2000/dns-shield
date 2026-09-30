@@ -35,3 +35,13 @@ App 顯式停止後 `tun0` 消失、`desired_enabled=false`，Always-on 仍指�
 再次由 D15 App 明確啟用，確認 `desired_enabled=true`、UI「防護中」及新 `tun0`。再由已安裝的 `.d04test` App 啟用其 VPN：D15 `desired_enabled` 轉為 false，D04 UI「防護中」、其 `DnsVpnService` 為 foreground（type `0x400`），`tun0` 由介面 19 變為新介面 20；Always-on 保持 null。稍後回讀 D15 仍為 false、D04 仍為前景服務，未觀察到 D15 搶回 VPN。ADB shell 嘗試直接送 `android.net.VpnService` action 到 D15 時被 Android 以 `Requires permission not exported from uid` 拒絕，因此該嘗試不算系統恢復測試；既有同 UID instrumentation 已覆蓋停止後 action 防護。
 
 測後由 D04 App 明確停止，確認 `tun0` 消失；本次安裝的 `.d15test` 已卸載，Always-on=null、lockdown 0，原有 D04/D07/D08 套件保留，AVD 已關閉。這補足 API 35 模擬器「一般 VPN 切換至另一 App」的狀態清理；不聲稱 Always-on 開啟時可切換、Android 10 實機切換、低記憶體程序回收、lockdown 或 API 24–27 已驗收。D09 依賴仍在 In Progress，D15 保持 Draft／In Progress。
+
+## 2026-09-30 API 35 強制程序死亡觀察
+
+同一 AVD 再次暫裝 `.d15test`，由 App 取得 VPN consent，並在 `AppManagementFragment.mArguments` 核對完整 ID 後開啟 Always-on、lockdown 0。測前 boot ID `96701cee-f2cf-4ba2-8d19-f6223fb771d4`、PID 1855、`desired_enabled=true`、`tun0` 存在。`am crash` 後程序和 TUN 消失；多次回讀期間 Always-on 與 desired 意圖仍保留，但沒有觀察到新程序或 TUN。ActivityManager 記錄該程序死亡與 `crashCount=1`，service 紀錄有 `startRequested=true`、`stopIfKilled=false`、`startCommandResult=1`（`START_STICKY`），未顯示排定重啟。這不等同系統低記憶體回收。
+
+手動啟動 App 並再次點選防護後 PID 2155、`tun0` 恢復；接著由同 UID 的 `run-as` 執行 `kill -9`，觀察期間也沒有新程序或 TUN。但此操作發生在前述 crash 之後，既有 `crashCount=1`，不能當成獨立乾淨條件下的程序回收結論。Android [Service `START_STICKY` 文件](https://developer.android.com/reference/android/app/Service#START_STICKY) 說系統稍後嘗試重建服務，並未給出即時恢復期限；目前只記錄觀察結果，不以此推導產品恢復分支的新修正。
+
+在 Always-on 與 `desired_enabled=true` 仍保留、TUN 尚未恢復的狀態重開 AVD，boot ID 變為 `c8eab05f-950e-41c0-9f2b-70d409db0560`：系統 `android.net.VpnService` action 建立 PID 1368 與前景服務（type `0x400`），`tun0` 恢復，`example.org` 解析至 172.66.157.237 並 ping 1/1。這是再次證實重開機恢復，不是程序回收成功。其後從已核對 ID 的 Settings 詳細頁 Forget VPN，回讀 Always-on=null、lockdown 0、`ACTIVATE_VPN=ignore`、`desired_enabled=false`、TUN 消失；本次暫裝 D15 已卸載，AVD 已關閉。D15 的真正系統回收與其他未驗收矩陣仍待完成。
+
+為排除前次 `crashCount=1` 干擾，再將 `.d15test` 完全卸載後重新安裝，於新 AVD boot ID `27d822b4-eb79-4fa9-a99a-f2197e3a0afc` 明確啟動 VPN、核對 ID 後開啟 Always-on。測前 PID 1856、`tun0`、`desired_enabled=true`，service `startRequested=true`／`stopIfKilled=false`／`startCommandResult=1`，沒有先跑 `am crash`。同 UID `kill -9 1856` 後，前 35 秒每 5 秒觀察，加上後續 45 秒，均無新程序或 TUN；Always-on 仍指向 D15，service 紀錄 `app=null`、`startRequested=true`。這獨立確認「強制終止後約 80 秒未觀察到自動恢復」，仍不是低記憶體回收測試，也不推論 Android 永不重啟。再重開機 boot ID `05de511d-4d1c-45f4-9808-642bc27b5e83`，新 PID 1362 與 `tun0` 重建。最後在核對 ID 的 Settings 頁 Forget VPN，Always-on=null、lockdown 0、`desired_enabled=false`、TUN 消失；D15 測試 App 已卸載、AVD 關閉。此負面觀察保留在 D15 未驗收清單，不標 Done。
