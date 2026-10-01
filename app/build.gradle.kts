@@ -117,6 +117,11 @@ android {
         signingConfig = signingConfigs.getByName("debugConfig")
       }
     }
+    create("d03test") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d03test"
+      matchingFallbacks += listOf("debug")
+    }
     create("d04DeviceTest") {
       initWith(getByName("debug"))
       applicationIdSuffix = ".d04test"
