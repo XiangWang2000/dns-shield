@@ -20,6 +20,13 @@ data class DnsLatencySummary(
     val p95Millis: Long? = null
 )
 
+data class DnsCoalescedWaitSummary(
+    val sampleCount: Int = 0,
+    val p50Millis: Long? = null,
+    val p95Millis: Long? = null,
+    val p99Millis: Long? = null
+)
+
 data class DnsDiagnosticsSnapshot(
     val received: Long = 0,
     val resolved: Long = 0,
@@ -37,7 +44,8 @@ data class DnsDiagnosticsSnapshot(
     val pending: Long = 0,
     val peakPending: Long = 0,
     val estimatedSavedBytes: Long = 0,
-    val latency: DnsLatencySummary = DnsLatencySummary()
+    val latency: DnsLatencySummary = DnsLatencySummary(),
+    val coalescedWait: DnsCoalescedWaitSummary = DnsCoalescedWaitSummary()
 ) {
     val terminalCount: Long get() = resolved + blocked + failed + rejected
 }
@@ -55,8 +63,11 @@ internal class DnsDiagnosticMetrics(
 
     private val lock = Any()
     private val latencySamplesNanos = LongArray(latencyWindowSize)
+    private val queueWaitSamplesNanos = LongArray(latencyWindowSize)
     private var latencySampleCount = 0
     private var nextLatencySample = 0
+    private var queueWaitSampleCount = 0
+    private var nextQueueWaitSample = 0
     private var generation = 0L
 
     private var received = 0L
@@ -106,6 +117,12 @@ internal class DnsDiagnosticMetrics(
 
     fun recordUdpRetryAttempt(request: Request) = updateActive(request) { udpRetryAttempts++ }
 
+    fun recordCoalescedWait(request: Request, elapsedNanos: Long) = updateActive(request) {
+        queueWaitSamplesNanos[nextQueueWaitSample] = elapsedNanos.coerceAtLeast(0L)
+        nextQueueWaitSample = (nextQueueWaitSample + 1) % latencyWindowSize
+        queueWaitSampleCount = minOf(queueWaitSampleCount + 1, latencyWindowSize)
+    }
+
     fun complete(
         request: Request,
         outcome: DnsClientTerminalOutcome,
@@ -135,6 +152,7 @@ internal class DnsDiagnosticMetrics(
 
     fun snapshot(): DnsDiagnosticsSnapshot = synchronized(lock) {
         val sortedSamples = latencySamplesNanos.copyOf(latencySampleCount).sortedArray()
+        val sortedQueueWaitSamples = queueWaitSamplesNanos.copyOf(queueWaitSampleCount).sortedArray()
         DnsDiagnosticsSnapshot(
             received = received,
             resolved = resolved,
@@ -156,6 +174,12 @@ internal class DnsDiagnosticMetrics(
                 sampleCount = latencySampleCount,
                 p50Millis = percentileMillis(sortedSamples, 50),
                 p95Millis = percentileMillis(sortedSamples, 95)
+            ),
+            coalescedWait = DnsCoalescedWaitSummary(
+                sampleCount = queueWaitSampleCount,
+                p50Millis = percentileMillis(sortedQueueWaitSamples, 50),
+                p95Millis = percentileMillis(sortedQueueWaitSamples, 95),
+                p99Millis = percentileMillis(sortedQueueWaitSamples, 99)
             )
         )
     }
@@ -181,6 +205,8 @@ internal class DnsDiagnosticMetrics(
         estimatedSavedBytes = 0L
         latencySampleCount = 0
         nextLatencySample = 0
+        queueWaitSampleCount = 0
+        nextQueueWaitSample = 0
     }
 
     private fun updateActive(request: Request, update: () -> Unit) = synchronized(lock) {
