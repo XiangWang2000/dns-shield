@@ -41,3 +41,17 @@ Eight identical clients shared one fake-upstream request and produced seven coal
 The first integrated run `mummyw78` failed only the coalesced-wait assertion: its early diagnostics-flow snapshot had seven coalesced requests but zero wait samples, while the final raw snapshot already contained seven samples. The test now waits for the wait samples before taking its scenario snapshot. Its raw ignored report is `captures/d14/d14-e2e-mummyw78.json`, SHA-256 `2A6A2DACBC0F05F2352A675840FEEB30B801E511DCA5A6BF53C79C8E9CCF1CF3`; this failed run is retained as diagnostic evidence, not counted as a pass.
 
 This is one short candidate run with the handset AC powered. No paired baseline/candidate latency comparison or 8–10 hour idle/active battery A/B was performed. The reported latency values are workload observations, not improvement estimates. Keep D14 in progress until those comparisons are measured and reviewed.
+
+## Android 10 repeated short runs on 2026-10-01 UTC
+
+Candidate `09f4c23` passed three runs on ASUS_Z01RD / Android 10 with IPv4 Wi-Fi. The phone was AC powered. Each run used the real app TUN, loopback fake upstream, and actual Wi-Fi off/on handoff. No client DNS timeout occurred; cache, blocking, misses, eight-client coalescing, burst, expected all-upstream-failure SERVFAIL, fallback, and cleanup assertions passed. Each handoff observed five service transitions and re-queried the cached name.
+
+| Run | Service startup ms | Cache hit ms | Unique miss p95 ms | Burst p95 ms | Post-handoff query ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| muppx2id | 625.63 | 1.12 | 46.71 | 17.62 | 34.74 |
+| muppz5p5 | 556.11 | 2.62 | 83.25 | 57.38 | 22.29 |
+| muppzo35 | 550.24 | 2.42 | 67.27 | 47.81 | 27.31 |
+
+Raw ignored reports: `captures/d14/d14-e2e-{muppx2id,muppz5p5,muppzo35}.json`; instrumentation: `captures/d14-android10-20261001-run{1,2,3}.txt`. The first run took 85.028 seconds because the operator waited for its network prompt; the subsequent runs detected the prompt in logcat and took 18.141 and 16.565 seconds. The runner buffers `println` output until completion, so host stdout is unsuitable for live prompt detection. A host report-extraction error after run 1 was corrected by reading its private JSON file; the instrumentation itself passed. Preserve that distinction.
+
+Diagnostics include one deliberate upstream failure per run plus 5/3/4 rejected non-DNS packets, all `INVALID_VERSION`; these are not unexpected client timeouts. Latencies are small-sample candidate observations, not baseline/candidate improvement estimates. No battery savings or 8-10-hour power A/B result is claimed. Both newly installed D14 packages were removed, Wi-Fi remained enabled, and production/D15 packages were preserved. D14 stays In Progress pending paired comparisons.
