@@ -37,3 +37,9 @@ The existing D03 worktree merged current `main` (`1dbd49d`), retaining the one-l
 On ASUS_Z01RD / Android 10, the current Wi-Fi had an IPv4 address and only an IPv6 link-local address, with no IPv6 default route (`adb shell ip -6 route show default` returned no route). After granting consent to the reinstalled isolated `.d03test` package, `ipv4OnlyVpnOffOnOff` passed 1/1 (1.536 seconds): direct IPv4 TCP and IPv4 UDP AAAA queries succeeded before, during, and after VPN; AAAA via the virtual IPv4 DNS also succeeded while VPN was on. The first run failed before the test because reinstalling the isolated APK required fresh Android VPN consent; no test behavior failed. Raw ignored output: `captures/d03-main-ipv4-only-device-consented.txt`.
 
 Full `verify.ps1` passed: 29 Python, 222 JVM tests / 44 suites with zero failures/errors, assets, lint, Debug/D04/D03 APKs. Raw ignored output: `captures/d03-main-final-verify.log`. The earlier dual-stack result above was on an older head and is not a claim for this integrated head. IPv6-only/NAT64 cannot be tested on the current network; D03 remains Draft / In Progress pending that matrix; the exact-head CI result is tracked on PR #50.
+
+## Android 10 repeat on 2026-10-01 UTC
+
+The integrated candidate `ea3b6b2` was tested again on ASUS_Z01RD / Android 10 (API 29), on IPv4 Wi-Fi with only link-local IPv6. `Ipv6PassThroughTest#ipv4OnlyVpnOffOnOff` passed 1/1 in 1.504 seconds. TCP and AAAA DNS over IPv4 worked before, during, and after the VPN; AAAA through the virtual IPv4 DNS also passed. Raw ignored evidence: `captures/d03-android10-20261001-ipv4.txt`.
+
+Only the two newly installed `.d03test` packages were removed afterward. Production and existing D15 packages were preserved. This confirms the IPv4-only slice again; it does not establish current-head dual-stack, IPv6-only, or NAT64 acceptance. D03 stays In Progress.
