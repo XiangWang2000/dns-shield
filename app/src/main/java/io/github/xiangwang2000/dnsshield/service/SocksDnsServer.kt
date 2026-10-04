@@ -20,6 +20,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 
 /**
  * Authenticated loopback SOCKS5 endpoint for native TCP DNS clients.
@@ -132,6 +134,15 @@ internal class SocksDnsServer(
             if (finished.get()) return
             try {
                 serve()
+            } catch (_: TimeoutCancellationException) {
+                // A timed-out DNS request ends this client session.
+            } catch (_: CancellationException) {
+                // Cancellation is expected when the service is stopping.
+            } catch (_: InterruptedException) {
+                // shutdownNow interrupts blocking upstream work; preserve the worker's status.
+                Thread.currentThread().interrupt()
+            } catch (_: IOException) {
+                // A failed peer or upstream I/O ends this client session.
             } finally {
                 finish()
             }
