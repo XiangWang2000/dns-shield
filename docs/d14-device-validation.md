@@ -55,3 +55,20 @@ Candidate `09f4c23` passed three runs on ASUS_Z01RD / Android 10 with IPv4 Wi-Fi
 Raw ignored reports: `captures/d14/d14-e2e-{muppx2id,muppz5p5,muppzo35}.json`; instrumentation: `captures/d14-android10-20261001-run{1,2,3}.txt`. The first run took 85.028 seconds because the operator waited for its network prompt; the subsequent runs detected the prompt in logcat and took 18.141 and 16.565 seconds. The runner buffers `println` output until completion, so host stdout is unsuitable for live prompt detection. A host report-extraction error after run 1 was corrected by reading its private JSON file; the instrumentation itself passed. Preserve that distinction.
 
 Diagnostics include one deliberate upstream failure per run plus 5/3/4 rejected non-DNS packets, all `INVALID_VERSION`; these are not unexpected client timeouts. Latencies are small-sample candidate observations, not baseline/candidate improvement estimates. No battery savings or 8-10-hour power A/B result is claimed. Both newly installed D14 packages were removed, Wi-Fi remained enabled, and production/D15 packages were preserved. D14 stays In Progress pending paired comparisons.
+
+## Updated scoped benchmark workflow (2026-10-04; supersedes earlier Run instructions)
+
+The short automatic workload and manual network handoff now use separate instrumentation methods and reports. Default `Run` executes only the fixed automatic workload; it never requests a radio switch. The manual method seeds/verifies a cached answer, requests a real handoff, verifies cache requery, then cleans up. Its waiting time is labeled `manual_network_handoff` and is not compared as automatic CPU/latency data.
+
+```powershell
+.\tools\d14-device-test.ps1 -Action Run -Serial JCAZB7604377HFP -BenchmarkLabel baseline
+.\tools\d14-device-test.ps1 -Action Run -Serial JCAZB7604377HFP -BenchmarkLabel candidate
+.\tools\d14-device-test.ps1 -Action Run -Serial JCAZB7604377HFP -ManualNetworkHandoff -BenchmarkLabel candidate
+```
+
+The script records source revision (with `+dirty` if tracked changes are present) and the supplied label. Reports add `run_kind`, `benchmark_label`, `source_revision` and explicitly identify the protected loopback UDP workload. It does not measure successful DoH connection/TLS counts; the independent pinned-version HTTPS/EventListener comparison is documented with R03/R06 and must not be relabeled as this device TUN benchmark.
+
+For manual handoff, watch `D14_NETWORK_SWITCH_REQUIRED` in the target process's logcat before changing Wi-Fi. Instrumentation stdout may be buffered until completion. `Run` now requires an `OK (N test[s])` result and absence of explicit failure markers; `INSTRUMENTATION_CODE: -1` is Android's successful completion code and is not itself a failure.
+
+Following updated #47/#72, paired baseline/candidate repeats on the same device/fixed automatic workload remain required; the separate manual case is acceptance coverage. The unavailable 8–10 hour power A/B is tracked in #73 and is deferred at the user's request. It is not a hard blocker for the scoped core completion; no power savings claim is made. New split workload results are not yet recorded in this section.
+Split-workload validation: `verify.ps1` PASS and isolated D14 app/test build PASS. Script syntax and `git diff --check` PASS. The baseline APK/harness will be retained with SHA256 for paired automatic runs against the common #72 candidate; split manual handoff is verified separately. Earlier mixed workload results remain historical and are not reused as the new paired baseline.

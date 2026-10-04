@@ -46,7 +46,12 @@ class D14TunEndToEndBenchmarkTest {
     private val clientTimeouts = AtomicInteger()
 
     @Test
-    fun clientDnsTraversesTunPolicyCacheCoalescingAndFakeUpstream() {
+    fun clientDnsTraversesTunPolicyCacheCoalescingAndFakeUpstream() = runBenchmark(manualHandoff = false)
+
+    @Test
+    fun networkHandoffInvalidatesCachedAnswerThroughTun() = runBenchmark(manualHandoff = true)
+
+    private fun runBenchmark(manualHandoff: Boolean) {
         clientTimeouts.set(0)
         assertTrue("Run only the isolated .d14test target.", BuildConfig.D14_DEVICE_TEST)
 
@@ -120,110 +125,114 @@ class D14TunEndToEndBenchmarkTest {
                 .put("passed", true)
                 .put("upstream_requests_for_domain", upstream.count(cacheDomain)))
 
-            val blockedUpstreamBefore = upstream.totalRequests.get()
-            val blocked = sendQuery("doubleclick.net", 0x1403)
-            assertEquals("Built-in blocked domain should return NXDOMAIN.", 3, responseCode(blocked.response))
-            latencySamples.getOrPut("blocked") { mutableListOf() }.add(blocked.elapsedMillis)
-            val afterBlocked = waitForDiagnostics { it.blocked > initial.blocked }
-            assertEquals("A blocked query must not reach upstream.", blockedUpstreamBefore, upstream.totalRequests.get())
-            scenarioResults.put("blocked", JSONObject()
-                .put("passed", true)
-                .put("upstream_requests", 0))
+            if (!manualHandoff) {
+                val blockedUpstreamBefore = upstream.totalRequests.get()
+                val blocked = sendQuery("doubleclick.net", 0x1403)
+                assertEquals("Built-in blocked domain should return NXDOMAIN.", 3, responseCode(blocked.response))
+                latencySamples.getOrPut("blocked") { mutableListOf() }.add(blocked.elapsedMillis)
+                val afterBlocked = waitForDiagnostics { it.blocked > initial.blocked }
+                assertEquals("A blocked query must not reach upstream.", blockedUpstreamBefore, upstream.totalRequests.get())
+                scenarioResults.put("blocked", JSONObject()
+                    .put("passed", true)
+                    .put("upstream_requests", 0))
 
-            val uniqueDomains = (0 until UNIQUE_MISS_SAMPLES).map { "d14-unique-$runId-$it.example.invalid" }
-            val uniqueResults = sendConcurrentQueries(uniqueDomains, 0x2000)
-            uniqueResults.forEach { result ->
-                assertDnsAnswer(result.response, result.transactionId)
-                latencySamples.getOrPut("unique_miss") { mutableListOf() }.add(result.elapsedMillis)
+                val uniqueDomains = (0 until UNIQUE_MISS_SAMPLES).map { "d14-unique-$runId-$it.example.invalid" }
+                val uniqueResults = sendConcurrentQueries(uniqueDomains, 0x2000)
+                uniqueResults.forEach { result ->
+                    assertDnsAnswer(result.response, result.transactionId)
+                    latencySamples.getOrPut("unique_miss") { mutableListOf() }.add(result.elapsedMillis)
             }
-            uniqueDomains.forEach { domain ->
-                assertTrue("Missing fake-upstream request for $domain", upstream.waitForCount(domain, 1, 2_000L))
+                uniqueDomains.forEach { domain ->
+                    assertTrue("Missing fake-upstream request for $domain", upstream.waitForCount(domain, 1, 2_000L))
             }
-            scenarioResults.put("unique_miss", JSONObject()
-                .put("passed", true)
-                .put("samples", uniqueResults.size)
-                .put("upstream_requests", uniqueDomains.sumOf(upstream::count)))
+                scenarioResults.put("unique_miss", JSONObject()
+                    .put("passed", true)
+                    .put("samples", uniqueResults.size)
+                    .put("upstream_requests", uniqueDomains.sumOf(upstream::count)))
 
-            val coalescedDomain = "d14-coalesced-$runId.example.invalid"
-            val coalescedBefore = upstream.count(coalescedDomain)
-            upstream.delayDomain = coalescedDomain
-            upstream.delayMillis = COALESCED_UPSTREAM_DELAY_MS
-            val coalescedResults = sendConcurrentSameDomain(COALESCED_CLIENTS, coalescedDomain, 0x3000)
-            upstream.delayDomain = null
-            coalescedResults.forEach { result ->
-                assertDnsAnswer(result.response, result.transactionId)
-                latencySamples.getOrPut("coalesced_miss") { mutableListOf() }.add(result.elapsedMillis)
+                val coalescedDomain = "d14-coalesced-$runId.example.invalid"
+                val coalescedBefore = upstream.count(coalescedDomain)
+                upstream.delayDomain = coalescedDomain
+                upstream.delayMillis = COALESCED_UPSTREAM_DELAY_MS
+                val coalescedResults = sendConcurrentSameDomain(COALESCED_CLIENTS, coalescedDomain, 0x3000)
+                upstream.delayDomain = null
+                coalescedResults.forEach { result ->
+                    assertDnsAnswer(result.response, result.transactionId)
+                    latencySamples.getOrPut("coalesced_miss") { mutableListOf() }.add(result.elapsedMillis)
             }
-            assertEquals("Concurrent identical misses should share one upstream query.", coalescedBefore + 1, upstream.count(coalescedDomain))
-            val afterCoalescing = waitForDiagnostics {
-                it.coalesced >= initial.coalesced + COALESCED_CLIENTS - 1 &&
-                    it.coalescedWait.sampleCount >= COALESCED_CLIENTS - 1
+                assertEquals("Concurrent identical misses should share one upstream query.", coalescedBefore + 1, upstream.count(coalescedDomain))
+                val afterCoalescing = waitForDiagnostics {
+                    it.coalesced >= initial.coalesced + COALESCED_CLIENTS - 1 &&
+                        it.coalescedWait.sampleCount >= COALESCED_CLIENTS - 1
             }
-            scenarioResults.put("coalesced_miss", JSONObject()
-                .put("passed", true)
-                .put("clients", COALESCED_CLIENTS)
-                .put("upstream_requests", upstream.count(coalescedDomain) - coalescedBefore)
-                .put("coalesced_wait_samples", afterCoalescing.coalescedWait.sampleCount))
+                scenarioResults.put("coalesced_miss", JSONObject()
+                    .put("passed", true)
+                    .put("clients", COALESCED_CLIENTS)
+                    .put("upstream_requests", upstream.count(coalescedDomain) - coalescedBefore)
+                    .put("coalesced_wait_samples", afterCoalescing.coalescedWait.sampleCount))
 
-            val burstDomains = (0 until BURST_CLIENTS).map { "d14-burst-$runId-$it.example.invalid" }
-            val burstResults = sendConcurrentQueries(burstDomains, 0x4000)
-            burstResults.forEach { result ->
-                assertDnsAnswer(result.response, result.transactionId)
-                latencySamples.getOrPut("burst") { mutableListOf() }.add(result.elapsedMillis)
+                val burstDomains = (0 until BURST_CLIENTS).map { "d14-burst-$runId-$it.example.invalid" }
+                val burstResults = sendConcurrentQueries(burstDomains, 0x4000)
+                burstResults.forEach { result ->
+                    assertDnsAnswer(result.response, result.transactionId)
+                    latencySamples.getOrPut("burst") { mutableListOf() }.add(result.elapsedMillis)
             }
-            scenarioResults.put("burst", JSONObject()
-                .put("passed", true)
-                .put("clients", BURST_CLIENTS)
-                .put("upstream_requests", burstDomains.sumOf(upstream::count)))
+                scenarioResults.put("burst", JSONObject()
+                    .put("passed", true)
+                    .put("clients", BURST_CLIENTS)
+                    .put("upstream_requests", burstDomains.sumOf(upstream::count)))
 
-            val failingDomain = "d14-upstream-fail-$runId.example.invalid"
-            val failedBefore = DnsVpnService.diagnosticsFlow.value.failed
-            val dropsBefore = upstream.droppedRequests.get()
-            upstream.droppedDomains.add(failingDomain)
-            val failedQuery = sendQuery(failingDomain, 0x5001, timeoutMillis = 8_000)
-            upstream.droppedDomains.remove(failingDomain)
-            assertEquals("When every configured upstream attempt fails, reply SERVFAIL.", 2, responseCode(failedQuery.response))
-            latencySamples.getOrPut("all_upstreams_failed") { mutableListOf() }.add(failedQuery.elapsedMillis)
-            val afterFailure = waitForDiagnostics { it.failed > failedBefore }
-            assertTrue("Both upstream attempts should have been dropped.", upstream.droppedRequests.get() - dropsBefore >= 2)
-            scenarioResults.put("all_upstreams_failed", JSONObject()
-                .put("passed", true)
-                .put("upstream_attempts_dropped", upstream.droppedRequests.get() - dropsBefore)
-                .put("failed_requests_delta", afterFailure.failed - failedBefore))
+                val failingDomain = "d14-upstream-fail-$runId.example.invalid"
+                val failedBefore = DnsVpnService.diagnosticsFlow.value.failed
+                val dropsBefore = upstream.droppedRequests.get()
+                upstream.droppedDomains.add(failingDomain)
+                val failedQuery = sendQuery(failingDomain, 0x5001, timeoutMillis = 8_000)
+                upstream.droppedDomains.remove(failingDomain)
+                assertEquals("When every configured upstream attempt fails, reply SERVFAIL.", 2, responseCode(failedQuery.response))
+                latencySamples.getOrPut("all_upstreams_failed") { mutableListOf() }.add(failedQuery.elapsedMillis)
+                val afterFailure = waitForDiagnostics { it.failed > failedBefore }
+                assertTrue("Both upstream attempts should have been dropped.", upstream.droppedRequests.get() - dropsBefore >= 2)
+                scenarioResults.put("all_upstreams_failed", JSONObject()
+                    .put("passed", true)
+                    .put("upstream_attempts_dropped", upstream.droppedRequests.get() - dropsBefore)
+                    .put("failed_requests_delta", afterFailure.failed - failedBefore))
 
-            val networkBefore = waitForSelectedValidatedPhysicalNetwork(context, 5_000L)
-            val networkChangeCountBefore = DnsVpnService.d14NetworkChangeCount.get()
-            networkSwitchAttempted = true
-            println("D14_NETWORK_SWITCH_REQUIRED=Switch Wi-Fi off and back on, or hand off between Wi-Fi and cellular, within 90 seconds.")
-            val networkAfter = waitForNetworkHandoff(context, networkChangeCountBefore, networkBefore, 90_000L)
-            val networkCacheCountBefore = upstream.count(cacheDomain)
-            val postSwitch = sendQuery(cacheDomain, 0x6001)
-            assertDnsAnswer(postSwitch.response, 0x6001)
-            latencySamples.getOrPut("network_switch_recovery") { mutableListOf() }.add(postSwitch.elapsedMillis)
-            assertEquals(
-                "Network generation changes must invalidate the DNS answer cache.",
-                networkCacheCountBefore + 1,
-                upstream.count(cacheDomain)
-            )
-            scenarioResults.put("network_switch", JSONObject()
-                .put("passed", true)
-                .put("observed_service_transitions", DnsVpnService.d14NetworkChangeCount.get() - networkChangeCountBefore)
-                .put("selected_network_id_before", networkBefore.selectedNetworkId ?: JSONObject.NULL)
-                .put("selected_network_id_after", networkAfter.selectedNetworkId ?: JSONObject.NULL)
-                .put("selected_transport_mask_before", networkBefore.selectedTransportMask)
-                .put("selected_transport_mask_after", networkAfter.selectedTransportMask)
-                .put("cache_requeried", true))
+                val udpFallbackObserved = afterFailure.fallbackAttempts > initial.fallbackAttempts
+                scenarioResults.put("udp_fallback", JSONObject()
+                    .put("observed", udpFallbackObserved)
+                    .put("fallback_attempts_delta", afterFailure.fallbackAttempts - initial.fallbackAttempts)
+                    .put("note", "Loopback has no configured DoH endpoint; the production transport fallback reaches the protected UDP fake upstream."))
+                assertTrue("The protected UDP fallback path must be exercised.", udpFallbackObserved)
 
-            val udpFallbackObserved = afterFailure.fallbackAttempts > initial.fallbackAttempts
-            scenarioResults.put("udp_fallback", JSONObject()
-                .put("observed", udpFallbackObserved)
-                .put("fallback_attempts_delta", afterFailure.fallbackAttempts - initial.fallbackAttempts)
-                .put("note", "Loopback has no configured DoH endpoint; the production transport fallback reaches the protected UDP fake upstream."))
-            assertTrue("The protected UDP fallback path must be exercised.", udpFallbackObserved)
+                assertTrue("Cache hit was not recorded.", afterCache.cacheHits > initial.cacheHits)
+                assertTrue("Blocked query was not recorded.", afterBlocked.blocked > initial.blocked)
+                assertTrue("Coalesced wait samples were not recorded.", afterCoalescing.coalescedWait.sampleCount > 0)
+            }
+            if (manualHandoff) {
+                val networkBefore = waitForSelectedValidatedPhysicalNetwork(context, 5_000L)
+                val networkChangeCountBefore = DnsVpnService.d14NetworkChangeCount.get()
+                networkSwitchAttempted = true
+                println("D14_NETWORK_SWITCH_REQUIRED=Switch Wi-Fi off and back on, or hand off between Wi-Fi and cellular, within 90 seconds.")
+                val networkAfter = waitForNetworkHandoff(context, networkChangeCountBefore, networkBefore, 90_000L)
+                val networkCacheCountBefore = upstream.count(cacheDomain)
+                val postSwitch = sendQuery(cacheDomain, 0x6001)
+                assertDnsAnswer(postSwitch.response, 0x6001)
+                latencySamples.getOrPut("network_switch_recovery") { mutableListOf() }.add(postSwitch.elapsedMillis)
+                assertEquals(
+                    "Network generation changes must invalidate the DNS answer cache.",
+                    networkCacheCountBefore + 1,
+                    upstream.count(cacheDomain)
+                )
+                scenarioResults.put("network_switch", JSONObject()
+                    .put("passed", true)
+                    .put("observed_service_transitions", DnsVpnService.d14NetworkChangeCount.get() - networkChangeCountBefore)
+                    .put("selected_network_id_before", networkBefore.selectedNetworkId ?: JSONObject.NULL)
+                    .put("selected_network_id_after", networkAfter.selectedNetworkId ?: JSONObject.NULL)
+                    .put("selected_transport_mask_before", networkBefore.selectedTransportMask)
+                    .put("selected_transport_mask_after", networkAfter.selectedTransportMask)
+                    .put("cache_requeried", true))
 
-            assertTrue("Cache hit was not recorded.", afterCache.cacheHits > initial.cacheHits)
-            assertTrue("Blocked query was not recorded.", afterBlocked.blocked > initial.blocked)
-            assertTrue("Coalesced wait samples were not recorded.", afterCoalescing.coalescedWait.sampleCount > 0)
+            }
             assertNull("Fake upstream thread failed.", upstream.failure)
         } catch (failure: Throwable) {
             if (networkSwitchAttempted && !scenarioResults.has("network_switch")) {
@@ -280,6 +289,7 @@ class D14TunEndToEndBenchmarkTest {
                 writeReport(
                     context = context,
                     runId = runId,
+                    manualHandoff = manualHandoff,
                     processStartedNanos = processStartedNanos,
                     serviceStartNanos = serviceStartNanos,
                     vpnReadyNanos = vpnReadyNanos,
@@ -474,6 +484,7 @@ class D14TunEndToEndBenchmarkTest {
     private fun writeReport(
         context: Context,
         runId: String,
+        manualHandoff: Boolean,
         processStartedNanos: Long,
         serviceStartNanos: Long,
         vpnReadyNanos: Long,
@@ -514,6 +525,9 @@ class D14TunEndToEndBenchmarkTest {
         val report = JSONObject()
             .put("schema", "dns-shield-d14-device-report-v1")
             .put("run_id", runId)
+            .put("run_kind", if (manualHandoff) "manual_network_handoff" else "automatic_benchmark")
+            .put("benchmark_label", InstrumentationRegistry.getArguments().getString("d14_label", "unlabeled"))
+            .put("source_revision", InstrumentationRegistry.getArguments().getString("d14_source_revision", "not_recorded"))
             .put("captured_at_utc", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
                 timeZone = TimeZone.getTimeZone("UTC")
             }.format(Date()))
@@ -539,6 +553,8 @@ class D14TunEndToEndBenchmarkTest {
                 .put("p95_ms", snapshot.coalescedWait.p95Millis ?: JSONObject.NULL)
                 .put("p99_ms", snapshot.coalescedWait.p99Millis ?: JSONObject.NULL))
             .put("upstream", JSONObject()
+                .put("transport", "protected_udp_loopback")
+                .put("doh_connections_status", "not_applicable_to_this_udp_workload")
                 .put("requests", upstream.totalRequests.get())
                 .put("dropped_requests", upstream.droppedRequests.get())
                 .put("requests_by_domain", upstream.countsJson()))

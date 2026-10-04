@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("Build", "Install", "Run", "Uninstall")]
     [string]$Action,
-    [string]$Serial
+    [string]$Serial,
+    [switch]$ManualNetworkHandoff,
+    [string]$BenchmarkLabel = "unlabeled"
 )
 
 $ErrorActionPreference = "Stop"
@@ -170,14 +172,24 @@ switch ($Action) {
         New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
         $before = @(Get-D14Reports $device $TestPackage)
         $previousReports = @($before | ForEach-Object { [IO.Path]::GetFileName($_) })
-        Write-Host "The D14 run may show Android VPN consent. Approve the .d14test package; later, switch Wi-Fi off and back on (or between Wi-Fi and cellular) when the test prints its network-handoff prompt. Keep USB connected."
+        $method = if ($ManualNetworkHandoff) { "networkHandoffInvalidatesCachedAnswerThroughTun" } else { "clientDnsTraversesTunPolicyCacheCoalescingAndFakeUpstream" }
+        if ($ManualNetworkHandoff) {
+            Write-Host "Manual handoff case: approve .d14test VPN consent if shown, keep USB connected, and observe D14_NETWORK_SWITCH_REQUIRED in logcat before switching Wi-Fi. Runner stdout may be buffered."
+        } else {
+            Write-Host "Automatic benchmark: approve .d14test VPN consent if shown; no network switch is requested."
+        }
+        $sourceRevision = (& git -C $Root rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0) { throw "Could not record source revision." }
+        $sourceChanges = & git -C $Root status --porcelain --untracked-files=no
+        if ($sourceChanges) { $sourceRevision += "+dirty" }
         $component = "$TestInstrumentationPackage/androidx.test.runner.AndroidJUnitRunner"
-        $testOutput = & $Adb -s $device shell am instrument -w -e class $TestClass $component 2>&1
+        $testOutput = & $Adb -s $device shell am instrument -w -e class "$TestClass#$method" -e d14_label $BenchmarkLabel -e d14_source_revision $sourceRevision $component 2>&1
         $testExitCode = $LASTEXITCODE
         $testOutput | ForEach-Object { Write-Host $_ }
         $combinedTestOutput = $testOutput -join "`n"
         $instrumentationFailed = ($testExitCode -ne 0) -or
-            ($combinedTestOutput -match 'INSTRUMENTATION_CODE:\s*-1|INSTRUMENTATION_FAILED|FAILURES!!!')
+            ($combinedTestOutput -match 'INSTRUMENTATION_FAILED|FAILURES!!!') -or
+            ($combinedTestOutput -notmatch 'OK \(\d+ tests?\)')
         if ($instrumentationFailed) {
             Write-Host "D14 instrumentation failed; keeping both packages installed to retrieve its report."
         }
