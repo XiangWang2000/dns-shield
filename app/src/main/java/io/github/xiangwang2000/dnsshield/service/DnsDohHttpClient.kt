@@ -13,11 +13,11 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 
 /** Keep DoH requests on the explicitly configured endpoint, including across redirects. */
-internal fun OkHttpClient.forDohEndpoints(endpoints: List<DnsDohEndpoint>): OkHttpClient =
+internal fun OkHttpClient.forDohEndpoint(endpoint: DnsDohEndpoint): OkHttpClient =
     newBuilder()
         .followRedirects(false)
         .followSslRedirects(false)
-        .dns(DohBootstrapDns.forEndpoints(endpoints))
+        .dns(DohBootstrapDns.forEndpoint(endpoint))
         .build()
 
 internal suspend fun OkHttpClient.lookupDoh(

@@ -1133,14 +1133,13 @@ class DnsVpnService : VpnService() {
 
     private suspend fun performDohLookup(
         endpoint: DnsDohEndpoint,
-        resolverEndpoints: List<DnsDohEndpoint>,
         query: ParsedDnsQuery,
         deadline: DnsRequestDeadline,
         metricsRequest: DnsDiagnosticMetrics.Request
     ): ByteArray? {
         if (deadline.remainingMillis() <= 0L) return null
         return getOkHttpClient()
-            .forDohEndpoints(resolverEndpoints)
+            .forDohEndpoint(endpoint)
             .lookupDoh(
                 endpointUrl = endpoint.url,
                 query = query,
@@ -1272,7 +1271,7 @@ class DnsVpnService : VpnService() {
                     null
                 } else {
                     val response = try {
-                        performDohLookup(endpoint, endpoints, query, deadline, request)
+                        performDohLookup(endpoint, query, deadline, request)
                     } catch (exception: CancellationException) {
                         dohFailureBackoff.cancelAttempt(endpoint.url)
                         throw exception
