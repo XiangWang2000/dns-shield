@@ -21,3 +21,13 @@ Issue #42 維持 **In Progress**，直到實機驗收記錄 Wi-Fi／行動網路
 ASUS_Z01RD（Android 10，USB）在僅有 IPv4 Wi-Fi 的環境執行 `D09WifiRecoveryDeviceTest` 1/1：關閉 Wi-Fi 後服務記錄「目前沒有可用網路」，重新啟用後記錄 validated 非 VPN 網路已就緒；觀測恢復耗時 2374 ms、期間失敗 DNS 查詢 0 筆，隨後 `example.com` 經真實 TUN 查詢成功。測試結束確認 Wi-Fi 已恢復啟用、VPN 已停止。原始輸出位於本工作樹 ignored `captures/d09-wifi-recovery-device.txt` 與 `captures/d09-wifi-recovery-logcat.txt`。
 
 整合版另有 `.d04test` 診斷 UI／TCP/TUN 5/5、`.d08test` TLS strict／fallback 與 UDP→TCP 5/5；初次執行時查詢落在 VPN 啟動後約 500 ms 的初始網路 callback debounce 視窗，可能合法回 SERVFAIL，測試已待初始網路狀態穩定再驗證穩態行為。這不代表 Wi-Fi↔行動網路、captive portal、飛航模式或 API 24–27 實機矩陣已完成；裝置目前沒有行動數據或其他測試網路，Issue #42 與 PR #59 保持 In Progress／Draft。
+
+## Android 10 repeated Wi-Fi and airplane recovery (2026-10-02)
+
+Candidate `88f075c` plus the new isolated harness passed `D09WifiRecoveryDeviceTest#repeatedWifiAndAirplaneRecoveryRestoreDns` 1/1 in 18.742 seconds on ASUS_Z01RD / API 29. Three real Wi-Fi off/on cycles and one airplane-plus-Wi-Fi-off → airplane-off-plus-Wi-Fi-on cycle each observed a new recovery log/generation and a valid TUN DNS response with its own transaction ID. The final recovery used generation 22 and took 2473 ms, with zero failed DNS queries during that recovery. This checks actual Wi-Fi recovery, not cellular handoff or per-response proof of generation fencing.
+
+The first harness version passed all three Wi-Fi cycles but timed out after enabling airplane mode because this handset legitimately kept Wi-Fi connected. The final version explicitly disables Wi-Fi while in airplane mode and enables it after leaving airplane mode. Preserve the initial output and logcat as a test-precondition failure, not a product failure or passing airplane test. Both versions restore original airplane/Wi-Fi settings in finally; device readback was airplane=0, Wi-Fi=1.
+
+Raw ignored evidence: `captures/d09-android10-20261001-repeat-flight{,-final}.txt` and corresponding `-logcat.txt`; final `verify.ps1`: `captures/d09-repeat-flight-final-verify.log`. The existing single-outage test remains available. Integrated TLS strict/fallback and UDP→upstream TCP device regression also passed 5/5 in 107.605 seconds (`captures/d09-android10-20261001-strict-tcp.txt`). No production package was replaced.
+
+The 2026-10-04 issue policy supersedes historical full-matrix completion gates: special networks/platform matrices are deferred in #73. D09 still needs #68 candidate-versus-effective-underlay correction, callback regressions, and common-version integration #72. Neither these short radio tests nor the deferred policy closes those code requirements.
