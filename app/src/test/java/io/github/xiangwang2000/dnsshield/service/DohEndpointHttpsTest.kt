@@ -10,6 +10,7 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -98,6 +99,72 @@ class DohEndpointHttpsTest {
         }
     }
 
+    @Test
+    fun cachedEndpointClientReusesConnectionAcrossUniqueQueriesAndRetiresOnChange() = runBlocking {
+        LocalHttpsDns("127.0.0.1").use { first ->
+            LocalHttpsDns("127.0.0.2", first.port).use { second ->
+                val handshakes = AtomicInteger()
+                val base = trustedClient().newBuilder().eventListener(object : EventListener() {
+                    override fun secureConnectEnd(call: Call, handshake: Handshake?) { handshakes.incrementAndGet() }
+                }).build()
+                val primary = endpoint("dns.example.test", first.port, "primary", "127.0.0.1")
+                val backup = endpoint("dns.example.test", second.port, "backup", "127.0.0.2")
+                val configuration = listOf(primary, backup)
+                val cache = DohEndpointClientCache()
+                try {
+                    repeat(5) { lookup(cache.clientFor(base, configuration, primary), primary, "cached-$it.example") }
+                    assertEquals(5, first.paths.size)
+                    assertEquals(1, handshakes.get(), "Unique DNS queries should reuse one HTTPS connection")
+                    println("DOH_POOL_CANDIDATE unique_queries=5 tls=${handshakes.get()}")
+                    lookup(cache.clientFor(base, configuration, backup), backup, "backup.example")
+                    assertEquals(listOf("/backup"), second.paths.toList())
+                    assertEquals(2, handshakes.get())
+                    val edited = primary.copy(bootstrapAddresses = listOf("127.0.0.2"))
+                    lookup(cache.clientFor(base, listOf(edited, backup), edited), edited, "edited-bootstrap.example")
+                    assertEquals(listOf("/backup", "/primary"), second.paths.toList())
+                    assertEquals(3, handshakes.get(), "Bootstrap edits must retire DNS identity")
+                    val nextNetworkBase = base.newBuilder().build()
+                    lookup(cache.clientFor(nextNetworkBase, listOf(edited, backup), edited), edited, "new-network.example")
+                    assertEquals(4, handshakes.get(), "New network/TLS base must retire endpoint clients")
+                } finally { closeClient(base) }
+            }
+        }
+    }
+
+    @Test
+    fun cancellationEndsOnlyTheCallAndCachedClientCanServeNextQuery() = runBlocking {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val calls = AtomicInteger()
+        LocalHttpsDns("127.0.0.1", beforeReply = {
+            if (calls.incrementAndGet() == 1) {
+                entered.countDown()
+                check(release.await(3, java.util.concurrent.TimeUnit.SECONDS))
+            }
+        }).use { server ->
+            val ep = endpoint("dns.example.test", server.port, "dns-query", "127.0.0.1")
+            val base = trustedClient()
+            val cache = DohEndpointClientCache()
+            try {
+                val job = async {
+                    lookup(cache.clientFor(base, listOf(ep), ep), ep, "cancelled.example")
+                }
+                kotlin.test.assertTrue(kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    entered.await(3, java.util.concurrent.TimeUnit.SECONDS)
+                })
+                job.cancel()
+                job.join()
+                kotlin.test.assertTrue(job.isCancelled)
+                release.countDown()
+                lookup(cache.clientFor(base, listOf(ep), ep), ep, "after-cancel.example")
+                assertEquals(2, calls.get())
+            } finally {
+                release.countDown()
+                closeClient(base)
+            }
+        }
+    }
+
     private fun endpoint(host: String, port: Int, path: String, ip: String) =
         DnsDohEndpoint("https://$host:$port/$path", host, listOf(ip), true)
 
@@ -109,14 +176,16 @@ class DohEndpointHttpsTest {
         assertContentEquals(DnsTestMessages.response(bytes), response)
     }
 
-    private class LocalHttpsDns(ip: String, requestedPort: Int = 0) : AutoCloseable {
+    private class LocalHttpsDns(ip: String, requestedPort: Int = 0, private val beforeReply: () -> Unit = {}) : AutoCloseable {
         val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
         private val server = HttpsServer.create(InetSocketAddress(ip, requestedPort), 0).apply {
             httpsConfigurator = HttpsConfigurator(sslContext())
             createContext("/") { exchange ->
                 exchange.use {
                     paths += it.requestURI.path
-                    val response = DnsTestMessages.response(it.requestBody.readBytes())
+                    val request = it.requestBody.readBytes()
+                    beforeReply()
+                    val response = DnsTestMessages.response(request)
                     it.responseHeaders.set("Content-Type", "application/dns-message")
                     it.sendResponseHeaders(200, response.size.toLong())
                     it.responseBody.write(response)

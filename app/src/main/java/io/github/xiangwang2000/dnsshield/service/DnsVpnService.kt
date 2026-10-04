@@ -147,6 +147,7 @@ class DnsVpnService : VpnService() {
 
         // Thread-safe singleton lock for OkHttpClient
         @Volatile private var okHttpClientInstance: OkHttpClient? = null
+        private val dohEndpointClients = DohEndpointClientCache()
 
         fun getOkHttpClient(): OkHttpClient {
             return okHttpClientInstance ?: synchronized(this) {
@@ -1133,13 +1134,13 @@ class DnsVpnService : VpnService() {
 
     private suspend fun performDohLookup(
         endpoint: DnsDohEndpoint,
+        resolverEndpoints: List<DnsDohEndpoint>,
         query: ParsedDnsQuery,
         deadline: DnsRequestDeadline,
         metricsRequest: DnsDiagnosticMetrics.Request
     ): ByteArray? {
         if (deadline.remainingMillis() <= 0L) return null
-        return getOkHttpClient()
-            .forDohEndpoint(endpoint)
+        return dohEndpointClients.clientFor(getOkHttpClient(), resolverEndpoints, endpoint)
             .lookupDoh(
                 endpointUrl = endpoint.url,
                 query = query,
@@ -1271,7 +1272,7 @@ class DnsVpnService : VpnService() {
                     null
                 } else {
                     val response = try {
-                        performDohLookup(endpoint, query, deadline, request)
+                        performDohLookup(endpoint, endpoints, query, deadline, request)
                     } catch (exception: CancellationException) {
                         dohFailureBackoff.cancelAttempt(endpoint.url)
                         throw exception

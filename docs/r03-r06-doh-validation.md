@@ -23,3 +23,16 @@ Five sequential **different DNS questions**, sent to the local HTTPS DNS server 
 [OkHttp 5.4.0 Address source](https://github.com/square/okhttp/blob/parent-5.4.0/okhttp/src/commonJvmAndroid/kotlin/okhttp3/Address.kt#L182-L192) includes DNS equality in connection address compatibility. Each new endpoint DNS lambda has a different identity, consistent with the measured result.
 
 The R03 endpoint-binding change alone still has 5 handshakes. R06 client reuse, configuration/network invalidation, cancellation and integrated strict-mode tests remain pending. No latency/power improvement is claimed. Common candidate/device integration remains tracked in #72; unavailable environment and power A/B remain tracked in #73. No automatic merge or release is performed.
+## R06 candidate client reuse (2026-10-04)
+
+The measured defect warrants a small cache: retain only the current resolver's endpoint clients, keyed by its endpoint/bootstrap configuration and immutable base-client identity. The base identity includes TLS settings; the D09 effective-network path replaces that base on generation change. Retired calls retain their original client and remain subject to the existing service cancellation/stale-response/strict fences. No unbounded per-domain client map or new dependency is introduced.
+
+Local HTTPS candidate result: five different questions, **one TLS handshake**, versus baseline five questions/five handshakes. Switching to the backup connects to its own IP/path. Editing the primary bootstrap to the backup IP creates a fresh connection at that IP; replacing the base client creates a fresh connection again. Cancellation during a controlled blocked response ends that call; a subsequent query through the cached client succeeds. These are deterministic local HTTPS checks, not power measurements.
+
+- Focused `DohEndpointHttpsTest`, `DnsDohHttpClientTest`, `DnsTransportPolicyTest`: PASS (including the retained per-query baseline).
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1`: PASS.
+- `git diff --check`: PASS.
+
+Ignored logs: `captures/r06-https-client-reuse.log`, `captures/r06-final-focused.log`, `captures/r06-final-verify.log`; XML EventListener output under app/build records baseline `tls=5` and candidate `tls=1`.
+
+The standalone branch is based on R03/main; common integration #72 must combine D09/#68's effective-route base-client reset and rerun real strict/UDP/TCP/settings/rules/device cases. Therefore this standalone result does not claim that final network-generation integration is already accepted. Same-device D14 baseline/candidate and deferred power A/B remain separate #47/#73 work. No automatic merge or release.
