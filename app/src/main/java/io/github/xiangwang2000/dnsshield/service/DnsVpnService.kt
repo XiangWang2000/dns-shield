@@ -62,6 +62,7 @@ class DnsVpnService : VpnService() {
         const val ACTION_STOP = "io.github.xiangwang2000.dnsshield.service.STOP"
         const val ACTION_RESTART = "io.github.xiangwang2000.dnsshield.service.RESTART"
         const val ACTION_UPDATE_DNS = "io.github.xiangwang2000.dnsshield.service.UPDATE_DNS"
+        const val EXTRA_RESOLVER_COMMAND_REVISION = "resolverCommandRevision"
         const val ACTION_CLEAR_LOGS = "io.github.xiangwang2000.dnsshield.service.CLEAR_LOGS"
         const val ACTION_RELOAD_DOMAIN_POLICY = "io.github.xiangwang2000.dnsshield.service.RELOAD_DOMAIN_POLICY"
         private const val CHANNEL_ID = "dns_vpn_channel"
@@ -83,6 +84,15 @@ class DnsVpnService : VpnService() {
         val dnsTransportStatusFlow = MutableStateFlow("尚無上游查詢")
         val liveLogsFlow = MutableStateFlow<List<String>>(emptyList())
         private val plaintextFallbackFence = DnsPlaintextFallbackFence()
+
+        private val plaintextFenceCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        fun requestPlaintextFallbackAllowed(resolverId: Int, allowed: Boolean) {
+            plaintextFallbackFence.requestAllowed(resolverId, allowed)
+            if (!allowed) plaintextFenceCleanupScope.launch {
+                plaintextFallbackFence.closeSocketsIfRequestedStrict(resolverId)
+            }
+        }
 
         fun setPlaintextFallbackAllowed(resolverId: Int, allowed: Boolean) {
             plaintextFallbackFence.setAllowed(resolverId, allowed)
@@ -482,7 +492,11 @@ class DnsVpnService : VpnService() {
         data class Start(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
         data class Stop(val startId: Int) : LifecycleCommand()
         data class Restart(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
-        data class UpdateDns(val startId: Int, val resolverId: Int) : LifecycleCommand()
+        data class UpdateDns(
+            val startId: Int,
+            val command: ResolverUpdateCommand,
+            val queueBarrier: Deferred<Unit>
+        ) : LifecycleCommand()
         data class ClearLogs(val startId: Int) : LifecycleCommand()
         data class TunnelEnded(
             val generation: Long,
@@ -676,17 +690,30 @@ class DnsVpnService : VpnService() {
                         }
                     }
                     is LifecycleCommand.UpdateDns -> {
-                        val server = withContext(Dispatchers.IO) {
-                            AppDatabase.getDatabase(this@DnsVpnService)
-                                .dnsDao()
-                                .getDnsServerById(command.resolverId)
-                        }
-                        if (server != null) {
-                            updateResolverState(server)
-                            activeDnsFlow.value = "${server.name} (${server.primaryIp})"
-                            addLog("[DNS 變更同步] 已即時套用新 DNS 設定：${server.name} (${server.primaryIp})")
-                        } else {
-                            addLog("[DNS 變更同步] 找不到 DNS 設定 id=${command.resolverId}")
+                        try {
+                            command.queueBarrier.await()
+                            val applied = ResolverCommandRuntime.serviceFence.applyLatestActive(
+                                command = command.command,
+                                readActive = {
+                                    withContext(Dispatchers.IO) {
+                                        AppDatabase.getDatabase(this@DnsVpnService)
+                                            .dnsDao()
+                                            .getActiveDnsServer()
+                                    }
+                                },
+                                apply = { server ->
+                                    if (upstreamDnsServer != server) updateResolverState(server)
+                                    activeDnsFlow.value = "${server.name} (${server.primaryIp})"
+                                    addLog("[DNS 變更同步] 已即時套用新 DNS 設定：${server.name} (${server.primaryIp})")
+                                }
+                            )
+                            if (applied == false) {
+                                addLog("[DNS 變更同步] 找不到目前啟用的 DNS 設定")
+                            }
+                        } catch (exception: CancellationException) {
+                            throw exception
+                        } catch (exception: Exception) {
+                            Log.e(TAG, "Failed to apply queued DNS update", exception)
                         }
                         stopSelfIfIdle(command.startId)
                     }
@@ -720,9 +747,19 @@ class DnsVpnService : VpnService() {
             }
             ACTION_UPDATE_DNS -> {
                 val resolverId = intent.getIntExtra("resolverId", -1)
-                if (resolverId >= 0) {
-                    lifecycleCommands.trySend(LifecycleCommand.UpdateDns(startId, resolverId))
+                val requestedRevision = if (intent.hasExtra(EXTRA_RESOLVER_COMMAND_REVISION)) {
+                    intent.getLongExtra(EXTRA_RESOLVER_COMMAND_REVISION, 0L)
+                } else {
+                    null
                 }
+                val submission = ResolverCommandRuntime.coordinator.submitReceived(requestedRevision) { }
+                lifecycleCommands.trySend(
+                    LifecycleCommand.UpdateDns(
+                        startId,
+                        ResolverUpdateCommand(resolverId, submission.revision),
+                        submission.result
+                    )
+                )
             }
             ACTION_CLEAR_LOGS -> {
                 lifecycleCommands.trySend(LifecycleCommand.ClearLogs(startId))
