@@ -25,6 +25,54 @@ class RuntimeDomainPolicyTest {
     }
 
     @Test
+    fun userRulesApplyAcrossEveryRuntimeAssemblyPath() {
+        val userRules = listOf(
+            UserDomainRule("admob.com", DomainRuleAction.ALLOW, includeSubdomains = true),
+            UserDomainRule("github.com", DomainRuleAction.ALLOW, includeSubdomains = true),
+            UserDomainRule("user-block.example", DomainRuleAction.BLOCK, includeSubdomains = true),
+            UserDomainRule("priority.example", DomainRuleAction.ALLOW, includeSubdomains = true),
+            UserDomainRule("priority.example", DomainRuleAction.BLOCK, includeSubdomains = false)
+        )
+
+        val validPrivateFiles = createFilesDirectory()
+        writeSharedFixture(RuntimeDomainPolicy.activeBlocklistFile(validPrivateFiles))
+        val damagedPrivateFiles = createFilesDirectory()
+        val damagedPrivateFile = RuntimeDomainPolicy.activeBlocklistFile(damagedPrivateFiles)
+        prepareParentDirectory(damagedPrivateFile)
+        damagedPrivateFile.writeText("invalid override")
+
+        val assemblies = listOf(
+            "valid private" to RuntimeDomainPolicy.assemble(
+                filesDirectory = validPrivateFiles,
+                userRules = userRules
+            ),
+            "bundled" to RuntimeDomainPolicy.assemble(
+                filesDirectory = createFilesDirectory(),
+                userRules = userRules,
+                loadBundledBlocklist = ::loadSharedFixture
+            ),
+            "private fallback to bundled" to RuntimeDomainPolicy.assemble(
+                filesDirectory = damagedPrivateFiles,
+                userRules = userRules,
+                loadBundledBlocklist = ::loadSharedFixture
+            ),
+            "private and bundled rejected" to RuntimeDomainPolicy.assemble(
+                filesDirectory = damagedPrivateFiles,
+                userRules = userRules,
+                loadBundledBlocklist = { error("APK asset checksum mismatch") }
+            ),
+            "no provider" to RuntimeDomainPolicy.assemble(
+                filesDirectory = createFilesDirectory(),
+                userRules = userRules
+            )
+        )
+
+        assemblies.forEach { (path, assembly) ->
+            assertUserRulesApply(path, assembly)
+        }
+    }
+
+    @Test
     fun missingActiveFileIsNotConfiguredAndDoesNotCallLoaderOrResolver() {
         val filesDirectory = createFilesDirectory()
         var loaderCalled = false
@@ -244,5 +292,16 @@ class RuntimeDomainPolicyTest {
             directory = current.parent
         }
         error("Unable to locate repository fixture: $relative")
+    }
+
+    private fun assertUserRulesApply(path: String, assembly: DomainPolicyAssembly) {
+        assertFalse(assembly.matcher.shouldBlock("admob.com"), "$path: ALLOW overrides built-in blocking")
+        assertFalse(assembly.matcher.shouldBlock("github.com"), "$path: ALLOW overrides the compiled blocklist")
+        assertTrue(assembly.matcher.shouldBlock("user-block.example"), "$path: BLOCK is applied")
+        assertTrue(assembly.matcher.shouldBlock("priority.example"), "$path: exact BLOCK wins at the apex")
+        assertFalse(
+            assembly.matcher.shouldBlock("child.priority.example"),
+            "$path: includeSubdomains ALLOW applies below the apex"
+        )
     }
 }

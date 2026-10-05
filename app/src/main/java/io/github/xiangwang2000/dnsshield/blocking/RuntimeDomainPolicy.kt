@@ -63,6 +63,7 @@ object RuntimeDomainPolicy {
             DomainPolicyAssembler.assemble(
                 compiledBlocklistFile = file,
                 allowlist = allowlist,
+                userRules = userRules,
                 builtInMatcher = builtInMatcher,
                 loadCompiledBlocklist = loadCompiledBlocklist,
                 registrableDomainResolverProvider = registrableDomainResolverProvider
@@ -121,6 +122,7 @@ object RuntimeDomainPolicy {
 
         return DomainPolicyAssembler.assemble(
             allowlist = allowlist,
+            userRules = userRules,
             builtInMatcher = builtInMatcher
         )
     }
