@@ -88,4 +88,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "D04 Gradle verification failed with exit code $LASTEXITCODE."
 }
 
+Write-Host "==> Isolated D03 IPv6 pass-through acceptance APKs"
+& .\gradlew.bat --no-daemon --console=plain -PandroidTestBuildType=d03test :app:assembleD03test :app:assembleD03testAndroidTest
+if ($LASTEXITCODE -ne 0) { throw "D03 APK build failed: $LASTEXITCODE" }
+
 Write-Host "Verification passed."

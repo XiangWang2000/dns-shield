@@ -839,6 +839,8 @@ class DnsVpnService : VpnService() {
             val builder = Builder()
                 .setSession("DNS Shield")
                 .setBlocking(true)
+                // This DNS-only tunnel handles IPv4; pass IPv6 through the underlying network.
+                .allowFamily(android.system.OsConstants.AF_INET6)
                 .setMtu(DnsResponsePacketBuilder.TUN_MTU_BYTES)
                 .addAddress(VPN_IP, 32)
                 .addRoute(DUMMY_DNS_IP, 32)
