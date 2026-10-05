@@ -118,7 +118,7 @@ class DnsHotPathInstrumentedBenchmarkTest {
         var hash = 0L
         repeat(KEY_REPETITIONS) {
             for (payload in payloads) {
-                val key = DnsVpnService.Companion.DnsQueryKey(payload, 7, policyAssembly)
+                val key = DnsVpnService.Companion.DnsQueryKey(payload, 7, 0L, policyAssembly)
                 repeat(HASH_LOOKUPS_PER_QUERY) { hash += key.hashCode() }
             }
         }

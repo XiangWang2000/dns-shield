@@ -143,6 +143,8 @@ class DnsUpstreamTcpTunInstrumentedTest {
                 }
             }
 
+            // D09 debounces the initial underlay callbacks before steady-state TCP fallback.
+            delay(1_000)
             val firstQuery = dnsQuery(domain, 41)
             val first = sendThroughTun(firstQuery)
             val firstParsed = (DnsMessageValidator.parseQuery(firstQuery) as DnsQueryParseResult.Valid).query

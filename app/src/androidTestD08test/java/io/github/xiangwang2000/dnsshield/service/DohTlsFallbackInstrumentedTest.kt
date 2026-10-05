@@ -101,6 +101,8 @@ class DohTlsFallbackInstrumentedTest {
             ensureVpnConsent(context)
             startVpn(context)
             awaitActiveVpnNetwork(context)
+            // D09 debounces the initial underlay callbacks before steady-state transport assertions.
+            delay(1_000)
 
             val transactionId = System.nanoTime().toInt() and 0xffff
             val queryStartMillis = android.os.SystemClock.elapsedRealtime()

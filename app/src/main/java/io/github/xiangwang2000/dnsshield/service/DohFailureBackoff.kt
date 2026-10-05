@@ -17,6 +17,7 @@ internal class DohFailureBackoff(
     private val cooldownNanos = cooldownMillis * NANOS_PER_MILLISECOND
     private val lock = Any()
     private val states = HashMap<String, State>()
+    private var activeGeneration = 0L
 
     init {
         require(failureThreshold > 0)
@@ -24,6 +25,15 @@ internal class DohFailureBackoff(
     }
 
     fun tryAcquire(endpoint: String): Boolean = synchronized(lock) {
+        tryAcquireLocked(endpoint)
+    }
+
+    fun tryAcquire(endpoint: String, generation: Long): Boolean = synchronized(lock) {
+        if (generation != activeGeneration) return@synchronized false
+        tryAcquireLocked(endpoint)
+    }
+
+    private fun tryAcquireLocked(endpoint: String): Boolean {
         val state = states[endpoint] ?: return true
         if (state.retryAfterNanos == 0L) return true
 
@@ -31,7 +41,7 @@ internal class DohFailureBackoff(
         if (now < state.retryAfterNanos || state.probeInFlight) return false
 
         state.probeInFlight = true
-        true
+        return true
     }
 
     fun recordSuccess(endpoint: String) {
@@ -40,26 +50,57 @@ internal class DohFailureBackoff(
         }
     }
 
+    fun recordSuccess(endpoint: String, generation: Long) {
+        synchronized(lock) {
+            if (generation == activeGeneration) states.remove(endpoint)
+        }
+    }
+
     fun recordFailure(endpoint: String) {
         synchronized(lock) {
-            val now = nanoTime()
-            val state = states.getOrPut(endpoint, ::State)
+            recordFailureLocked(endpoint)
+        }
+    }
 
-            if (state.retryAfterNanos > now && !state.probeInFlight) {
-                return
-            }
+    fun recordFailure(endpoint: String, generation: Long) {
+        synchronized(lock) {
+            if (generation == activeGeneration) recordFailureLocked(endpoint)
+        }
+    }
 
-            state.probeInFlight = false
-            state.consecutiveFailures++
-            if (state.consecutiveFailures >= failureThreshold) {
-                state.retryAfterNanos = now + cooldownNanos
-            }
+    private fun recordFailureLocked(endpoint: String) {
+        val now = nanoTime()
+        val state = states.getOrPut(endpoint, ::State)
+
+        if (state.retryAfterNanos > now && !state.probeInFlight) {
+            return
+        }
+
+        state.probeInFlight = false
+        state.consecutiveFailures++
+        if (state.consecutiveFailures >= failureThreshold) {
+            state.retryAfterNanos = now + cooldownNanos
         }
     }
 
     fun cancelAttempt(endpoint: String) {
         synchronized(lock) {
             states[endpoint]?.probeInFlight = false
+        }
+    }
+
+    fun cancelAttempt(endpoint: String, generation: Long) {
+        synchronized(lock) {
+            if (generation == activeGeneration) states[endpoint]?.probeInFlight = false
+        }
+    }
+
+    fun resetForGeneration(generation: Long) {
+        synchronized(lock) {
+            if (generation != activeGeneration) {
+                activeGeneration = generation
+                states.clear()
+            }
         }
     }
 
