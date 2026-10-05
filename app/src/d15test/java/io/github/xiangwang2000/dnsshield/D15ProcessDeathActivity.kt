@@ -50,6 +50,8 @@ class D15ProcessDeathActivity : Activity() {
             } else {
                 check(DnsVpnService.lifecycleStateFlow.value == VpnLifecycleState.STOPPED)
             }
+            // Remove the activity record before SIGKILL so Android cannot relaunch this test action.
+            finish()
             Thread({
                 try {
                     runBlocking {
@@ -85,6 +87,7 @@ class D15ProcessDeathActivity : Activity() {
             store.stageAuthorizationRevoke()
         }
         val processId = Process.myPid()
+        finish()
         Thread({
             val persistStartedAt = SystemClock.elapsedRealtime()
             val result = runCatching { runBlocking { store.persist(intentWrite) } }

@@ -40,12 +40,21 @@ class Ipv6PassThroughTest {
         stopped()
         probe("before", includeIpv6)
         try {
+            DnsVpnService.setUiForeground(true)
+            DnsVpnService.clearLogs()
             command(DnsVpnService.ACTION_START)
             withTimeout(30_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.RUNNING } }
+            withTimeout(15_000) {
+                DnsVpnService.liveLogsFlow.first { lines ->
+                    lines.any { "[網路狀態] 網路連線正常" in it }
+                }
+            }
             probe("vpn-on", includeIpv6)
             query("10.0.0.1", 28)
             println("D03 virtual IPv4 DNS AAAA response: PASS")
-        } finally { stopped() }
+        } finally {
+            try { stopped() } finally { DnsVpnService.setUiForeground(false) }
+        }
         probe("after", includeIpv6)
     }
 
