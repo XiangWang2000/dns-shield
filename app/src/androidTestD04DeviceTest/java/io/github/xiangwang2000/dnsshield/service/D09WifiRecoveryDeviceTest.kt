@@ -55,7 +55,7 @@ class D09WifiRecoveryDeviceTest {
             }
             withTimeout(20_000) {
                 DnsVpnService.liveLogsFlow.first { lines ->
-                    lines.any { it.contains("[網路狀態] 目前沒有可用網路") }
+                    lines.any { isUnavailableNetworkStatus(it) }
                 }
             }
 
@@ -80,7 +80,7 @@ class D09WifiRecoveryDeviceTest {
                 assertTrue("Recovered DNS response must match the query", DnsMessageValidator.isValidResponse(payload, parsed))
                 assertEquals("Recovered upstream query must succeed", 0, payload[3].toInt() and 15)
             }
-            println("D09_WIFI_RECOVERY=offline observed, validated Wi-Fi recovered, DNS response succeeded")
+            println("D09_WIFI_RECOVERY=Wi-Fi unavailable observed, validated Wi-Fi recovered, DNS response succeeded")
         } finally {
             try {
                 automation.executeShellCommand("svc wifi enable").close()
@@ -135,11 +135,11 @@ class D09WifiRecoveryDeviceTest {
                 )
             }
 
-            val offlineLogs = offlineLogCount()
+            val offlineLogs = unavailableStatusCount()
             setAirplaneMode(automation, true)
             runShell(automation, "svc wifi disable")
             awaitWifiUnavailable(connectivity)
-            awaitOfflineLogAfter(offlineLogs)
+            awaitUnavailableStatusAfter(offlineLogs)
             val logsBeforeAirplaneRecovery = DnsVpnService.liveLogsFlow.value
             val airplaneGenerationBeforeRecovery = latestRecoveryGeneration(logsBeforeAirplaneRecovery) ?: recoveryGeneration
             val airplaneRecoveryCountBefore = recoveryLogCount(logsBeforeAirplaneRecovery)
@@ -177,10 +177,10 @@ class D09WifiRecoveryDeviceTest {
         previousGeneration: Long?,
         transactionIdBase: Int
     ): Long {
-        val offlineLogs = offlineLogCount()
+        val offlineLogs = unavailableStatusCount()
         runShell(automation, "svc wifi disable")
         awaitWifiUnavailable(connectivity)
-        awaitOfflineLogAfter(offlineLogs)
+        awaitUnavailableStatusAfter(offlineLogs)
         val logsBeforeRecovery = DnsVpnService.liveLogsFlow.value
         val generationBeforeRecovery = latestRecoveryGeneration(logsBeforeRecovery) ?: previousGeneration
         val recoveryCountBefore = recoveryLogCount(logsBeforeRecovery)
@@ -230,13 +230,17 @@ class D09WifiRecoveryDeviceTest {
         }
     }
 
-    private fun offlineLogCount(): Int =
-        DnsVpnService.liveLogsFlow.value.count { it.contains("[網路狀態] 目前沒有可用網路") }
+    private fun isUnavailableNetworkStatus(message: String): Boolean =
+        message.contains("[網路狀態] 目前沒有可用網路") ||
+            message.contains("[網路狀態] 正在確認目前選用的非 VPN 網路")
 
-    private suspend fun awaitOfflineLogAfter(previousCount: Int) {
+    private fun unavailableStatusCount(): Int =
+        DnsVpnService.liveLogsFlow.value.count { isUnavailableNetworkStatus(it) }
+
+    private suspend fun awaitUnavailableStatusAfter(previousCount: Int) {
         withTimeout(20_000) {
             DnsVpnService.liveLogsFlow.first { lines ->
-                lines.count { it.contains("[網路狀態] 目前沒有可用網路") } > previousCount
+                lines.count { isUnavailableNetworkStatus(it) } > previousCount
             }
         }
     }

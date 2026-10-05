@@ -824,7 +824,7 @@ class DnsVpnService : VpnService() {
             token = registration.token,
             state = initialState,
             generation = currentUnderlyingNetworkGeneration(),
-            networkChanged = false
+            dnsStateFenced = false
         )
 
         try {
@@ -888,33 +888,41 @@ class DnsVpnService : VpnService() {
     ) {
         val transition: UnderlyingNetworkTransition
         val generation: Long
+        val dnsStateFenced: Boolean
         synchronized(underlyingNetworkEventLock) {
             if (
-                token != networkCallbackToken ||
-                networkCallbackRegistration?.token != token ||
-                !isVpnRunning
+                !isCurrentUnderlyingNetworkCallback(
+                    token = token,
+                    currentToken = networkCallbackToken,
+                    registeredToken = networkCallbackRegistration?.token,
+                    isVpnRunning = isVpnRunning
+                )
             ) return
 
             transition = update(underlyingNetworkReducer) ?: return
             networkRecoveryTracker.observe(transition, System.nanoTime())
-            generation = synchronized(dnsStateLock) {
-                underlyingNetworkGeneration++
-                underlyingNetworkChangePending = true
-                clearDnsAnswerCacheLocked()
-                underlyingNetworkGeneration
-            }
-            dohFailureBackoff.resetForGeneration(generation)
-            activeDnsLeaders.forEach { (job, state) ->
-                if (state.underlyingNetworkGeneration != generation) {
-                    job.cancel(CancellationException("Underlying network changed"))
+            var currentGeneration = currentUnderlyingNetworkGeneration()
+            dnsStateFenced = transition.runIfDnsStateFenceRequired {
+                currentGeneration = synchronized(dnsStateLock) {
+                    underlyingNetworkGeneration++
+                    underlyingNetworkChangePending = true
+                    clearDnsAnswerCacheLocked()
+                    underlyingNetworkGeneration
+                }
+                dohFailureBackoff.resetForGeneration(currentGeneration)
+                activeDnsLeaders.forEach { (job, state) ->
+                    if (state.underlyingNetworkGeneration != currentGeneration) {
+                        job.cancel(CancellationException("Underlying network changed"))
+                    }
                 }
             }
+            generation = currentGeneration
         }
         scheduleNetworkStatusUpdate(
             token = token,
             state = transition.current,
             generation = generation,
-            networkChanged = true
+            dnsStateFenced = dnsStateFenced
         )
     }
 
@@ -926,23 +934,46 @@ class DnsVpnService : VpnService() {
         token: Long,
         state: UnderlyingNetworkSnapshot,
         generation: Long,
-        networkChanged: Boolean
+        dnsStateFenced: Boolean
     ) {
         synchronized(networkCallbackLock) {
             if (token != networkCallbackToken || networkCallbackRegistration?.token != token) return
+            val routeChangePending = synchronized(dnsStateLock) { underlyingNetworkChangePending }
+            if (!shouldReplaceNetworkStatusDebounce(routeChangePending, dnsStateFenced)) return
             networkStatusDebounceJob?.cancel()
             networkStatusDebounceJob = serviceScope.launch {
                 delay(NETWORK_CHANGE_DEBOUNCE_MS)
                 if (token != networkCallbackToken || !isVpnRunning) return@launch
                 if (generation != currentUnderlyingNetworkGeneration()) return@launch
                 val currentState = underlyingNetworkReducer.snapshot()
-                if (currentState != state) return@launch
-                if (networkChanged) {
+                if (!dnsStateFenced && currentState != state) return@launch
+                if (dnsStateFenced) {
                     resetOkHttpClientForUnderlyingNetworkChange()
+                }
+
+                val latestState = underlyingNetworkReducer.snapshot()
+                val recoveryMeasurement = if (
+                    latestState.connectivity == UnderlyingNetworkConnectivity.ONLINE
+                ) completeNetworkRecoveryMeasurement() else null
+                addLog(networkStatusMessage(latestState, generation, dnsStateFenced, recoveryMeasurement))
+                if (lifecycleStateFlow.value == VpnLifecycleState.RUNNING) {
+                    runCatching {
+                        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                        manager.notify(NOTIFICATION_ID, createNotification(notificationText(VpnLifecycleState.RUNNING)))
+                    }.onFailure { exception ->
+                        Log.w(TAG, "Unable to refresh notification after network change", exception)
+                    }
+                }
+                if (dnsStateFenced) {
                     val released = synchronized(dnsStateLock) {
                         if (
                             generation != underlyingNetworkGeneration ||
-                            underlyingNetworkReducer.snapshot() != currentState
+                            !isCurrentUnderlyingNetworkCallback(
+                                token = token,
+                                currentToken = networkCallbackToken,
+                                registeredToken = networkCallbackRegistration?.token,
+                                isVpnRunning = isVpnRunning
+                            )
                         ) {
                             false
                         } else {
@@ -952,19 +983,6 @@ class DnsVpnService : VpnService() {
                     }
                     if (!released) return@launch
                 }
-
-                val recoveryMeasurement = if (
-                    currentState.connectivity == UnderlyingNetworkConnectivity.ONLINE
-                ) completeNetworkRecoveryMeasurement() else null
-                addLog(networkStatusMessage(currentState, generation, networkChanged, recoveryMeasurement))
-                if (lifecycleStateFlow.value == VpnLifecycleState.RUNNING) {
-                    runCatching {
-                        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                        manager.notify(NOTIFICATION_ID, createNotification(notificationText(VpnLifecycleState.RUNNING)))
-                    }.onFailure { exception ->
-                        Log.w(TAG, "Unable to refresh notification after network change", exception)
-                    }
-                }
             }
         }
     }
@@ -972,12 +990,12 @@ class DnsVpnService : VpnService() {
     private fun networkStatusMessage(
         state: UnderlyingNetworkSnapshot,
         generation: Long,
-        networkChanged: Boolean,
+        dnsStateFenced: Boolean,
         recoveryMeasurement: NetworkRecoveryMeasurement?
     ): String {
         val primary = synchronized(dnsStateLock) { upstreamDnsServer.primaryIp }
-        val recovery = if (networkChanged) {
-            "網路已切換，DNS 快取已清除、舊網路查詢已取消並重設 DoH 退避。"
+        val recovery = if (dnsStateFenced) {
+            "網路狀態已更新，DNS 快取已清除、舊狀態查詢已取消並重設 DoH 退避。"
         } else {
             ""
         }
@@ -985,6 +1003,8 @@ class DnsVpnService : VpnService() {
         return when (state.connectivity) {
             UnderlyingNetworkConnectivity.OFFLINE ->
                 "[網路狀態] 目前沒有可用網路，DNS 查詢會暫時失敗。$recovery$retainedResolver"
+            UnderlyingNetworkConnectivity.UNKNOWN ->
+                "[網路狀態] 正在確認目前選用的非 VPN 網路；暫不判定離線或連線正常。$recovery$retainedResolver"
             UnderlyingNetworkConnectivity.CONNECTING ->
                 "[網路狀態] 網路正在連線或檢查可用性。$recovery$retainedResolver"
             UnderlyingNetworkConnectivity.CAPTIVE_PORTAL ->
@@ -1924,6 +1944,7 @@ class DnsVpnService : VpnService() {
             networkCallbackRegistration == null -> "DNS Shield 防護中"
             else -> when (underlyingNetworkReducer.snapshot().connectivity) {
                 UnderlyingNetworkConnectivity.OFFLINE -> "DNS Shield 防護中，目前離線"
+                UnderlyingNetworkConnectivity.UNKNOWN -> "DNS Shield 防護中，正在確認目前選用的網路"
                 UnderlyingNetworkConnectivity.CONNECTING -> "DNS Shield 防護中，正在確認網路連線"
                 UnderlyingNetworkConnectivity.CAPTIVE_PORTAL -> "DNS Shield 防護中，網路需要登入"
                 UnderlyingNetworkConnectivity.ONLINE -> "DNS Shield 防護中"
