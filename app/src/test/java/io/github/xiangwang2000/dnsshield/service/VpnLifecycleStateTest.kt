@@ -65,6 +65,60 @@ class VpnLifecycleStateTest {
     }
 
     @Test
+    fun idleCleanupWaitsForQueuedStopToPersistAfterAnActiveStart() {
+        val commands = VpnLifecycleCommandTracker()
+        var persistedDesiredState: Boolean? = null
+        var lifecycleState = VpnLifecycleState.STOPPED
+        var serviceStopped = false
+
+        commands.commandEnqueued() // Explicit START is active in the actor.
+        commands.commandEnqueued() // Explicit STOP is queued behind it.
+
+        assertEquals(null, commands.requestIdleStop(12, lifecycleState)) // An ignored system start arrives.
+        assertEquals(null, commands.requestIdleStop(11, lifecycleState)) // The older STOP reaches cleanup.
+        assertEquals(2, commands.pendingCommandCount())
+
+        persistedDesiredState = true // START's durable write finishes before STOP is processed.
+        assertEquals(null, commands.commandCompleted())
+        assertFalse(serviceStopped)
+
+        persistedDesiredState = false // STOP's durable write and tunnel cleanup finish.
+        lifecycleState = VpnLifecycleState.STOPPED
+        val deferredStartId = commands.commandCompleted()
+
+        assertEquals(12, deferredStartId)
+        assertEquals(0, commands.pendingCommandCount())
+        val eligibleStartId = commands.requestIdleStop(deferredStartId!!, lifecycleState)
+        if (eligibleStartId != null) serviceStopped = true
+
+        assertEquals(false, persistedDesiredState)
+        assertTrue(serviceStopped)
+    }
+
+    @Test
+    fun oldRevokeCleanupCannotStopANewerStartedVpn() {
+        val commands = VpnLifecycleCommandTracker()
+        var lifecycleState = VpnLifecycleState.STOPPED
+        var serviceStopped = false
+
+        commands.commandEnqueued() // Revoke cleanup is active and requests an idle stop.
+        assertEquals(null, commands.requestIdleStop(20, lifecycleState))
+        commands.commandEnqueued() // A newer explicit START is already queued.
+
+        assertEquals(null, commands.commandCompleted()) // Revoke cleanup finishes first.
+        lifecycleState = VpnLifecycleState.RUNNING // The queued START completes.
+        val deferredStartId = commands.commandCompleted()
+
+        assertEquals(20, deferredStartId)
+        assertEquals(0, commands.pendingCommandCount())
+        val eligibleStartId = commands.requestIdleStop(deferredStartId!!, lifecycleState)
+        if (eligibleStartId != null) serviceStopped = true
+
+        assertFalse(serviceStopped)
+        assertEquals(VpnLifecycleState.RUNNING, lifecycleState)
+    }
+
+    @Test
     fun staleTunnelEndedCallbackCannotStopANewerOrNonRunningTunnel() {
         val oldDescriptor = Any()
         val currentDescriptor = Any()

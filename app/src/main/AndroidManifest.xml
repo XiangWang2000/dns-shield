@@ -40,7 +40,16 @@
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
+            <meta-data
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="true" />
         </service>
+        <!-- A separate started FGS record survives the framework's VPN-unbind death race. -->
+        <service
+            android:name=".service.VpnRecoveryService"
+            android:foregroundServiceType="systemExempted"
+            android:exported="false"
+            tools:ignore="ForegroundServicePermission" />
     </application>
 
 </manifest>

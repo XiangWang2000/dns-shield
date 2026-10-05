@@ -31,6 +31,10 @@ val releaseSigningReady = listOf(
 val releaseRequested = gradle.startParameter.taskNames.any {
   it.contains("release", ignoreCase = true)
 }
+val d15InstrumentationRequested = gradle.startParameter.taskNames.any {
+  it.contains("D15testAndroidTest", ignoreCase = true) ||
+    it.contains("connectedD15test", ignoreCase = true)
+}
 
 if (releaseRequested && !releaseSigningReady) {
   throw GradleException(
@@ -68,6 +72,7 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     buildConfigField("boolean", "D14_DEVICE_TEST", "false")
     buildConfigField("int", "DNS_UPSTREAM_PORT", "53")
+    if (d15InstrumentationRequested) testBuildType = "d15test"
     if (d08InstrumentationRequested) testBuildType = "d08test"
     if (d07InstrumentationRequested) testBuildType = "d07test"
     if (d12InstrumentationRequested) testBuildType = "d12test"
@@ -128,6 +133,11 @@ android {
       applicationIdSuffix = ".d14test"
       versionNameSuffix = "-d14test"
       buildConfigField("boolean", "D14_DEVICE_TEST", "true")
+      matchingFallbacks += listOf("debug")
+    }
+    create("d15test") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d15test"
       matchingFallbacks += listOf("debug")
     }
     create("d04DeviceTest") {
