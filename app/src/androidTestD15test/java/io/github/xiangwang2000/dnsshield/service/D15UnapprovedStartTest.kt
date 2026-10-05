@@ -13,6 +13,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -32,7 +33,8 @@ class D15UnapprovedStartTest {
                 delay(1_000)
                 assertFalse("Failed startup must remove the recovery keeper", hasKeeper(context))
             }
-            VpnUserIntentStore(preferences).markAuthorizationRevoke()
+            val intentStore = VpnUserIntentStore(preferences)
+            assertTrue(intentStore.persist(intentStore.stageAuthorizationRevoke()))
             context.startService(Intent(context, VpnRecoveryService::class.java))
             delay(1_000)
             assertFalse("A late recovery start must honor revoke", hasKeeper(context))

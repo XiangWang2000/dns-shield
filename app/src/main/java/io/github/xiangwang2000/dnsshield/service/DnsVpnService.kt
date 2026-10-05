@@ -537,19 +537,57 @@ class DnsVpnService : VpnService() {
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.IO)
     private val lifecycleCommands = Channel<LifecycleCommand>(Channel.UNLIMITED)
     private val lifecycleRequests = VpnLifecycleRequestTracker()
+    private val lifecycleCommandTracker = VpnLifecycleCommandTracker()
+    private val lifecycleDispatchLock = Any()
     private val userIntentStore by lazy {
         VpnUserIntentStore(
             getSharedPreferences(VPN_SERVICE_PREFERENCES, Context.MODE_PRIVATE)
         )
     }
+    @Volatile
     private var latestLifecycleStartId = 0
+
+    private fun logUserIntentPersistenceFailure(
+        action: String,
+        consequence: String,
+        exception: Exception? = null
+    ) {
+        val message = "Failed to persist explicit VPN $action intent; $consequence"
+        if (exception == null) Log.e(TAG, message) else Log.e(TAG, message, exception)
+        addLog(message)
+    }
+
+    private fun enqueueLifecycleCommand(command: LifecycleCommand) {
+        synchronized(lifecycleDispatchLock) {
+            lifecycleCommandTracker.commandEnqueued()
+            val result = lifecycleCommands.trySend(command)
+            if (result.isFailure) {
+                Log.e(TAG, "Failed to queue VPN lifecycle command", result.exceptionOrNull())
+                lifecycleCommandTracker.commandCompleted()?.let { startId ->
+                    serviceScope.launch(Dispatchers.Main.immediate) { stopSelfIfIdle(startId) }
+                }
+            }
+        }
+    }
+
+    private fun completeLifecycleCommand() {
+        lifecycleCommandTracker.commandCompleted()?.let(::stopSelfIfIdle)
+    }
 
     private fun systemAlwaysOnEnabled(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isAlwaysOn
 
     private sealed class LifecycleCommand {
-        data class Start(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
-        data class Stop(val startId: Int) : LifecycleCommand()
+        data class Start(
+            val startId: Int,
+            val requestGeneration: Long,
+            val intentWrite: VpnUserIntentWrite? = null
+        ) : LifecycleCommand()
+        data class Stop(
+            val startId: Int,
+            val intentWrite: VpnUserIntentWrite,
+            val revoked: Boolean = false
+        ) : LifecycleCommand()
         data class Restart(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
         data class UpdateDns(val startId: Int, val resolverId: Int) : LifecycleCommand()
         data class ClearLogs(val startId: Int) : LifecycleCommand()
@@ -1103,44 +1141,60 @@ class DnsVpnService : VpnService() {
         createNotificationChannel()
         serviceScope.launch(Dispatchers.Main.immediate) {
             for (command in lifecycleCommands) {
-                when (command) {
-                    is LifecycleCommand.Start -> {
-                        startVpn(command.requestGeneration)
-                        if (lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
+                try {
+                    when (command) {
+                        is LifecycleCommand.Start -> {
+                            val intentPersisted = command.intentWrite?.let { persistExplicitStart(it) } ?: true
+                            if (intentPersisted && isCurrentStartRequest(command.requestGeneration)) {
+                                startVpn(command.requestGeneration)
+                            } else if (
+                                lifecycleStateFlow.value == VpnLifecycleState.STOPPED ||
+                                lifecycleStateFlow.value == VpnLifecycleState.FAILED
+                            ) {
+                                stopSelfIfIdle(command.startId)
+                            }
+                        }
+                        is LifecycleCommand.Stop -> {
+                            persistUserIntent(
+                                command.intentWrite,
+                                action = if (command.revoked) "revoke" else "stop",
+                                consequence = "VPN shutdown will continue"
+                            )
+                            stopVpn()
                             stopSelfIfIdle(command.startId)
                         }
-                    }
-                    is LifecycleCommand.Stop -> {
-                        stopVpn()
-                        // A later START or RESTART may already be queued under a newer startId.
-                        stopSelfResult(command.startId)
-                    }
-                    is LifecycleCommand.Restart -> {
-                        restartTunnel(command.requestGeneration)
-                        if (lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
+                        is LifecycleCommand.Restart -> {
+                            if (isCurrentStartRequest(command.requestGeneration)) {
+                                restartTunnel(command.requestGeneration)
+                            }
+                            if (lifecycleStateFlow.value == VpnLifecycleState.STOPPED ||
+                                lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
+                                stopSelfIfIdle(command.startId)
+                            }
+                        }
+                        is LifecycleCommand.UpdateDns -> {
+                            val server = withContext(Dispatchers.IO) {
+                                AppDatabase.getDatabase(this@DnsVpnService)
+                                    .dnsDao()
+                                    .getDnsServerById(command.resolverId)
+                            }
+                            if (server != null) {
+                                updateResolverState(server)
+                                activeDnsFlow.value = "${server.name} (${server.primaryIp})"
+                                addLog("[DNS 變更同步] 已即時套用新 DNS 設定：${server.name} (${server.primaryIp})")
+                            } else {
+                                addLog("[DNS 變更同步] 找不到 DNS 設定 id=${command.resolverId}")
+                            }
                             stopSelfIfIdle(command.startId)
                         }
-                    }
-                    is LifecycleCommand.UpdateDns -> {
-                        val server = withContext(Dispatchers.IO) {
-                            AppDatabase.getDatabase(this@DnsVpnService)
-                                .dnsDao()
-                                .getDnsServerById(command.resolverId)
+                        is LifecycleCommand.ClearLogs -> {
+                            clearLogs()
+                            stopSelfIfIdle(command.startId)
                         }
-                        if (server != null) {
-                            updateResolverState(server)
-                            activeDnsFlow.value = "${server.name} (${server.primaryIp})"
-                            addLog("[DNS 變更同步] 已即時套用新 DNS 設定：${server.name} (${server.primaryIp})")
-                        } else {
-                            addLog("[DNS 變更同步] 找不到 DNS 設定 id=${command.resolverId}")
-                        }
-                        stopSelfIfIdle(command.startId)
+                        is LifecycleCommand.TunnelEnded -> handleTunnelEnded(command)
                     }
-                    is LifecycleCommand.ClearLogs -> {
-                        clearLogs()
-                        stopSelfIfIdle(command.startId)
-                    }
-                    is LifecycleCommand.TunnelEnded -> handleTunnelEnded(command)
+                } finally {
+                    completeLifecycleCommand()
                 }
             }
         }
@@ -1150,47 +1204,60 @@ class DnsVpnService : VpnService() {
         latestLifecycleStartId = startId
         when (intent?.action) {
             ACTION_START -> {
-                userIntentStore.markExplicitStart()
-                addLog("Starting service command received")
-                val requestGeneration = lifecycleRequests.nextRequest()
-                lifecycleCommands.trySend(LifecycleCommand.Start(startId, requestGeneration))
+                synchronized(lifecycleDispatchLock) {
+                    val requestGeneration = lifecycleRequests.nextRequest()
+                    if (!prepareVpnStart(startId, "explicit start")) return START_NOT_STICKY
+                    val intentWrite = userIntentStore.stageExplicitStart()
+                    addLog("Starting service command received")
+                    enqueueLifecycleCommand(
+                        LifecycleCommand.Start(startId, requestGeneration, intentWrite)
+                    )
+                }
             }
             ACTION_STOP -> {
-                userIntentStore.markExplicitStop()
-                stopService(Intent(this, VpnRecoveryService::class.java))
-                addLog("Stopping service command received")
-                lifecycleRequests.nextRequest()
-                lifecycleCommands.trySend(LifecycleCommand.Stop(startId))
+                synchronized(lifecycleDispatchLock) {
+                    lifecycleRequests.nextRequest()
+                    val intentWrite = userIntentStore.stageExplicitStop()
+                    addLog("Stopping service command received")
+                    stopService(Intent(this, VpnRecoveryService::class.java))
+                    enqueueLifecycleCommand(LifecycleCommand.Stop(startId, intentWrite))
+                }
             }
             ACTION_RESTART -> {
-                addLog("Restarting service command received")
-                val requestGeneration = lifecycleRequests.nextRequest()
-                lifecycleCommands.trySend(LifecycleCommand.Restart(startId, requestGeneration))
+                synchronized(lifecycleDispatchLock) {
+                    addLog("Restarting service command received")
+                    val requestGeneration = lifecycleRequests.nextRequest()
+                    if (userIntentStore.snapshot().shouldRecoverFromSystemStart(systemAlwaysOnEnabled())) {
+                        if (!prepareVpnStart(startId, "restart")) return START_NOT_STICKY
+                        enqueueLifecycleCommand(LifecycleCommand.Restart(startId, requestGeneration))
+                    } else {
+                        finishIgnoredSystemStart(startId)
+                    }
+                }
             }
             ACTION_UPDATE_DNS -> {
                 val resolverId = intent.getIntExtra("resolverId", -1)
                 if (resolverId >= 0) {
-                    lifecycleCommands.trySend(LifecycleCommand.UpdateDns(startId, resolverId))
+                    enqueueLifecycleCommand(LifecycleCommand.UpdateDns(startId, resolverId))
                 }
             }
             ACTION_CLEAR_LOGS -> {
-                lifecycleCommands.trySend(LifecycleCommand.ClearLogs(startId))
+                enqueueLifecycleCommand(LifecycleCommand.ClearLogs(startId))
             }
             ACTION_RELOAD_DOMAIN_POLICY -> {
                 serviceScope.launch { reloadDomainPolicy() }
             }
             null, VpnService.SERVICE_INTERFACE -> {
-                val userIntent = userIntentStore.snapshot()
-                if (userIntent.shouldRecoverFromSystemStart(systemAlwaysOnEnabled())) {
-                    addLog("System recovery command received; restoring the requested VPN state")
-                    val requestGeneration = lifecycleRequests.nextRequest()
-                    lifecycleCommands.trySend(LifecycleCommand.Start(startId, requestGeneration))
-                } else {
-                    if (lifecycleStateFlow.value == VpnLifecycleState.STOPPED ||
-                        lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
-                        enterForeground(createNotification(notificationText(VpnLifecycleState.STOPPED)))
+                synchronized(lifecycleDispatchLock) {
+                    val userIntent = userIntentStore.snapshot()
+                    if (userIntent.shouldRecoverFromSystemStart(systemAlwaysOnEnabled())) {
+                        addLog("System recovery command received; restoring the requested VPN state")
+                        val requestGeneration = lifecycleRequests.nextRequest()
+                        if (!prepareVpnStart(startId, "system recovery")) return START_NOT_STICKY
+                        enqueueLifecycleCommand(LifecycleCommand.Start(startId, requestGeneration))
+                    } else {
+                        finishIgnoredSystemStart(startId)
                     }
-                    stopSelfIfIdle(startId)
                 }
             }
         }
@@ -1199,6 +1266,37 @@ class DnsVpnService : VpnService() {
         } else {
             START_NOT_STICKY
         }
+    }
+
+    private fun prepareVpnStart(startId: Int, source: String): Boolean {
+        // Attempt promotion even for rejected commands: this acknowledges startForegroundService's
+        // contract before stopSelf. API 34+ eligibility failures are caught, not allowed to escape.
+        try {
+            enterForeground(createNotification(notificationText(VpnLifecycleState.STARTING)))
+            if (VpnService.prepare(this) == null) return true
+            failVpnStartBeforeQueue(startId, source, null)
+        } catch (exception: Exception) {
+            failVpnStartBeforeQueue(startId, source, exception)
+        }
+        return false
+    }
+
+    private fun finishIgnoredSystemStart(startId: Int) {
+        if (!prepareVpnStart(startId, "ignored system start")) return
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelfIfIdle(startId)
+    }
+
+    private fun failVpnStartBeforeQueue(startId: Int, source: String, exception: Exception?) {
+        val message = "VPN $source rejected before foreground promotion; authorization or FGS eligibility is unavailable"
+        if (exception == null) Log.e(TAG, message) else Log.e(TAG, message, exception)
+        addLog(message)
+        lifecycleRequests.nextRequest()
+        updateLifecycleState(VpnLifecycleState.FAILED)
+        stopService(Intent(this, VpnRecoveryService::class.java))
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        // Accepted intent writes have already entered the process-scoped writer and survive actor cancellation.
+        stopSelfResult(startId)
     }
 
     override fun onDestroy() {
@@ -1211,11 +1309,55 @@ class DnsVpnService : VpnService() {
 
     override fun onRevoke() {
         addLog("VPN connection revoked by system settings")
-        userIntentStore.markAuthorizationRevoke()
-        stopService(Intent(this, VpnRecoveryService::class.java))
-        lifecycleRequests.nextRequest()
-        lifecycleCommands.trySend(LifecycleCommand.Stop(latestLifecycleStartId))
-        super.onRevoke()
+        synchronized(lifecycleDispatchLock) {
+            lifecycleRequests.nextRequest()
+            val intentWrite = userIntentStore.stageAuthorizationRevoke()
+            stopService(Intent(this, VpnRecoveryService::class.java))
+            // The superclass stops unconditionally; the queued STOP persists intent and uses startId-aware cleanup.
+            enqueueLifecycleCommand(
+                LifecycleCommand.Stop(
+                    latestLifecycleStartId,
+                    intentWrite,
+                    revoked = true
+                )
+            )
+        }
+    }
+
+    private fun isCurrentStartRequest(requestGeneration: Long): Boolean =
+        userIntentStore.snapshot().shouldAcceptStartRequest(
+            isCurrentRequest = lifecycleRequests.isCurrent(requestGeneration),
+            systemAlwaysOn = systemAlwaysOnEnabled()
+        )
+
+    private suspend fun persistExplicitStart(write: VpnUserIntentWrite): Boolean {
+        if (persistUserIntent(write, "start", "VPN startup is cancelled")) return true
+
+        userIntentStore.stageFailedStartFallback(write)?.let { fallback ->
+            persistUserIntent(
+                fallback,
+                "failed-start fallback",
+                "in-process recovery is blocked, but a fresh process may read the previous persisted intent"
+            )
+        }
+        return false
+    }
+
+    private suspend fun persistUserIntent(
+        write: VpnUserIntentWrite,
+        action: String,
+        consequence: String
+    ): Boolean {
+        val persisted = try {
+            userIntentStore.persist(write)
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            logUserIntentPersistenceFailure(action, consequence, exception)
+            return false
+        }
+        if (!persisted) logUserIntentPersistenceFailure(action, consequence)
+        return persisted
     }
 
     override fun onTrimMemory(level: Int) {
@@ -1231,7 +1373,7 @@ class DnsVpnService : VpnService() {
     }
 
     private suspend fun startVpn(requestGeneration: Long) {
-        if (!lifecycleRequests.isCurrent(requestGeneration) || !lifecycleStateFlow.value.canStart) return
+        if (!isCurrentStartRequest(requestGeneration) || !lifecycleStateFlow.value.canStart) return
 
         updateLifecycleState(VpnLifecycleState.STARTING)
         var establishedFd: ParcelFileDescriptor? = null
@@ -1242,7 +1384,7 @@ class DnsVpnService : VpnService() {
             startService(Intent(this, VpnRecoveryService::class.java))
 
             reloadDomainPolicy(requestGeneration)
-            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+            if (!isCurrentStartRequest(requestGeneration)) {
                 abandonSupersededStartup()
                 return
             }
@@ -1250,7 +1392,7 @@ class DnsVpnService : VpnService() {
                 val database = AppDatabase.getDatabase(this@DnsVpnService)
                 database.dnsDao().getActiveDnsServer() to database.dnsDao().getBypassedAppsList()
             }
-            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+            if (!isCurrentStartRequest(requestGeneration)) {
                 abandonSupersededStartup()
                 return
             }
@@ -1286,14 +1428,14 @@ class DnsVpnService : VpnService() {
             }
 
             yield()
-            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+            if (!isCurrentStartRequest(requestGeneration)) {
                 abandonSupersededStartup()
                 return
             }
             val descriptor = establishVpnTunnel(
                 establish = { builder.establish() },
                 onUnavailable = {
-                    if (!lifecycleRequests.isCurrent(requestGeneration)) {
+                    if (!isCurrentStartRequest(requestGeneration)) {
                         abandonSupersededStartup()
                     } else {
                         addLog("Error: Failed to establish VPN interface (null)")
@@ -1306,7 +1448,7 @@ class DnsVpnService : VpnService() {
             establishedFd = descriptor
             // Include rules saved while the VPN interface was being established.
             reloadDomainPolicy(requestGeneration)
-            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+            if (!isCurrentStartRequest(requestGeneration)) {
                 runCatching { descriptor.close() }
                 establishedFd = null
                 abandonSupersededStartup()
@@ -1354,7 +1496,7 @@ class DnsVpnService : VpnService() {
                 }
                 runCatching { descriptor.close() }
             }
-            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+            if (!isCurrentStartRequest(requestGeneration)) {
                 abandonSupersededStartup()
                 return
             }
@@ -1400,7 +1542,7 @@ class DnsVpnService : VpnService() {
                 tcp = null
             },
             onEnded = { failure ->
-                lifecycleCommands.trySend(
+                enqueueLifecycleCommand(
                     LifecycleCommand.TunnelEnded(generation, descriptor, failure)
                 )
             }
@@ -1987,12 +2129,13 @@ class DnsVpnService : VpnService() {
     }
 
     private fun stopSelfIfIdle(startId: Int) {
-        if (
-            lifecycleStateFlow.value == VpnLifecycleState.STOPPED ||
-            lifecycleStateFlow.value == VpnLifecycleState.FAILED
-        ) {
+        synchronized(lifecycleDispatchLock) {
+            val eligibleStartId = lifecycleCommandTracker.requestIdleStop(
+                startId,
+                lifecycleStateFlow.value
+            ) ?: return
             stopService(Intent(this, VpnRecoveryService::class.java))
-            stopSelfResult(startId)
+            stopSelfResult(eligibleStartId)
         }
     }
 
@@ -2038,6 +2181,7 @@ class DnsVpnService : VpnService() {
     }
 
     private suspend fun restartTunnel(requestGeneration: Long) {
+        if (!isCurrentStartRequest(requestGeneration)) return
         addLog("[安全防護] 正在重新啟動 DNS 隧道以套用新名單…")
         stopVpn()
         startVpn(requestGeneration)

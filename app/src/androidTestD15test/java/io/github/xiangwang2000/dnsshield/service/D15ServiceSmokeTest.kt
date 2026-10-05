@@ -93,10 +93,8 @@ class D15ServiceSmokeTest {
         waitForLifecycle(VpnLifecycleState.RUNNING)
         targetContext.startService(serviceIntent(DnsVpnService.ACTION_STOP))
         waitForLifecycle(VpnLifecycleState.STOPPED)
-        userIntent.edit()
-            .putBoolean(VPN_DESIRED_ENABLED_KEY, true)
-            .putBoolean(VPN_EXPLICIT_CHOICE_KEY, true)
-            .commit()
+        val store = VpnUserIntentStore(userIntent)
+        assertTrue(store.persist(store.stageExplicitStart()))
 
         ContextCompat.startForegroundService(targetContext, serviceIntent(VpnService.SERVICE_INTERFACE))
         waitForLifecycle(VpnLifecycleState.RUNNING)
