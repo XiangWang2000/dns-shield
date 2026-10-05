@@ -23,6 +23,7 @@ class D15ProcessDeathActivity : Activity() {
     companion object {
         const val EXTRA_INTENT_OPERATION = "intent_operation"
         const val OPERATION_SERVICE_STOP = "service_stop"
+        const val OPERATION_SERVICE_REVOKE = "service_revoke"
         const val OPERATION_TERMINATE_STOPPED = "terminate_stopped"
         const val OPERATION_EXPLICIT_STOP = "explicit_stop"
         const val OPERATION_AUTHORIZATION_REVOKE = "authorization_revoke"
@@ -43,10 +44,14 @@ class D15ProcessDeathActivity : Activity() {
             finish()
             return
         }
-        if (operation == OPERATION_SERVICE_STOP || operation == OPERATION_TERMINATE_STOPPED) {
+        if (operation == OPERATION_SERVICE_STOP || operation == OPERATION_SERVICE_REVOKE ||
+            operation == OPERATION_TERMINATE_STOPPED) {
             if (operation == OPERATION_SERVICE_STOP) {
                 check(DnsVpnService.lifecycleStateFlow.value == VpnLifecycleState.RUNNING)
                 startService(Intent(this, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP))
+            } else if (operation == OPERATION_SERVICE_REVOKE) {
+                // Arm before another VPN takes over; the external system onRevoke must stop this service.
+                check(DnsVpnService.lifecycleStateFlow.value == VpnLifecycleState.RUNNING)
             } else {
                 check(DnsVpnService.lifecycleStateFlow.value == VpnLifecycleState.STOPPED)
             }
