@@ -9,8 +9,14 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
@@ -46,8 +52,12 @@ import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicLongArray
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicInteger
 import android.util.LruCache
 import okhttp3.OkHttpClient
@@ -62,19 +72,66 @@ class DnsVpnService : VpnService() {
         const val ACTION_STOP = "io.github.xiangwang2000.dnsshield.service.STOP"
         const val ACTION_RESTART = "io.github.xiangwang2000.dnsshield.service.RESTART"
         const val ACTION_UPDATE_DNS = "io.github.xiangwang2000.dnsshield.service.UPDATE_DNS"
+        const val EXTRA_RESOLVER_COMMAND_REVISION = "resolverCommandRevision"
         const val ACTION_CLEAR_LOGS = "io.github.xiangwang2000.dnsshield.service.CLEAR_LOGS"
         const val ACTION_RELOAD_DOMAIN_POLICY = "io.github.xiangwang2000.dnsshield.service.RELOAD_DOMAIN_POLICY"
         private const val CHANNEL_ID = "dns_vpn_channel"
-        private const val NOTIFICATION_ID = 5543
+        internal const val NOTIFICATION_ID = 5543
+        internal fun createVpnNotification(context: Context, content: String): Notification {
+            val stopIntent = Intent(context, DnsVpnService::class.java).apply {
+                action = ACTION_STOP
+            }
+
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+
+            val stopPendingIntent = PendingIntent.getService(context, 1, stopIntent, flags)
+
+            val mainIntent = Intent(context, MainActivity::class.java)
+            val mainPendingIntent = PendingIntent.getActivity(context, 0, mainIntent, flags)
+
+            return NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_lock_lock) // Standard lock icon
+                .setContentTitle("DNS Shield VPN")
+                .setContentText(content)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setContentIntent(mainPendingIntent)
+                .addAction(android.R.drawable.ic_media_pause, "停止服務", stopPendingIntent)
+                .build()
+        }
+
+        internal fun createVpnNotificationChannel(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "DNS Shield ",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "通知使用者 DNS VPN 正在運作中"
+                }
+                val manager = context.getSystemService(NotificationManager::class.java)
+                manager?.createNotificationChannel(channel)
+            }
+        }
+
         private const val MAX_CONCURRENT_DNS_QUERIES = 24
         private const val MAX_COALESCED_DNS_QUERY_WAITERS = 8
         private const val MAX_LOG_LINES = 100
         private const val FOREGROUND_LOG_FLUSH_MS = 300L
         private const val FOREGROUND_STATS_FLUSH_MS = 500L
         private const val MEMORY_TRIM_CLEAR_CACHE_LEVEL = 60
+        private const val NETWORK_CHANGE_DEBOUNCE_MS = 500L
+        private const val NETWORK_CHANGE_POLL_MS = 25L
 
         const val VPN_IP = "10.0.0.2"
         const val DUMMY_DNS_IP = "10.0.0.1"
+        internal const val D14_TEST_PREFS_NAME = "d14_device_test"
+        internal const val D14_TEST_UPSTREAM_HOST_KEY = "upstream_host"
+        internal const val D14_TEST_UPSTREAM_PORT_KEY = "upstream_port"
 
         // Publish one lifecycle state for the UI and service notification.
         val lifecycleStateFlow = MutableStateFlow(VpnLifecycleState.STOPPED)
@@ -84,6 +141,15 @@ class DnsVpnService : VpnService() {
         val liveLogsFlow = MutableStateFlow<List<String>>(emptyList())
         private val plaintextFallbackFence = DnsPlaintextFallbackFence()
 
+        private val plaintextFenceCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        fun requestPlaintextFallbackAllowed(resolverId: Int, allowed: Boolean) {
+            plaintextFallbackFence.requestAllowed(resolverId, allowed)
+            if (!allowed) plaintextFenceCleanupScope.launch {
+                plaintextFallbackFence.closeSocketsIfRequestedStrict(resolverId)
+            }
+        }
+
         fun setPlaintextFallbackAllowed(resolverId: Int, allowed: Boolean) {
             plaintextFallbackFence.setAllowed(resolverId, allowed)
         }
@@ -91,6 +157,31 @@ class DnsVpnService : VpnService() {
         val rulePolicyStatusFlow = MutableStateFlow(RulePolicyStatus.NotLoaded)
 
         private val diagnosticMetrics = DnsDiagnosticMetrics()
+        internal val d14PolicyAssemblyNanos = AtomicLong(-1L)
+        internal val d14NetworkChangeCount = AtomicLong(0L)
+        private val d14PacketRejectionCounts =
+            AtomicLongArray(PacketRejectionReason.values().size)
+
+        internal fun resetD14PacketRejectionCounts() {
+            for (reason in PacketRejectionReason.values()) {
+                d14PacketRejectionCounts.set(reason.ordinal, 0L)
+            }
+        }
+
+        internal fun resetD14Diagnostics() {
+            diagnosticMetrics.reset()
+            resetD14PacketRejectionCounts()
+            diagnosticsFlow.value = diagnosticMetrics.snapshot()
+        }
+
+        internal fun d14DiagnosticsSnapshot(): DnsDiagnosticsSnapshot =
+            diagnosticMetrics.snapshot()
+
+        internal fun d14PacketRejectionCountsSnapshot(): Map<String, Long> =
+            PacketRejectionReason.values().associate { reason ->
+                reason.name to d14PacketRejectionCounts.get(reason.ordinal)
+            }
+        internal val d14UnderlyingNetworkSnapshot = AtomicReference<UnderlyingNetworkSnapshot?>(null)
 
         private val flowFlushScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         private val flushLock = Any()
@@ -105,6 +196,7 @@ class DnsVpnService : VpnService() {
         internal class DnsQueryKey(
             bytes: ByteArray,
             private val resolverGeneration: Int,
+            private val underlyingNetworkGeneration: Long,
             private val policyAssembly: DomainPolicyAssembly
         ) {
             private val bytes = bytes
@@ -116,6 +208,7 @@ class DnsVpnService : VpnService() {
                 if (this === other) return true
                 if (other !is DnsQueryKey) return false
                 if (resolverGeneration != other.resolverGeneration) return false
+                if (underlyingNetworkGeneration != other.underlyingNetworkGeneration) return false
                 if (policyAssembly !== other.policyAssembly) return false
                 if (bytes.size != other.bytes.size) return false
                 for (i in 2 until bytes.size) {
@@ -127,7 +220,8 @@ class DnsVpnService : VpnService() {
             override fun hashCode(): Int = cachedHashCode
 
             private fun calculateHashCode(): Int {
-                var result = 31 * resolverGeneration + System.identityHashCode(policyAssembly)
+                var result = 31 * resolverGeneration + underlyingNetworkGeneration.hashCode()
+                result = 31 * result + System.identityHashCode(policyAssembly)
                 for (i in 2 until bytes.size) {
                     result = 31 * result + bytes[i]
                 }
@@ -137,6 +231,7 @@ class DnsVpnService : VpnService() {
             fun copyForStorage() = DnsQueryKey(
                 bytes = bytes.copyOf(),
                 resolverGeneration = resolverGeneration,
+                underlyingNetworkGeneration = underlyingNetworkGeneration,
                 policyAssembly = policyAssembly
             )
         }
@@ -147,6 +242,7 @@ class DnsVpnService : VpnService() {
 
         // Thread-safe singleton lock for OkHttpClient
         @Volatile private var okHttpClientInstance: OkHttpClient? = null
+        private val dohEndpointClients = DohEndpointClientCache()
 
         fun getOkHttpClient(): OkHttpClient {
             return okHttpClientInstance ?: synchronized(this) {
@@ -163,6 +259,14 @@ class DnsVpnService : VpnService() {
                     .callTimeout(DnsRequestDeadline.DEFAULT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
                     .connectionPool(ConnectionPool(5, 5, java.util.concurrent.TimeUnit.MINUTES))
                     .build().also { okHttpClientInstance = it }
+            }
+        }
+
+        private fun resetOkHttpClientForUnderlyingNetworkChange() {
+            synchronized(this) {
+                val client = okHttpClientInstance ?: return
+                client.connectionPool.evictAll()
+                okHttpClientInstance = null
             }
         }
 
@@ -322,6 +426,11 @@ class DnsVpnService : VpnService() {
             scheduleStatsFlush()
         }
 
+        private fun recordCoalescedWait(request: DnsDiagnosticMetrics.Request, elapsedNanos: Long) {
+            diagnosticMetrics.recordCoalescedWait(request, elapsedNanos)
+            scheduleStatsFlush()
+        }
+
         private fun recordBlockedDomain(
             domain: String,
             reason: DnsDecisionReason
@@ -369,13 +478,13 @@ class DnsVpnService : VpnService() {
 
         private fun scheduleStatsFlush() {
             statsDirty.set(true)
-            if (!isUiForeground) return
+            if (!isUiForeground && !BuildConfig.D14_DEVICE_TEST) return
             synchronized(flushLock) {
                 if (statsFlushJob?.isActive == true) return
                 statsFlushJob = flowFlushScope.launch {
                     do {
                         delay(FOREGROUND_STATS_FLUSH_MS)
-                        if (!isUiForeground) return@launch
+                        if (!isUiForeground && !BuildConfig.D14_DEVICE_TEST) return@launch
                         statsDirty.set(false)
                         flushStatsNow()
                     } while (statsDirty.get())
@@ -475,13 +584,63 @@ class DnsVpnService : VpnService() {
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.IO)
     private val lifecycleCommands = Channel<LifecycleCommand>(Channel.UNLIMITED)
     private val lifecycleRequests = VpnLifecycleRequestTracker()
+    private val lifecycleCommandTracker = VpnLifecycleCommandTracker()
+    private val lifecycleDispatchLock = Any()
+    private val userIntentStore by lazy {
+        VpnUserIntentStore(
+            getSharedPreferences(VPN_SERVICE_PREFERENCES, Context.MODE_PRIVATE)
+        )
+    }
+    @Volatile
     private var latestLifecycleStartId = 0
 
+    private fun logUserIntentPersistenceFailure(
+        action: String,
+        consequence: String,
+        exception: Exception? = null
+    ) {
+        val message = "Failed to persist explicit VPN $action intent; $consequence"
+        if (exception == null) Log.e(TAG, message) else Log.e(TAG, message, exception)
+        addLog(message)
+    }
+
+    private fun enqueueLifecycleCommand(command: LifecycleCommand) {
+        synchronized(lifecycleDispatchLock) {
+            lifecycleCommandTracker.commandEnqueued()
+            val result = lifecycleCommands.trySend(command)
+            if (result.isFailure) {
+                Log.e(TAG, "Failed to queue VPN lifecycle command", result.exceptionOrNull())
+                lifecycleCommandTracker.commandCompleted()?.let { startId ->
+                    serviceScope.launch(Dispatchers.Main.immediate) { stopSelfIfIdle(startId) }
+                }
+            }
+        }
+    }
+
+    private fun completeLifecycleCommand() {
+        lifecycleCommandTracker.commandCompleted()?.let(::stopSelfIfIdle)
+    }
+
+    private fun systemAlwaysOnEnabled(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isAlwaysOn
+
     private sealed class LifecycleCommand {
-        data class Start(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
-        data class Stop(val startId: Int) : LifecycleCommand()
+        data class Start(
+            val startId: Int,
+            val requestGeneration: Long,
+            val intentWrite: VpnUserIntentWrite? = null
+        ) : LifecycleCommand()
+        data class Stop(
+            val startId: Int,
+            val intentWrite: VpnUserIntentWrite,
+            val revoked: Boolean = false
+        ) : LifecycleCommand()
         data class Restart(val startId: Int, val requestGeneration: Long) : LifecycleCommand()
-        data class UpdateDns(val startId: Int, val resolverId: Int) : LifecycleCommand()
+        data class UpdateDns(
+            val startId: Int,
+            val command: ResolverUpdateCommand,
+            val queueBarrier: Deferred<Unit>
+        ) : LifecycleCommand()
         data class ClearLogs(val startId: Int) : LifecycleCommand()
         data class TunnelEnded(
             val generation: Long,
@@ -494,15 +653,37 @@ class DnsVpnService : VpnService() {
     private data class DnsStateSnapshot(
         val server: DnsServer,
         val resolverGeneration: Int,
+        val underlyingNetworkGeneration: Long,
         val policyAssembly: DomainPolicyAssembly
     )
 
+    private data class NetworkCallbackRegistration(
+        val token: Long,
+        val manager: ConnectivityManager,
+        val underlyingCallback: ConnectivityManager.NetworkCallback,
+        val defaultCallback: ConnectivityManager.NetworkCallback,
+        val bestMatchingCallback: ConnectivityManager.NetworkCallback?
+    ) {
+        val callbacks: List<ConnectivityManager.NetworkCallback>
+            get() = listOfNotNull(underlyingCallback, defaultCallback, bestMatchingCallback)
+    }
+
     private val dnsStateLock = Any()
     private var resolverGeneration = 0
+    private var underlyingNetworkGeneration = 0L
+    private var underlyingNetworkChangePending = false
     private val queryAdmission = BoundedDnsQueryAdmission<DnsQueryKey>(
         maxUniqueKeys = MAX_CONCURRENT_DNS_QUERIES,
         maxWaitersPerKey = MAX_COALESCED_DNS_QUERY_WAITERS
     )
+    private val underlyingNetworkReducer = UnderlyingNetworkStateReducer()
+    private val networkRecoveryTracker = UnderlyingNetworkRecoveryTracker()
+    private val underlyingNetworkEventLock = Any()
+    private val networkCallbackLock = Any()
+    @Volatile private var networkCallbackToken = 0L
+    @Volatile private var networkCallbackRegistration: NetworkCallbackRegistration? = null
+    private var networkStatusDebounceJob: Job? = null
+    private val activeDnsLeaders = ConcurrentHashMap<Job, DnsStateSnapshot>()
 
     // Explicit, clean separation of VPN active running components from the general ServiceScope
     private var tunnelParentJob: Job? = null
@@ -586,6 +767,7 @@ class DnsVpnService : VpnService() {
                         }
                     }
                 }
+                val assemblyStartedNanos = if (BuildConfig.D14_DEVICE_TEST) System.nanoTime() else 0L
                 val assembly = RuntimeDomainPolicy.assemble(
                     filesDirectory = filesDir,
                     userRules = userRules,
@@ -595,6 +777,9 @@ class DnsVpnService : VpnService() {
                         publicSuffixResolverOwner.resolverOrNull()
                     }
                 )
+                if (BuildConfig.D14_DEVICE_TEST) {
+                    d14PolicyAssemblyNanos.set(System.nanoTime() - assemblyStartedNanos)
+                }
                 assembly to rejectedRuleCount
             }
             if (requestGeneration != null && !lifecycleRequests.isCurrent(requestGeneration)) return
@@ -633,22 +818,422 @@ class DnsVpnService : VpnService() {
         addLog(DomainPolicyDiagnostics.message(rulePolicyStatusFlow.value))
     }
 
+    private fun d14DeviceTestUpstream(): Pair<String, Int>? {
+        if (!BuildConfig.D14_DEVICE_TEST) return null
+        val preferences = getSharedPreferences(D14_TEST_PREFS_NAME, MODE_PRIVATE)
+        val host = preferences.getString(D14_TEST_UPSTREAM_HOST_KEY, null)
+            ?: throw IOException("D14 test upstream host is missing; refusing non-test DNS.")
+        val isLoopbackLiteral = host.matches(Regex("127(?:\\.\\d{1,3}){3}")) ||
+            host == "::1" || host == "0:0:0:0:0:0:0:1"
+        if (!isLoopbackLiteral) {
+            throw IOException("D14 test upstream must be a loopback IP literal.")
+        }
+        val address = InetAddress.getByName(host)
+        if (!address.isLoopbackAddress) {
+            throw IOException("D14 test upstream is not loopback.")
+        }
+        val port = preferences.getInt(D14_TEST_UPSTREAM_PORT_KEY, -1)
+            .takeIf { it in 1..65_535 }
+            ?: throw IOException("D14 test upstream port is missing or invalid.")
+        return (address.hostAddress ?: throw IOException("D14 test upstream host has no IP address.")) to port
+    }
+
     private fun clearDnsStateLocked() {
-        synchronized(dnsCache) { dnsCache.evictAll() }
+        clearDnsAnswerCacheLocked()
         blockDecisionCache.evictAll()
+    }
+
+    private fun clearDnsAnswerCacheLocked() {
+        synchronized(dnsCache) { dnsCache.evictAll() }
     }
 
     private fun snapshotDnsState(): DnsStateSnapshot = synchronized(dnsStateLock) {
         DnsStateSnapshot(
             server = upstreamDnsServer,
             resolverGeneration = resolverGeneration,
+            underlyingNetworkGeneration = underlyingNetworkGeneration,
             policyAssembly = domainPolicy.snapshot()
         )
     }
 
     private fun isCurrentDnsState(state: DnsStateSnapshot): Boolean = synchronized(dnsStateLock) {
-        resolverGeneration == state.resolverGeneration &&
+        isCurrentDnsStateLocked(state)
+    }
+
+    private fun isCurrentDnsStateLocked(state: DnsStateSnapshot): Boolean {
+        return resolverGeneration == state.resolverGeneration &&
+            underlyingNetworkGeneration == state.underlyingNetworkGeneration &&
             domainPolicy.snapshot() === state.policyAssembly
+    }
+
+    private fun registerUnderlyingNetworkCallback() {
+        val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (manager == null) {
+            addLog("[網路狀態] 無法監看網路變更；DNS 伺服器設定維持不變。")
+            return
+        }
+
+        val registration = synchronized(networkCallbackLock) {
+            if (networkCallbackRegistration != null) return
+            underlyingNetworkReducer.clear()
+            networkRecoveryTracker.clear()
+            val token = ++networkCallbackToken
+            val underlyingCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: NetworkCapabilities
+                ) {
+                    onUnderlyingNetworkEvent(token, networkFacts(network, networkCapabilities))
+                }
+
+                override fun onLost(network: Network) {
+                    onUnderlyingNetworkEvent(
+                        token,
+                        UnderlyingNetworkFacts(
+                            networkId = network.networkHandle,
+                            isVpn = false,
+                            hasInternet = false,
+                            isValidated = false,
+                            hasCaptivePortal = false,
+                            lost = true
+                        )
+                    )
+                }
+            }
+
+            var activeDefaultNetwork: Network? = null
+            val defaultNetworkLock = Any()
+            val defaultCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    synchronized(defaultNetworkLock) { activeDefaultNetwork = network }
+                }
+
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: NetworkCapabilities
+                ) {
+                    synchronized(defaultNetworkLock) { activeDefaultNetwork = network }
+                    val facts = networkFacts(network, networkCapabilities)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        if (!facts.isVpn) {
+                            onUnderlyingNetworkChange(token) { reducer ->
+                                reducer.selectDefaultNetwork(network.networkHandle)
+                            }
+                        }
+                    } else if (facts.isVpn) {
+                        onUnderlyingNetworkChange(token) { reducer ->
+                            reducer.selectDefaultNetworkByTransportMask(facts.transportMask)
+                        }
+                    } else {
+                        onUnderlyingNetworkChange(token) { reducer ->
+                            reducer.selectDefaultNetwork(network.networkHandle)
+                        }
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    val wasActiveDefault = synchronized(defaultNetworkLock) {
+                        if (activeDefaultNetwork != network) {
+                            false
+                        } else {
+                            activeDefaultNetwork = null
+                            true
+                        }
+                    }
+                    if (wasActiveDefault && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                        onUnderlyingNetworkChange(token) { reducer ->
+                            reducer.selectDefaultNetwork(null)
+                        }
+                    }
+                }
+            }
+
+            val bestMatchingCallback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        selectBestMatchingNetwork(token, network.networkHandle)
+                    }
+
+                    override fun onCapabilitiesChanged(
+                        network: Network,
+                        networkCapabilities: NetworkCapabilities
+                    ) {
+                        selectBestMatchingNetwork(token, network.networkHandle)
+                    }
+
+                    override fun onLost(network: Network) {
+                        onUnderlyingNetworkChange(token) { reducer ->
+                            reducer.clearSelectedDefaultNetwork(network.networkHandle)
+                        }
+                    }
+                }
+            } else {
+                null
+            }
+            NetworkCallbackRegistration(
+                token,
+                manager,
+                underlyingCallback,
+                defaultCallback,
+                bestMatchingCallback
+            ).also {
+                networkCallbackRegistration = it
+            }
+        }
+
+        val initialState = underlyingNetworkReducer.snapshot()
+        if (BuildConfig.D14_DEVICE_TEST) d14UnderlyingNetworkSnapshot.set(initialState)
+        scheduleNetworkStatusUpdate(
+            token = registration.token,
+            state = initialState,
+            generation = currentUnderlyingNetworkGeneration(),
+            dnsStateFenced = false
+        )
+
+        try {
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build()
+            manager.registerNetworkCallback(request, registration.underlyingCallback)
+            manager.registerDefaultNetworkCallback(registration.defaultCallback)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                registration.bestMatchingCallback?.let { callback ->
+                    manager.registerBestMatchingNetworkCallback(request, callback, Handler(Looper.getMainLooper()))
+                }
+            }
+        } catch (exception: Exception) {
+            unregisterUnderlyingNetworkCallback()
+            Log.w(TAG, "Unable to register the underlying network callback", exception)
+            addLog("[網路狀態] 無法監看網路變更；DNS 伺服器設定維持不變。")
+        }
+    }
+
+    private fun networkFacts(
+        network: Network,
+        capabilities: NetworkCapabilities?
+    ): UnderlyingNetworkFacts {
+        val transportMask = capabilities?.let(::physicalTransportMask) ?: 0
+        val isVpn = capabilities?.let {
+            it.hasTransport(NetworkCapabilities.TRANSPORT_VPN) ||
+                !it.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        } ?: false
+
+        return UnderlyingNetworkFacts(
+            networkId = network.networkHandle,
+            isVpn = isVpn,
+            hasInternet = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ?: true,
+            isValidated = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true,
+            hasCaptivePortal = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true,
+            transportMask = transportMask
+        )
+    }
+
+    private fun physicalTransportMask(capabilities: NetworkCapabilities): Int {
+        var mask = 0
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) mask = mask or 1
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) mask = mask or 2
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) mask = mask or 4
+        return mask
+    }
+
+    private fun onUnderlyingNetworkEvent(token: Long, facts: UnderlyingNetworkFacts) {
+        onUnderlyingNetworkChange(token) { reducer -> reducer.update(facts) }
+    }
+
+    private fun selectBestMatchingNetwork(token: Long, networkId: Long) {
+        onUnderlyingNetworkChange(token) { reducer -> reducer.selectDefaultNetwork(networkId) }
+    }
+
+    private fun onUnderlyingNetworkChange(
+        token: Long,
+        update: (UnderlyingNetworkStateReducer) -> UnderlyingNetworkTransition?
+    ) {
+        val transition: UnderlyingNetworkTransition
+        val generation: Long
+        val dnsStateFenced: Boolean
+        synchronized(underlyingNetworkEventLock) {
+            if (
+                !isCurrentUnderlyingNetworkCallback(
+                    token = token,
+                    currentToken = networkCallbackToken,
+                    registeredToken = networkCallbackRegistration?.token,
+                    isVpnRunning = isVpnRunning
+                )
+            ) return
+
+            transition = update(underlyingNetworkReducer) ?: return
+            if (BuildConfig.D14_DEVICE_TEST) {
+                d14UnderlyingNetworkSnapshot.set(transition.current)
+                d14NetworkChangeCount.incrementAndGet()
+            }
+            networkRecoveryTracker.observe(transition, System.nanoTime())
+            var currentGeneration = currentUnderlyingNetworkGeneration()
+            dnsStateFenced = transition.runIfDnsStateFenceRequired {
+                currentGeneration = synchronized(dnsStateLock) {
+                    underlyingNetworkGeneration++
+                    underlyingNetworkChangePending = true
+                    clearDnsAnswerCacheLocked()
+                    underlyingNetworkGeneration
+                }
+                dohFailureBackoff.resetForGeneration(currentGeneration)
+                activeDnsLeaders.forEach { (job, state) ->
+                    if (state.underlyingNetworkGeneration != currentGeneration) {
+                        job.cancel(CancellationException("Underlying network changed"))
+                    }
+                }
+            }
+            generation = currentGeneration
+        }
+        scheduleNetworkStatusUpdate(
+            token = token,
+            state = transition.current,
+            generation = generation,
+            dnsStateFenced = dnsStateFenced
+        )
+    }
+
+    private fun currentUnderlyingNetworkGeneration(): Long = synchronized(dnsStateLock) {
+        underlyingNetworkGeneration
+    }
+
+    private fun scheduleNetworkStatusUpdate(
+        token: Long,
+        state: UnderlyingNetworkSnapshot,
+        generation: Long,
+        dnsStateFenced: Boolean
+    ) {
+        synchronized(networkCallbackLock) {
+            if (token != networkCallbackToken || networkCallbackRegistration?.token != token) return
+            val routeChangePending = synchronized(dnsStateLock) { underlyingNetworkChangePending }
+            if (!shouldReplaceNetworkStatusDebounce(routeChangePending, dnsStateFenced)) return
+            networkStatusDebounceJob?.cancel()
+            networkStatusDebounceJob = serviceScope.launch {
+                delay(NETWORK_CHANGE_DEBOUNCE_MS)
+                if (token != networkCallbackToken || !isVpnRunning) return@launch
+                if (generation != currentUnderlyingNetworkGeneration()) return@launch
+                val currentState = underlyingNetworkReducer.snapshot()
+                if (!dnsStateFenced && currentState != state) return@launch
+                if (dnsStateFenced) {
+                    resetOkHttpClientForUnderlyingNetworkChange()
+                }
+
+                val latestState = underlyingNetworkReducer.snapshot()
+                val recoveryMeasurement = if (
+                    latestState.connectivity == UnderlyingNetworkConnectivity.ONLINE
+                ) completeNetworkRecoveryMeasurement() else null
+                addLog(networkStatusMessage(latestState, generation, dnsStateFenced, recoveryMeasurement))
+                if (lifecycleStateFlow.value == VpnLifecycleState.RUNNING) {
+                    runCatching {
+                        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                        manager.notify(NOTIFICATION_ID, createNotification(notificationText(VpnLifecycleState.RUNNING)))
+                    }.onFailure { exception ->
+                        Log.w(TAG, "Unable to refresh notification after network change", exception)
+                    }
+                }
+                if (dnsStateFenced) {
+                    val released = synchronized(dnsStateLock) {
+                        if (
+                            generation != underlyingNetworkGeneration ||
+                            !isCurrentUnderlyingNetworkCallback(
+                                token = token,
+                                currentToken = networkCallbackToken,
+                                registeredToken = networkCallbackRegistration?.token,
+                                isVpnRunning = isVpnRunning
+                            )
+                        ) {
+                            false
+                        } else {
+                            underlyingNetworkChangePending = false
+                            true
+                        }
+                    }
+                    if (!released) return@launch
+                }
+            }
+        }
+    }
+
+    private fun networkStatusMessage(
+        state: UnderlyingNetworkSnapshot,
+        generation: Long,
+        dnsStateFenced: Boolean,
+        recoveryMeasurement: NetworkRecoveryMeasurement?
+    ): String {
+        val primary = synchronized(dnsStateLock) { upstreamDnsServer.primaryIp }
+        val recovery = if (dnsStateFenced) {
+            "網路狀態已更新，DNS 快取已清除、舊狀態查詢已取消並重設 DoH 退避。"
+        } else {
+            ""
+        }
+        val retainedResolver = "目前選用的 DNS $primary 維持不變。"
+        return when (state.connectivity) {
+            UnderlyingNetworkConnectivity.OFFLINE ->
+                "[網路狀態] 目前沒有可用網路，DNS 查詢會暫時失敗。$recovery$retainedResolver"
+            UnderlyingNetworkConnectivity.UNKNOWN ->
+                "[網路狀態] 正在確認目前選用的非 VPN 網路；暫不判定離線或連線正常。$recovery$retainedResolver"
+            UnderlyingNetworkConnectivity.CONNECTING ->
+                "[網路狀態] 網路正在連線或檢查可用性。$recovery$retainedResolver"
+            UnderlyingNetworkConnectivity.CAPTIVE_PORTAL ->
+                "[網路狀態] 偵測到需要登入的網路入口，請先完成 Wi-Fi 或網路登入。$recovery$retainedResolver"
+            UnderlyingNetworkConnectivity.ONLINE ->
+                if (recoveryMeasurement != null) {
+                    val measurement = recoveryMeasurement.let { result ->
+                        val duration = result.durationMillis?.let { "恢復耗時 ${it} ms，" } ?: ""
+                        "${duration}恢復期間失敗的 DNS 查詢有 ${result.failedQueryCount} 筆。"
+                    }
+                    "[網路恢復] 非 VPN 網路已就緒（generation $generation）。$measurement$recovery$retainedResolver"
+                } else {
+                    "[網路狀態] 網路連線正常。$retainedResolver"
+                }
+        }
+    }
+
+    private fun unregisterUnderlyingNetworkCallback() {
+        val registration = synchronized(networkCallbackLock) {
+            networkCallbackToken++
+            networkStatusDebounceJob?.cancel()
+            networkStatusDebounceJob = null
+            networkCallbackRegistration.also { networkCallbackRegistration = null }
+        }
+        synchronized(underlyingNetworkEventLock) {
+            underlyingNetworkReducer.clear()
+            networkRecoveryTracker.clear()
+        }
+        synchronized(dnsStateLock) {
+            underlyingNetworkChangePending = false
+        }
+        registration?.let {
+            it.callbacks.forEach { callback ->
+                try {
+                    it.manager.unregisterNetworkCallback(callback)
+                } catch (exception: Exception) {
+                    Log.w(TAG, "Unable to unregister an underlying network callback", exception)
+                }
+            }
+        }
+    }
+
+    private fun completeNetworkRecoveryMeasurement(): NetworkRecoveryMeasurement? =
+        networkRecoveryTracker.takeCompletedMeasurement()
+
+    private fun recordNetworkRecoveryFailure() {
+        networkRecoveryTracker.recordFailure()
+    }
+
+    private suspend fun awaitStableUnderlyingNetwork(
+        dnsState: DnsStateSnapshot,
+        deadline: DnsRequestDeadline
+    ): Boolean {
+        while (true) {
+            if (!isCurrentDnsState(dnsState)) return false
+            val changePending = synchronized(dnsStateLock) { underlyingNetworkChangePending }
+            if (!changePending) return true
+
+            val remainingMillis = deadline.remainingMillis()
+            if (remainingMillis <= 0L) return false
+            delay(minOf(remainingMillis, NETWORK_CHANGE_POLL_MS))
+        }
     }
 
     override fun onCreate() {
@@ -656,44 +1241,73 @@ class DnsVpnService : VpnService() {
         createNotificationChannel()
         serviceScope.launch(Dispatchers.Main.immediate) {
             for (command in lifecycleCommands) {
-                when (command) {
-                    is LifecycleCommand.Start -> {
-                        startVpn(command.requestGeneration)
-                        if (lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
-                            stopSelfResult(command.startId)
+                try {
+                    when (command) {
+                        is LifecycleCommand.Start -> {
+                            val intentPersisted = command.intentWrite?.let { persistExplicitStart(it) } ?: true
+                            if (intentPersisted && isCurrentStartRequest(command.requestGeneration)) {
+                                startVpn(command.requestGeneration)
+                            } else if (
+                                lifecycleStateFlow.value == VpnLifecycleState.STOPPED ||
+                                lifecycleStateFlow.value == VpnLifecycleState.FAILED
+                            ) {
+                                stopSelfIfIdle(command.startId)
+                            }
                         }
-                    }
-                    is LifecycleCommand.Stop -> {
-                        stopVpn()
-                        // A later START or RESTART may already be queued under a newer startId.
-                        stopSelfResult(command.startId)
-                    }
-                    is LifecycleCommand.Restart -> {
-                        restartTunnel(command.requestGeneration)
-                        if (lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
-                            stopSelfResult(command.startId)
+                        is LifecycleCommand.Stop -> {
+                            persistUserIntent(
+                                command.intentWrite,
+                                action = if (command.revoked) "revoke" else "stop",
+                                consequence = "VPN shutdown will continue"
+                            )
+                            stopVpn()
+                            stopSelfIfIdle(command.startId)
                         }
-                    }
-                    is LifecycleCommand.UpdateDns -> {
-                        val server = withContext(Dispatchers.IO) {
-                            AppDatabase.getDatabase(this@DnsVpnService)
-                                .dnsDao()
-                                .getDnsServerById(command.resolverId)
+                        is LifecycleCommand.Restart -> {
+                            if (isCurrentStartRequest(command.requestGeneration)) {
+                                restartTunnel(command.requestGeneration)
+                            }
+                            if (lifecycleStateFlow.value == VpnLifecycleState.STOPPED ||
+                                lifecycleStateFlow.value == VpnLifecycleState.FAILED) {
+                                stopSelfIfIdle(command.startId)
+                            }
                         }
-                        if (server != null) {
-                            updateResolverState(server)
-                            activeDnsFlow.value = "${server.name} (${server.primaryIp})"
-                            addLog("[DNS 變更同步] 已即時套用新 DNS 設定：${server.name} (${server.primaryIp})")
-                        } else {
-                            addLog("[DNS 變更同步] 找不到 DNS 設定 id=${command.resolverId}")
+                        is LifecycleCommand.UpdateDns -> {
+                            try {
+                                command.queueBarrier.await()
+                                val applied = ResolverCommandRuntime.serviceFence.applyLatestActive(
+                                    command = command.command,
+                                    readActive = {
+                                        withContext(Dispatchers.IO) {
+                                            AppDatabase.getDatabase(this@DnsVpnService)
+                                                .dnsDao()
+                                                .getActiveDnsServer()
+                                        }
+                                    },
+                                    apply = { server ->
+                                        if (upstreamDnsServer != server) updateResolverState(server)
+                                        activeDnsFlow.value = "${server.name} (${server.primaryIp})"
+                                        addLog("[DNS 變更同步] 已即時套用新 DNS 設定：${server.name} (${server.primaryIp})")
+                                    }
+                                )
+                                if (applied == false) {
+                                    addLog("[DNS 變更同步] 找不到目前啟用的 DNS 設定")
+                                }
+                            } catch (exception: CancellationException) {
+                                throw exception
+                            } catch (exception: Exception) {
+                                Log.e(TAG, "Failed to apply queued DNS update", exception)
+                            }
+                            stopSelfIfIdle(command.startId)
                         }
-                        stopSelfIfIdle(command.startId)
+                        is LifecycleCommand.ClearLogs -> {
+                            clearLogs()
+                            stopSelfIfIdle(command.startId)
+                        }
+                        is LifecycleCommand.TunnelEnded -> handleTunnelEnded(command)
                     }
-                    is LifecycleCommand.ClearLogs -> {
-                        clearLogs()
-                        stopSelfIfIdle(command.startId)
-                    }
-                    is LifecycleCommand.TunnelEnded -> handleTunnelEnded(command)
+                } finally {
+                    completeLifecycleCommand()
                 }
             }
         }
@@ -703,34 +1317,109 @@ class DnsVpnService : VpnService() {
         latestLifecycleStartId = startId
         when (intent?.action) {
             ACTION_START -> {
-                addLog("Starting service command received")
-                val requestGeneration = lifecycleRequests.nextRequest()
-                lifecycleCommands.trySend(LifecycleCommand.Start(startId, requestGeneration))
+                synchronized(lifecycleDispatchLock) {
+                    val requestGeneration = lifecycleRequests.nextRequest()
+                    if (!prepareVpnStart(startId, "explicit start")) return START_NOT_STICKY
+                    val intentWrite = userIntentStore.stageExplicitStart()
+                    addLog("Starting service command received")
+                    enqueueLifecycleCommand(
+                        LifecycleCommand.Start(startId, requestGeneration, intentWrite)
+                    )
+                }
             }
             ACTION_STOP -> {
-                addLog("Stopping service command received")
-                lifecycleRequests.nextRequest()
-                lifecycleCommands.trySend(LifecycleCommand.Stop(startId))
+                synchronized(lifecycleDispatchLock) {
+                    lifecycleRequests.nextRequest()
+                    val intentWrite = userIntentStore.stageExplicitStop()
+                    addLog("Stopping service command received")
+                    stopService(Intent(this, VpnRecoveryService::class.java))
+                    enqueueLifecycleCommand(LifecycleCommand.Stop(startId, intentWrite))
+                }
             }
             ACTION_RESTART -> {
-                addLog("Restarting service command received")
-                val requestGeneration = lifecycleRequests.nextRequest()
-                lifecycleCommands.trySend(LifecycleCommand.Restart(startId, requestGeneration))
+                synchronized(lifecycleDispatchLock) {
+                    addLog("Restarting service command received")
+                    val requestGeneration = lifecycleRequests.nextRequest()
+                    if (userIntentStore.snapshot().shouldRecoverFromSystemStart(systemAlwaysOnEnabled())) {
+                        if (!prepareVpnStart(startId, "restart")) return START_NOT_STICKY
+                        enqueueLifecycleCommand(LifecycleCommand.Restart(startId, requestGeneration))
+                    } else {
+                        finishIgnoredSystemStart(startId)
+                    }
+                }
             }
             ACTION_UPDATE_DNS -> {
                 val resolverId = intent.getIntExtra("resolverId", -1)
-                if (resolverId >= 0) {
-                    lifecycleCommands.trySend(LifecycleCommand.UpdateDns(startId, resolverId))
+                val requestedRevision = if (intent.hasExtra(EXTRA_RESOLVER_COMMAND_REVISION)) {
+                    intent.getLongExtra(EXTRA_RESOLVER_COMMAND_REVISION, 0L)
+                } else {
+                    null
                 }
+                val submission = ResolverCommandRuntime.coordinator.submitReceived(requestedRevision) { }
+                enqueueLifecycleCommand(
+                    LifecycleCommand.UpdateDns(
+                        startId,
+                        ResolverUpdateCommand(resolverId, submission.revision),
+                        submission.result
+                    )
+                )
             }
             ACTION_CLEAR_LOGS -> {
-                lifecycleCommands.trySend(LifecycleCommand.ClearLogs(startId))
+                enqueueLifecycleCommand(LifecycleCommand.ClearLogs(startId))
             }
             ACTION_RELOAD_DOMAIN_POLICY -> {
                 serviceScope.launch { reloadDomainPolicy() }
             }
+            null, VpnService.SERVICE_INTERFACE -> {
+                synchronized(lifecycleDispatchLock) {
+                    val userIntent = userIntentStore.snapshot()
+                    if (userIntent.shouldRecoverFromSystemStart(systemAlwaysOnEnabled())) {
+                        addLog("System recovery command received; restoring the requested VPN state")
+                        val requestGeneration = lifecycleRequests.nextRequest()
+                        if (!prepareVpnStart(startId, "system recovery")) return START_NOT_STICKY
+                        enqueueLifecycleCommand(LifecycleCommand.Start(startId, requestGeneration))
+                    } else {
+                        finishIgnoredSystemStart(startId)
+                    }
+                }
+            }
         }
-        return START_NOT_STICKY
+        return if (userIntentStore.snapshot().shouldUseStickyServiceStart(systemAlwaysOnEnabled())) {
+            START_STICKY
+        } else {
+            START_NOT_STICKY
+        }
+    }
+
+    private fun prepareVpnStart(startId: Int, source: String): Boolean {
+        // Attempt promotion even for rejected commands: this acknowledges startForegroundService's
+        // contract before stopSelf. API 34+ eligibility failures are caught, not allowed to escape.
+        try {
+            enterForeground(createNotification(notificationText(VpnLifecycleState.STARTING)))
+            if (VpnService.prepare(this) == null) return true
+            failVpnStartBeforeQueue(startId, source, null)
+        } catch (exception: Exception) {
+            failVpnStartBeforeQueue(startId, source, exception)
+        }
+        return false
+    }
+
+    private fun finishIgnoredSystemStart(startId: Int) {
+        if (!prepareVpnStart(startId, "ignored system start")) return
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelfIfIdle(startId)
+    }
+
+    private fun failVpnStartBeforeQueue(startId: Int, source: String, exception: Exception?) {
+        val message = "VPN $source rejected before foreground promotion; authorization or FGS eligibility is unavailable"
+        if (exception == null) Log.e(TAG, message) else Log.e(TAG, message, exception)
+        addLog(message)
+        lifecycleRequests.nextRequest()
+        updateLifecycleState(VpnLifecycleState.FAILED)
+        stopService(Intent(this, VpnRecoveryService::class.java))
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        // Accepted intent writes have already entered the process-scoped writer and survive actor cancellation.
+        stopSelfResult(startId)
     }
 
     override fun onDestroy() {
@@ -743,9 +1432,55 @@ class DnsVpnService : VpnService() {
 
     override fun onRevoke() {
         addLog("VPN connection revoked by system settings")
-        lifecycleRequests.nextRequest()
-        lifecycleCommands.trySend(LifecycleCommand.Stop(latestLifecycleStartId))
-        super.onRevoke()
+        synchronized(lifecycleDispatchLock) {
+            lifecycleRequests.nextRequest()
+            val intentWrite = userIntentStore.stageAuthorizationRevoke()
+            stopService(Intent(this, VpnRecoveryService::class.java))
+            // The superclass stops unconditionally; the queued STOP persists intent and uses startId-aware cleanup.
+            enqueueLifecycleCommand(
+                LifecycleCommand.Stop(
+                    latestLifecycleStartId,
+                    intentWrite,
+                    revoked = true
+                )
+            )
+        }
+    }
+
+    private fun isCurrentStartRequest(requestGeneration: Long): Boolean =
+        userIntentStore.snapshot().shouldAcceptStartRequest(
+            isCurrentRequest = lifecycleRequests.isCurrent(requestGeneration),
+            systemAlwaysOn = systemAlwaysOnEnabled()
+        )
+
+    private suspend fun persistExplicitStart(write: VpnUserIntentWrite): Boolean {
+        if (persistUserIntent(write, "start", "VPN startup is cancelled")) return true
+
+        userIntentStore.stageFailedStartFallback(write)?.let { fallback ->
+            persistUserIntent(
+                fallback,
+                "failed-start fallback",
+                "in-process recovery is blocked, but a fresh process may read the previous persisted intent"
+            )
+        }
+        return false
+    }
+
+    private suspend fun persistUserIntent(
+        write: VpnUserIntentWrite,
+        action: String,
+        consequence: String
+    ): Boolean {
+        val persisted = try {
+            userIntentStore.persist(write)
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            logUserIntentPersistenceFailure(action, consequence, exception)
+            return false
+        }
+        if (!persisted) logUserIntentPersistenceFailure(action, consequence)
+        return persisted
     }
 
     override fun onTrimMemory(level: Int) {
@@ -761,20 +1496,18 @@ class DnsVpnService : VpnService() {
     }
 
     private suspend fun startVpn(requestGeneration: Long) {
-        if (!lifecycleRequests.isCurrent(requestGeneration) || !lifecycleStateFlow.value.canStart) return
+        if (!isCurrentStartRequest(requestGeneration) || !lifecycleStateFlow.value.canStart) return
 
         updateLifecycleState(VpnLifecycleState.STARTING)
         var establishedFd: ParcelFileDescriptor? = null
         try {
             val notification = createNotification(notificationText(VpnLifecycleState.STARTING))
-            if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
+            enterForeground(notification)
+            // The VPN is already foreground; the keeper promotes itself only while authorized.
+            startService(Intent(this, VpnRecoveryService::class.java))
 
             reloadDomainPolicy(requestGeneration)
-            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+            if (!isCurrentStartRequest(requestGeneration)) {
                 abandonSupersededStartup()
                 return
             }
@@ -782,11 +1515,17 @@ class DnsVpnService : VpnService() {
                 val database = AppDatabase.getDatabase(this@DnsVpnService)
                 database.dnsDao().getActiveDnsServer() to database.dnsDao().getBypassedAppsList()
             }
-            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+            if (!isCurrentStartRequest(requestGeneration)) {
                 abandonSupersededStartup()
                 return
             }
-            val resolver = activeServer ?: DnsServer(
+            val testUpstream = d14DeviceTestUpstream()
+            val resolver = if (testUpstream != null) DnsServer(
+                name = "D14 loopback DNS",
+                primaryIp = testUpstream.first,
+                secondaryIp = testUpstream.first,
+                allowPlaintextFallback = true
+            ) else activeServer ?: DnsServer(
                 name = "Google DNS",
                 primaryIp = "8.8.8.8",
                 secondaryIp = "8.8.4.4"
@@ -795,37 +1534,49 @@ class DnsVpnService : VpnService() {
             dnsTransportStatusFlow.value = "尚無上游查詢"
             activeDnsFlow.value = "${resolver.name} (${resolver.primaryIp})"
             addLog("Database loaded. Upstream DNS: ${resolver.name} (${resolver.primaryIp})")
-            addLog("Loaded " + bypassedList.size + " apps to exempt/bypass DNS VPN")
+            if (BuildConfig.D14_DEVICE_TEST) {
+                addLog("D14 validation ignores saved app bypass rules and is limited to the test packages.")
+            } else {
+                addLog("Loaded " + bypassedList.size + " apps to exempt/bypass DNS VPN")
+            }
 
             // Keep establish() on the service dispatcher so destruction cannot race descriptor ownership.
             val builder = Builder()
                 .setSession("DNS Shield")
                 .setBlocking(true)
+                // This DNS-only tunnel handles IPv4; pass IPv6 through the underlying network.
+                .allowFamily(android.system.OsConstants.AF_INET6)
                 .setMtu(DnsResponsePacketBuilder.TUN_MTU_BYTES)
                 .addAddress(VPN_IP, 32)
                 .addRoute(DUMMY_DNS_IP, 32)
                 .addDnsServer(DUMMY_DNS_IP)
 
-            for (app in bypassedList) {
-                try {
-                    builder.addDisallowedApplication(app.packageName)
-                    addLog("Exempted app: " + app.appName + " (" + app.packageName + ")")
-                } catch (exception: PackageManager.NameNotFoundException) {
-                    Log.w(TAG, "Exempted app package not found on device: " + app.packageName)
-                } catch (exception: Exception) {
-                    Log.e(TAG, "Error adding disallowed package: " + app.packageName, exception)
+            if (BuildConfig.D14_DEVICE_TEST) {
+                builder.addAllowedApplication(packageName)
+                runCatching { builder.addAllowedApplication("$packageName.test") }
+                addLog("D14 device validation VPN is limited to $packageName")
+            } else {
+                for (app in bypassedList) {
+                    try {
+                        builder.addDisallowedApplication(app.packageName)
+                        addLog("Exempted app: " + app.appName + " (" + app.packageName + ")")
+                    } catch (exception: PackageManager.NameNotFoundException) {
+                        Log.w(TAG, "Exempted app package not found on device: " + app.packageName)
+                    } catch (exception: Exception) {
+                        Log.e(TAG, "Error adding disallowed package: " + app.packageName, exception)
+                    }
                 }
             }
 
             yield()
-            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+            if (!isCurrentStartRequest(requestGeneration)) {
                 abandonSupersededStartup()
                 return
             }
             val descriptor = establishVpnTunnel(
                 establish = { builder.establish() },
                 onUnavailable = {
-                    if (!lifecycleRequests.isCurrent(requestGeneration)) {
+                    if (!isCurrentStartRequest(requestGeneration)) {
                         abandonSupersededStartup()
                     } else {
                         addLog("Error: Failed to establish VPN interface (null)")
@@ -838,7 +1589,7 @@ class DnsVpnService : VpnService() {
             establishedFd = descriptor
             // Include rules saved while the VPN interface was being established.
             reloadDomainPolicy(requestGeneration)
-            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+            if (!isCurrentStartRequest(requestGeneration)) {
                 runCatching { descriptor.close() }
                 establishedFd = null
                 abandonSupersededStartup()
@@ -851,6 +1602,7 @@ class DnsVpnService : VpnService() {
             tunnelParentJob = activeJob
             tunnelScope = activeTunnelScope
             updateLifecycleState(VpnLifecycleState.RUNNING)
+            registerUnderlyingNetworkCallback()
             addLog("[防護成功] 安全 DNS 防護已成功啟動並建立通道。")
 
             val activeNotification = createNotification(notificationText(VpnLifecycleState.RUNNING))
@@ -860,6 +1612,7 @@ class DnsVpnService : VpnService() {
             activeTunnelScope.launch { runTunnel(descriptor, generation) }
             establishedFd = null
         } catch (exception: CancellationException) {
+            unregisterUnderlyingNetworkCallback()
             establishedFd?.let { descriptor ->
                 if (vpnInterface === descriptor) {
                     tunnelGeneration++
@@ -873,6 +1626,7 @@ class DnsVpnService : VpnService() {
             updateLifecycleState(VpnLifecycleState.STOPPED)
             throw exception
         } catch (exception: Exception) {
+            unregisterUnderlyingNetworkCallback()
             establishedFd?.let { descriptor ->
                 if (vpnInterface === descriptor) {
                     tunnelGeneration++
@@ -883,7 +1637,7 @@ class DnsVpnService : VpnService() {
                 }
                 runCatching { descriptor.close() }
             }
-            if (!lifecycleRequests.isCurrent(requestGeneration)) {
+            if (!isCurrentStartRequest(requestGeneration)) {
                 abandonSupersededStartup()
                 return
             }
@@ -894,6 +1648,7 @@ class DnsVpnService : VpnService() {
     }
 
     private fun abandonSupersededStartup() {
+        unregisterUnderlyingNetworkCallback()
         updateLifecycleState(VpnLifecycleState.STOPPED)
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
     }
@@ -928,7 +1683,7 @@ class DnsVpnService : VpnService() {
                 tcp = null
             },
             onEnded = { failure ->
-                lifecycleCommands.trySend(
+                enqueueLifecycleCommand(
                     LifecycleCommand.TunnelEnded(generation, descriptor, failure)
                 )
             }
@@ -946,6 +1701,9 @@ class DnsVpnService : VpnService() {
             }
             Ipv4UdpDnsParseResult.NotDns -> return
             is Ipv4UdpDnsParseResult.Rejected -> {
+                if (BuildConfig.D14_DEVICE_TEST) {
+                    d14PacketRejectionCounts.incrementAndGet(parsed.reason.ordinal)
+                }
                 val request = beginDnsRequest(receivedAtNanos)
                 try {
                     parsed.dnsErrorResponse?.let { response ->
@@ -999,6 +1757,7 @@ class DnsVpnService : VpnService() {
         val queryKey = DnsQueryKey(
             bytes = dnsPacket.payload,
             resolverGeneration = dnsState.resolverGeneration,
+            underlyingNetworkGeneration = dnsState.underlyingNetworkGeneration,
             policyAssembly = dnsState.policyAssembly
         )
         if (tryHandleFastPath(dnsPacket, dnsState, queryKey, request, responseWriter)) return
@@ -1029,7 +1788,8 @@ class DnsVpnService : VpnService() {
             }
         }
         val deadline = DnsRequestDeadline.fromReceivedAt(receivedAtNanos)
-        val requestJob = activeScope.launch {
+        val networkCancellationResponseSent = AtomicBoolean(false)
+        val requestJob = activeScope.launch(start = CoroutineStart.LAZY) {
             try {
                 val outcome = forwardAdmittedDnsQuery(
                     dnsPacket = dnsPacket,
@@ -1043,7 +1803,14 @@ class DnsVpnService : VpnService() {
                 completeDnsRequest(request, outcome)
             } catch (exception: CancellationException) {
                 completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
-                throw exception
+                if (isVpnRunning && activeScope.isActive && !isCurrentDnsState(dnsState)) {
+                    if (lease.isLeader) queryAdmission.completeLeader(lease, null)
+                    if (networkCancellationResponseSent.compareAndSet(false, true)) {
+                        sendServFailResponse(dnsPacket, responseWriter)
+                    }
+                } else {
+                    throw exception
+                }
             } catch (exception: Exception) {
                 Log.e(TAG, "Failed in DNS query coroutine", exception)
                 if (lease.isLeader) queryAdmission.completeLeader(lease, null)
@@ -1051,13 +1818,25 @@ class DnsVpnService : VpnService() {
                 completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
             }
         }
-        requestJob.invokeOnCompletion {
+        if (lease.isLeader) activeDnsLeaders[requestJob] = dnsState
+        requestJob.invokeOnCompletion { completion ->
             completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
+            activeDnsLeaders.remove(requestJob)
             if (lease.isLeader) queryAdmission.completeLeader(lease, null)
             queryAdmission.release(lease)
+            if (
+                completion is CancellationException &&
+                lease.isLeader &&
+                isVpnRunning &&
+                activeScope.isActive &&
+                !isCurrentDnsState(dnsState) &&
+                networkCancellationResponseSent.compareAndSet(false, true)
+            ) {
+                sendServFailResponse(dnsPacket, responseWriter)
+            }
         }
+        requestJob.start()
     }
-
     private fun tryHandleFastPath(
         dnsPacket: ParsedIpv4UdpDnsQuery,
         dnsState: DnsStateSnapshot,
@@ -1097,10 +1876,21 @@ class DnsVpnService : VpnService() {
             completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
             return true
         }
-        if (!isBlocked) return false
+        if (!isBlocked) {
+            if (!isCurrentDnsState(dnsState)) {
+                sendServFailResponse(dnsPacket, responseWriter)
+                completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
+                return true
+            }
+            return false
+        }
 
         val blockedResponse = DnsMessageValidator.buildNxDomainResponse(dnsPacket.query)
-        responseWriter.send(blockedResponse)
+        if (!sendResolvedResponseIfCurrent(dnsPacket, dnsState, blockedResponse, responseWriter)) {
+            sendServFailResponse(dnsPacket, responseWriter)
+            completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
+            return true
+        }
         val savedBytes = estimateSavedBytes(domain)
         completeDnsRequest(request, DnsClientTerminalOutcome.BLOCKED, savedBytes = savedBytes)
         val reason = if (
@@ -1128,7 +1918,22 @@ class DnsVpnService : VpnService() {
         dnsPacket: ParsedIpv4UdpDnsQuery,
         responseWriter: DnsResponseWriter
     ) {
+        recordNetworkRecoveryFailure()
         responseWriter.send(DnsMessageValidator.buildServFailResponse(dnsPacket.query))
+    }
+
+    private fun putCacheIfCurrentState(
+        dnsState: DnsStateSnapshot,
+        queryKey: DnsQueryKey,
+        response: ByteArray,
+        query: ParsedDnsQuery
+    ): Boolean = synchronized(dnsStateLock) {
+        if (!isCurrentDnsStateLocked(dnsState)) {
+            false
+        } else {
+            putCache(queryKey, response, query)
+            true
+        }
     }
 
     private suspend fun performDohLookup(
@@ -1139,8 +1944,7 @@ class DnsVpnService : VpnService() {
         metricsRequest: DnsDiagnosticMetrics.Request
     ): ByteArray? {
         if (deadline.remainingMillis() <= 0L) return null
-        return getOkHttpClient()
-            .forDohEndpoints(resolverEndpoints)
+        return dohEndpointClients.clientFor(getOkHttpClient(), resolverEndpoints, endpoint)
             .lookupDoh(
                 endpointUrl = endpoint.url,
                 query = query,
@@ -1199,6 +2003,16 @@ class DnsVpnService : VpnService() {
         val dnsPayload = dnsPacket.payload
         val query = dnsPacket.query
         val domain = query.question.domainName ?: "Unknown"
+        if (!isCurrentDnsState(dnsState)) {
+            if (lease.isLeader) queryAdmission.completeLeader(lease, null)
+            sendServFailResponse(dnsPacket, responseWriter)
+            return DnsClientTerminalOutcome.FAILED
+        }
+        if (lease.isLeader && !awaitStableUnderlyingNetwork(dnsState, deadline)) {
+            queryAdmission.completeLeader(lease, null)
+            sendServFailResponse(dnsPacket, responseWriter)
+            return DnsClientTerminalOutcome.FAILED
+        }
         val sharedResponse = if (lease.isLeader) {
             try {
                 val remainingMillis = deadline.remainingMillis()
@@ -1211,11 +2025,13 @@ class DnsVpnService : VpnService() {
                             DnsMessageValidator.isValidResponse(it, query)
                         }
                         if (validatedResponse != null &&
-                            isCurrentDnsState(dnsState)
+                            !putCacheIfCurrentState(dnsState, queryKey, validatedResponse, query)
                         ) {
-                            putCache(queryKey, validatedResponse, query)
+                            return@withTimeoutOrNull null
                         }
-                        validatedResponse?.takeIf { deadline.remainingMillis() > 0L }
+                        validatedResponse?.takeIf {
+                            deadline.remainingMillis() > 0L && isCurrentDnsState(dnsState)
+                        }
                     }
                 }
             } catch (exception: CancellationException) {
@@ -1225,8 +2041,13 @@ class DnsVpnService : VpnService() {
                 null
             }.also { queryAdmission.completeLeader(lease, it) }
         } else {
-            val remainingMillis = deadline.remainingMillis()
-            if (remainingMillis <= 0L) null else withTimeoutOrNull(remainingMillis) { lease.result.await() }
+            val queueWaitStartedNanos = System.nanoTime()
+            try {
+                val remainingMillis = deadline.remainingMillis()
+                if (remainingMillis <= 0L) null else withTimeoutOrNull(remainingMillis) { lease.result.await() }
+            } finally {
+                recordCoalescedWait(request, System.nanoTime() - queueWaitStartedNanos)
+            }
         }
 
         if (sharedResponse != null) {
@@ -1251,7 +2072,7 @@ class DnsVpnService : VpnService() {
 
     private fun upstreamEndpoint(address: String) = DnsUdpUpstreamEndpoint(
         InetAddress.getByName(address),
-        BuildConfig.DNS_UPSTREAM_PORT
+        d14DeviceTestUpstream()?.second ?: BuildConfig.DNS_UPSTREAM_PORT
     )
 
     private suspend fun resolveUpstreamQuery(
@@ -1268,23 +2089,24 @@ class DnsVpnService : VpnService() {
             endpoints = endpoints,
             deadline = deadline,
             dohQuery = { endpoint ->
-                if (!dohFailureBackoff.tryAcquire(endpoint.url)) {
+                if (!isCurrentDnsState(dnsState) ||
+                    !dohFailureBackoff.tryAcquire(endpoint.url, dnsState.underlyingNetworkGeneration)) {
                     null
                 } else {
                     val response = try {
                         performDohLookup(endpoint, endpoints, query, deadline, request)
                     } catch (exception: CancellationException) {
-                        dohFailureBackoff.cancelAttempt(endpoint.url)
+                        dohFailureBackoff.cancelAttempt(endpoint.url, dnsState.underlyingNetworkGeneration)
                         throw exception
                     } catch (exception: Exception) {
-                        dohFailureBackoff.recordFailure(endpoint.url)
+                        dohFailureBackoff.recordFailure(endpoint.url, dnsState.underlyingNetworkGeneration)
                         logDnsTransportFailure("DoH resolution failed for ${endpoint.url}", exception)
                         null
                     }
                     if (response == null) {
-                        dohFailureBackoff.recordFailure(endpoint.url)
+                        dohFailureBackoff.recordFailure(endpoint.url, dnsState.underlyingNetworkGeneration)
                     } else {
-                        dohFailureBackoff.recordSuccess(endpoint.url)
+                        dohFailureBackoff.recordSuccess(endpoint.url, dnsState.underlyingNetworkGeneration)
                     }
                     response
                 }
@@ -1388,6 +2210,7 @@ class DnsVpnService : VpnService() {
             }
         )
 
+        if (!isCurrentDnsState(dnsState)) return null
         when (outcome.transport) {
             DnsTransport.ENCRYPTED_HTTPS -> {
                 dnsTransportStatusFlow.value = "DoH 加密"
@@ -1415,7 +2238,7 @@ class DnsVpnService : VpnService() {
                 }
             }
         }
-        return outcome.response?.takeIf { deadline.remainingMillis() > 0L }
+        return outcome.response?.takeIf { deadline.remainingMillis() > 0L && isCurrentDnsState(dnsState) }
     }
 
     private fun formatTxId(dnsPayload: ByteArray): String {
@@ -1445,25 +2268,45 @@ class DnsVpnService : VpnService() {
         isVpnRunning = state.isRunning
     }
 
+    private fun enterForeground(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
     private fun stopSelfIfIdle(startId: Int) {
-        if (
-            lifecycleStateFlow.value == VpnLifecycleState.STOPPED ||
-            lifecycleStateFlow.value == VpnLifecycleState.FAILED
-        ) {
-            stopSelfResult(startId)
+        synchronized(lifecycleDispatchLock) {
+            val eligibleStartId = lifecycleCommandTracker.requestIdleStop(
+                startId,
+                lifecycleStateFlow.value
+            ) ?: return
+            stopService(Intent(this, VpnRecoveryService::class.java))
+            stopSelfResult(eligibleStartId)
         }
     }
 
     private fun notificationText(state: VpnLifecycleState): String = when (state) {
         VpnLifecycleState.STOPPED -> "DNS Shield 防護已關閉"
         VpnLifecycleState.STARTING -> "DNS Shield 正在啟動防護…"
-        VpnLifecycleState.RUNNING -> "DNS Shield 防護中"
+        VpnLifecycleState.RUNNING -> when {
+            networkCallbackRegistration == null -> "DNS Shield 防護中"
+            else -> when (underlyingNetworkReducer.snapshot().connectivity) {
+                UnderlyingNetworkConnectivity.OFFLINE -> "DNS Shield 防護中，目前離線"
+                UnderlyingNetworkConnectivity.UNKNOWN -> "DNS Shield 防護中，正在確認目前選用的網路"
+                UnderlyingNetworkConnectivity.CONNECTING -> "DNS Shield 防護中，正在確認網路連線"
+                UnderlyingNetworkConnectivity.CAPTIVE_PORTAL -> "DNS Shield 防護中，網路需要登入"
+                UnderlyingNetworkConnectivity.ONLINE -> "DNS Shield 防護中"
+            }
+        }
         VpnLifecycleState.STOPPING -> "DNS Shield 正在停止防護…"
         VpnLifecycleState.FAILED -> "DNS Shield 防護異常"
     }
 
     // Service destruction cannot suspend, so it closes the owned descriptor and cancels its session directly.
     private fun closeTunnelResources() {
+        unregisterUnderlyingNetworkCallback()
         rulePolicyStatusFlow.value = RulePolicyStatus.NotLoaded
         val finalState = lifecycleStateFlow.value.stateAfterServiceDestroy()
         tunnelGeneration++
@@ -1487,12 +2330,15 @@ class DnsVpnService : VpnService() {
     }
 
     private suspend fun restartTunnel(requestGeneration: Long) {
+        if (!isCurrentStartRequest(requestGeneration)) return
         addLog("[安全防護] 正在重新啟動 DNS 隧道以套用新名單…")
         stopVpn()
         startVpn(requestGeneration)
     }
 
     private suspend fun stopVpn(finalState: VpnLifecycleState = VpnLifecycleState.STOPPED) {
+        stopService(Intent(this, VpnRecoveryService::class.java))
+        unregisterUnderlyingNetworkCallback()
         rulePolicyStatusFlow.value = RulePolicyStatus.NotLoaded
         addLog("正在關閉安全 DNS 防護隧道並釋放資源…")
         if (lifecycleStateFlow.value != VpnLifecycleState.STOPPED) {
@@ -1532,44 +2378,8 @@ class DnsVpnService : VpnService() {
         Log.i(TAG, "VPN stopped completely")
     }
 
-    private fun createNotification(content: String): Notification {
-        val stopIntent = Intent(this, DnsVpnService::class.java).apply {
-            action = ACTION_STOP
-        }
+    private fun createNotification(content: String): Notification = createVpnNotification(this, content)
 
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
+    private fun createNotificationChannel() = createVpnNotificationChannel(this)
 
-        val stopPendingIntent = PendingIntent.getService(this, 1, stopIntent, flags)
-
-        val mainIntent = Intent(this, MainActivity::class.java)
-        val mainPendingIntent = PendingIntent.getActivity(this, 0, mainIntent, flags)
-
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_lock_lock) // Standard lock icon
-            .setContentTitle("DNS Shield VPN")
-            .setContentText(content)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setContentIntent(mainPendingIntent)
-            .addAction(android.R.drawable.ic_media_pause, "停止服務", stopPendingIntent)
-            .build()
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "DNS Shield ",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "通知使用者 DNS VPN 正在運作中"
-            }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
-        }
-    }
 }

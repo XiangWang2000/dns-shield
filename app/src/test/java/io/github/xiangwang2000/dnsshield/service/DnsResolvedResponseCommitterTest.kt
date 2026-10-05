@@ -1,5 +1,11 @@
 package io.github.xiangwang2000.dnsshield.service
 
+import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyAssembler
+import io.github.xiangwang2000.dnsshield.blocking.ReloadableDomainPolicy
+import io.github.xiangwang2000.dnsshield.blocking.UserDomainRule
+import io.github.xiangwang2000.dnsshield.blocking.DomainRuleAction
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.test.assertEquals
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -9,6 +15,52 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DnsResolvedResponseCommitterTest {
+    @Test
+    fun allowReloadBeforeCommitRejectsPreviouslyComputedBlockedNxDomain() {
+        val query = DnsTestMessages.query()
+        val parsed = (DnsMessageValidator.parseQuery(query) as DnsQueryParseResult.Valid).query
+        val domain = requireNotNull(parsed.question.domainName)
+        val blocked = DomainPolicyAssembler.assemble(
+            userRules = listOf(UserDomainRule(domain, DomainRuleAction.BLOCK, false))
+        )
+        val allowed = DomainPolicyAssembler.assemble(
+            userRules = listOf(UserDomainRule(domain, DomainRuleAction.ALLOW, false))
+        )
+        val policy = ReloadableDomainPolicy(blocked)
+        val stateLock = Any()
+        val computed = CountDownLatch(1)
+        val releaseCommit = CountDownLatch(1)
+        val accepted = AtomicReference<Boolean?>()
+        val delivered = AtomicReference<ByteArray?>()
+        val sender = thread {
+            val snapshot = policy.snapshot()
+            if (!snapshot.matcher.shouldBlock(domain)) return@thread
+            val response = DnsMessageValidator.buildNxDomainResponse(parsed)
+            computed.countDown()
+            if (!releaseCommit.await(2, TimeUnit.SECONDS)) return@thread
+            accepted.set(DnsResolvedResponseCommitter.sendIfCurrent(
+                stateLock = stateLock,
+                isCurrent = { policy.snapshot() === snapshot },
+                response = response,
+                transactionIdSource = query,
+                responseWriter = DnsResponseWriter { delivered.set(it) }
+            ))
+        }
+        try {
+            assertTrue(computed.await(1, TimeUnit.SECONDS))
+            synchronized(stateLock) { policy.install(allowed) }
+            assertFalse(policy.shouldBlock(domain))
+            releaseCommit.countDown()
+            sender.join(2_000)
+            assertFalse(sender.isAlive)
+            assertEquals(false, accepted.get())
+            assertEquals(null, delivered.get(), "Old BLOCK must not commit NXDOMAIN after ALLOW reload")
+        } finally {
+            releaseCommit.countDown()
+            sender.join(2_000)
+        }
+    }
+
     @Test
     fun slowTunWriteDoesNotHoldResolverStateLock() {
         val stateLock = Any()

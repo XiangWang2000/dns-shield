@@ -18,6 +18,25 @@ import kotlin.test.assertTrue
 
 class DnsPlaintextFallbackFenceTest {
     @Test
+    fun requestedStrictGuardSurvivesOldAllowAndRejectsTcpRegistration() {
+        val fence = DnsPlaintextFallbackFence()
+        Socket().use { socket ->
+            assertTrue(fence.registerTcpSocketIfAllowed(1, true, { true }, socket))
+            fence.requestAllowed(1, false)
+            fence.setAllowed(1, true)
+            assertFalse(fence.allows(1))
+            Socket().use { later ->
+                assertFalse(fence.registerTcpSocketIfAllowed(1, true, { true }, later))
+            }
+            fence.closeSocketsIfRequestedStrict(1)
+            assertTrue(socket.isClosed)
+            fence.requestAllowed(1, true)
+            fence.setAllowed(1, true)
+            assertTrue(fence.allows(1))
+        }
+    }
+
+    @Test
     fun strictSelectionClosesRegisteredTcpSocketBeforeConnect() {
         val resolverId = 42
         val fence = DnsPlaintextFallbackFence()

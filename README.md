@@ -33,11 +33,28 @@ DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標
 DNS Shield 是 DNS 層工具，不是完整流量 VPN、防毒軟體或防火牆：
 
 - 目前原始碼支援送往虛擬 DNS 的 IPv4 UDP/53 與 TCP/53 查詢；TCP/53 已在 Android 10 實機與 Android 15 模擬器驗證真實 TUN 查詢、UDP TC 後重試、32 條連線容量、idle timeout 與停止清理。已安裝的舊版 APK 需更新後才包含此功能；詳見 [D11 驗證紀錄](docs/d11-runtime-validation.md)。
+- 啟用 VPN 時明確允許 IPv6 位址族；底層網路支援時，一般 IPv6 連線走底層網路，不進入 DNS Shield TUN，也不套用 DNS Shield 網域規則。IPv4 UDP/TCP 53 上的 AAAA 查詢仍由 DNS Shield 處理；IPv6 DNS 封包不會被攔截，此設定也不會新增 IPv6 DNS 上游。詳見 [D03 驗證紀錄](docs/d03-dualstack-validation.md)。
 - App 自行使用 DoH、DoT、非標準連接埠、直接 IP 連線或其他繞過系統 DNS 的方式，不會被此工具攔截。
 - DNS 層規則無法阻擋與正常內容共用網域的廣告，也無法保證涵蓋所有廣告、追蹤或惡意網域。
 - App 不會在執行期間下載遠端規則；production blocklist 只會隨經驗證的新 APK 更新。私有 override 缺失時使用 APK 內規則，格式或排序驗證失敗時也會改用 APK 內已驗證的清單；若該清單同樣無法使用，才退回內建規則。
 - 「節省流量」是依被阻擋網域類型推算的參考值，不是實際網路流量量測。
 - 實際解析延遲、耗電與攔截效果會因裝置、Android 版本、網路及 DNS 解析器而異。
+
+## Always-on 與系統恢復
+
+- 服務會持久化最後一次明確的使用者啟用或停用選擇。系統以 null intent
+  恢復服務時，會在使用者最後選擇啟用，或 Android 29 以上已設定 Always-on
+  且 App 尚未記錄明確停用的情況下重新建立隧道。
+- 使用者明確停用服務，或 Android 撤銷 VPN 授權時，服務會清除恢復意圖，避免
+  `START_STICKY` 或系統恢復流程重新啟用 VPN。
+- Manifest 明確宣告支援 Android Always-on；完整的重開機、程序回收、切換 VPN
+  與各 Android 版本的實機驗收仍需逐項執行，不能只以 `START_STICKY` 宣稱完成。
+- 系統恢復沒有即時或必然成功的保證。在已測的 ASUS Android 10 上，預設背景限制曾阻止恢復；使用者自行設定 VPN App 的電池豁免後，受控程序死亡測試可恢復。這不代表其他廠牌、真正低記憶體回收或所有背景政策都已驗證。
+- 若重開機或程序終止後未恢復，先開啟 App 查看防護狀態；「防護已關閉」表示目前沒有提供防護。需要防護時重新按下啟用，並確認 Android 的 VPN 指示和 App 狀態。可在系統的電池最佳化／背景執行設定中查找 DNS Shield 的 VPN App，依個人需求允許背景執行；各廠牌選單名稱不同。App 不會自行變更電池設定，同名測試 App 必須先核對套件，不要調整測試執行器。
+- Android 24–28 沒有公開的 `isAlwaysOn()` 查詢 API；這些版本只有在 App 曾明確
+  記錄啟用意圖時才會自動恢復，需透過實機流程驗證系統行為。
+- 目前 VPN 只建立 DNS 位址的路由，尚未驗證 Android lockdown 對一般流量的相容性。
+  因此不宣稱支援 lockdown，啟用該模式前應先完成完整流量路徑與實機驗證。
 
 ## 隱私
 
@@ -87,6 +104,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 .\gradlew.bat --no-daemon --console=plain :app:connectedDebugAndroidTest
 ```
 
+D15 的實機 smoke test 使用獨立的 `d15test` build type，套件為
+`io.github.xiangwang2000.dnsshield.d15test`，不會使用正式 Debug 套件的資料。可在
+已連線的裝置上只執行 D15 測試：
+
+```powershell
+.\gradlew.bat :app:assembleD15test :app:assembleD15testAndroidTest
+adb install -r .\app\build\outputs\apk\d15test\app-d15test.apk
+adb install -r .\app\build\outputs\apk\androidTest\d15test\app-d15test-androidTest.apk
+adb shell am instrument -w -r `
+  -e class io.github.xiangwang2000.dnsshield.service.D15ServiceSmokeTest `
+  io.github.xiangwang2000.dnsshield.d15test.test/androidx.test.runner.AndroidJUnitRunner
+adb uninstall io.github.xiangwang2000.dnsshield.d15test.test
+adb uninstall io.github.xiangwang2000.dnsshield.d15test
+```
+
+此 smoke test 驗證隔離套件的實際 VPN 啟動／停止、使用者開關意圖，以及顯式停止後不因空 action 自動恢復；測試前須先同意該隔離套件的 Android VPN 權限。Always-on 重開機、程序回收、
+VPN 切換、授權撤銷及 lockdown 仍需逐項實機驗收；詳見 [D15 驗證紀錄](docs/d15-device-acceptance.md)。
+
 離線 blocklist 編譯器及其測試可獨立執行：
 
 ```powershell
@@ -110,6 +145,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-production-block
 ```
 
 測試方法與 ASUS_Z01RD 實測結果請參閱 [docs/production-blocklist-android-benchmark.md](docs/production-blocklist-android-benchmark.md)。
+
+VPN 底層網路切換的觀察方式、API 24–27 限制及實機驗收狀態，請參閱 [docs/network-change-recovery.md](docs/network-change-recovery.md)。
 
 Public Suffix 來源更新是獨立且明確的維護操作。先安裝鎖定且帶雜湊的 IDNA 依賴，再取得並正規化 manifest 指定的來源：
 

@@ -40,7 +40,7 @@ class DnsDohHttpClientTest {
                 .header("Content-Type", "application/dns-message")
                 .body(body.get().toResponseBody("application/dns-message".toMediaType()))
                 .build()
-        }.build().forDohEndpoints(emptyList())
+        }.build().forDohEndpoint(DnsDohEndpoint("https://dns.example.test/dns-query", "dns.example.test", emptyList(), true))
         val url = "https://dns.example.test/dns-query"
         suspend fun lookup() = client.lookupDoh(
             url,
@@ -88,7 +88,7 @@ class DnsDohHttpClientTest {
         }
         server.start()
         val client = OkHttpClient.Builder().callTimeout(2, TimeUnit.SECONDS).build()
-            .forDohEndpoints(emptyList())
+            .forDohEndpoint(DnsDohEndpoint("https://dns.example.test/dns-query", "dns.example.test", emptyList(), true))
         try {
             for (code in listOf(301, 302, 303, 307, 308)) {
                 status.set(code)

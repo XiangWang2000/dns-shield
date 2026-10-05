@@ -69,7 +69,7 @@ class DohEndpointConfigurationTest {
                 resolverIp = "203.0.113.53"
             )
         )
-        val dns = DohBootstrapDns.forEndpoints(listOf(endpoint))
+        val dns = DohBootstrapDns.forEndpoint(endpoint)
 
         assertEquals(
             listOf("192.0.2.1", "192.0.2.2"),

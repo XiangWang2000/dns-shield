@@ -23,6 +23,7 @@ import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
 import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
 import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
+import io.github.xiangwang2000.dnsshield.service.ResolverCommandRuntime
 import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
 import io.github.xiangwang2000.dnsshield.service.VpnToggleAction
 import kotlinx.coroutines.Dispatchers
@@ -121,6 +122,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     private val db = AppDatabase.getDatabase(application)
     private val dnsDao = db.dnsDao()
+    private val resolverCommandCoordinator = ResolverCommandRuntime.coordinator
     private val sharedPrefs = application.getSharedPreferences("dns_shield_prefs", Context.MODE_PRIVATE)
     private val publicSuffixResolverOwner by lazy {
         PublicSuffixResolverOwner.fromAssets(application.assets)
@@ -517,22 +519,26 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectDnsServer(serverId: Int) {
-        viewModelScope.launch(Dispatchers.IO) {
+        val submission = resolverCommandCoordinator.submit { revision ->
             val success = dnsDao.setActiveDnsServer(serverId)
-            if (!success) {
+            val activeServer = dnsDao.getActiveDnsServer()
+            resolverCommandCoordinator.dispatchIfCurrent(revision, activeServer, ::sendResolverUpdate)
+            success
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (!submission.result.await()) {
                 addLog("DNS 切換失敗：找不到指定的 DNS Server id=$serverId")
-                return@launch
-            }
-            val selected = dnsDao.getActiveDnsServer()
-            if (selected != null) {
-                // Use cross-process UPDATE_DNS intent command
-                val intent = Intent(getApplication(), DnsVpnService::class.java).apply {
-                    action = DnsVpnService.ACTION_UPDATE_DNS
-                    putExtra("resolverId", selected.id)
-                }
-                getApplication<Application>().startService(intent)
             }
         }
+    }
+
+    private fun sendResolverUpdate(server: DnsServer, revision: Long) {
+        val intent = Intent(getApplication(), DnsVpnService::class.java).apply {
+            action = DnsVpnService.ACTION_UPDATE_DNS
+            putExtra("resolverId", server.id)
+            putExtra(DnsVpnService.EXTRA_RESOLVER_COMMAND_REVISION, revision)
+        }
+        getApplication<Application>().startService(intent)
     }
 
     fun setPlaintextFallback(server: DnsServer, allow: Boolean) {
@@ -543,21 +549,21 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        viewModelScope.launch(Dispatchers.IO) {
-            // Fence before persistence without waiting on socket I/O on the UI thread.
-            DnsVpnService.setPlaintextFallbackAllowed(server.id, allow)
-            if (dnsDao.updatePlaintextFallback(server.id, allow) == 0) return@launch
-            addLog(
-                if (allow) "DNS 傳輸政策已設為加密優先，可在 DoH 失敗時降級 UDP/53"
-                else "DNS 傳輸政策已設為僅加密；DoH 無法使用時將回覆 SERVFAIL"
-            )
+        val submission = resolverCommandCoordinator.submitFallbackPolicy(server.id, onSubmitted = { DnsVpnService.requestPlaintextFallbackAllowed(server.id, allow) }) { revision, applyRuntimeFence ->
+            applyRuntimeFence {
+                // Apply only if no newer setting for this resolver has already been requested.
+                DnsVpnService.setPlaintextFallbackAllowed(server.id, allow)
+            }
+            val updated = dnsDao.updatePlaintextFallback(server.id, allow) > 0
             val activeServer = dnsDao.getActiveDnsServer()
-            if (activeServer?.id == server.id) {
-                getApplication<Application>().startService(
-                    Intent(getApplication(), DnsVpnService::class.java).apply {
-                        action = DnsVpnService.ACTION_UPDATE_DNS
-                        putExtra("resolverId", server.id)
-                    }
+            resolverCommandCoordinator.dispatchIfCurrent(revision, activeServer, ::sendResolverUpdate)
+            updated
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (submission.result.await()) {
+                addLog(
+                    if (allow) "DNS 傳輸政策已設為加密優先，可在 DoH 失敗時降級 UDP/53"
+                    else "DNS 傳輸政策已設為僅加密；DoH 無法使用時將回覆 SERVFAIL"
                 )
             }
         }
@@ -673,8 +679,14 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun deleteDnsServer(server: DnsServer) {
+        val submission = resolverCommandCoordinator.submit { revision ->
+            val deleted = dnsDao.deleteDnsServerSafely(server.id)
+            val activeServer = dnsDao.getActiveDnsServer()
+            resolverCommandCoordinator.dispatchIfCurrent(revision, activeServer, ::sendResolverUpdate)
+            deleted
+        }
         viewModelScope.launch(Dispatchers.IO) {
-            val success = dnsDao.deleteDnsServerSafely(server.id)
+            val success = submission.result.await()
             if (!success) {
                 addLog("無法刪除 DNS：至少需要保留一組 DNS Server")
                 withContext(Dispatchers.Main) {
@@ -683,18 +695,6 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                 return@launch
             }
             addLog("刪除 DNS 設定：${server.name}")
-            // If deleted the active one, fallback is handled inside transaction; we notify service here with the new active DNS
-            if (server.isActive) {
-                val newActive = dnsDao.getActiveDnsServer()
-                if (newActive != null) {
-                    // Use cross-process UPDATE_DNS intent command
-                    val intent = Intent(getApplication(), DnsVpnService::class.java).apply {
-                        action = DnsVpnService.ACTION_UPDATE_DNS
-                        putExtra("resolverId", newActive.id)
-                    }
-                    getApplication<Application>().startService(intent)
-                }
-            }
         }
     }
 

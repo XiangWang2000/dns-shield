@@ -1,12 +1,19 @@
 package io.github.xiangwang2000.dnsshield.service
 
 import java.io.DataInputStream
+import java.io.IOException
 import java.net.ConnectException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketException
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -145,6 +152,177 @@ class SocksDnsServerTest {
         }
     }
 
+    @Test
+    fun timeoutCancellationFromBlockingHandlerDoesNotEscapeWorkerOrLeakSessionSlot() {
+        val entered = CountDownLatch(1)
+        val calls = AtomicInteger()
+        val uncaught = ConcurrentLinkedQueue<Throwable>()
+        withServer(
+            handler = { query, respond ->
+                Thread.currentThread().uncaughtExceptionHandler =
+                    Thread.UncaughtExceptionHandler { _, failure -> uncaught.add(failure) }
+                if (calls.incrementAndGet() == 1) {
+                    entered.countDown()
+                    runBlocking { withTimeout(400L) { awaitCancellation() } }
+                } else {
+                    respond(query)
+                }
+            },
+            maxSessions = 1,
+            idleTimeoutMillis = 3_000
+        ) { server ->
+            connect(server).use { first ->
+                assertEquals(0, requestStatus(first, server, 1, 1, byteArrayOf(10, 0, 0, 1, 0, 53)))
+                DnsTcpFrameCodec.writeFrame(first.getOutputStream(), byteArrayOf(1, 2, 3))
+                assertTrue(entered.await(1, TimeUnit.SECONDS))
+                awaitClosed(first)
+            }
+
+            connectWithStatus(server).use { replacement ->
+                val query = byteArrayOf(8, 7, 6)
+                DnsTcpFrameCodec.writeFrame(replacement.getOutputStream(), query)
+                assertContentEquals(query, DnsTcpFrameCodec.readFrame(replacement.getInputStream()))
+            }
+        }
+        assertTrue(uncaught.isEmpty(), "Handler timeout escaped its session worker: $uncaught")
+    }
+
+    @Test
+    fun closingServerInterruptsBlockingHandlerAndKeepsRestartUsable() {
+        val entered = CountDownLatch(1)
+        val interrupted = CountDownLatch(1)
+        val uncaught = ConcurrentLinkedQueue<Throwable>()
+        val server = SocksDnsServer(
+            handler = { _, _ ->
+                Thread.currentThread().uncaughtExceptionHandler =
+                    Thread.UncaughtExceptionHandler { _, failure -> uncaught.add(failure) }
+                entered.countDown()
+                try {
+                    CountDownLatch(1).await()
+                } catch (failure: InterruptedException) {
+                    interrupted.countDown()
+                    throw failure
+                }
+            },
+            maxSessions = 1,
+            idleTimeoutMillis = 3_000
+        )
+        server.start()
+        connect(server).use { socket ->
+            assertEquals(0, requestStatus(socket, server, 1, 1, byteArrayOf(10, 0, 0, 1, 0, 53)))
+            DnsTcpFrameCodec.writeFrame(socket.getOutputStream(), byteArrayOf(2, 4, 6))
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            server.close()
+            awaitClosed(socket)
+        }
+        assertTrue(interrupted.await(1, TimeUnit.SECONDS), "close did not interrupt the blocked handler")
+        assertTrue(uncaught.isEmpty(), "Server close interruption escaped its session worker: $uncaught")
+
+        withServer { restarted ->
+            connect(restarted).use { socket ->
+                assertEquals(0, requestStatus(socket, restarted, 1, 1, byteArrayOf(10, 0, 0, 1, 0, 53)))
+                val query = byteArrayOf(5, 7, 9)
+                DnsTcpFrameCodec.writeFrame(socket.getOutputStream(), query)
+                assertContentEquals(query, DnsTcpFrameCodec.readFrame(socket.getInputStream()))
+            }
+        }
+    }
+
+    @Test
+    fun handlerIoFailureDoesNotEscapeWorkerOrLeakSessionSlot() {
+        val calls = AtomicInteger()
+        val uncaught = ConcurrentLinkedQueue<Throwable>()
+        withServer(
+            handler = { query, respond ->
+                Thread.currentThread().uncaughtExceptionHandler =
+                    Thread.UncaughtExceptionHandler { _, failure -> uncaught.add(failure) }
+                if (calls.incrementAndGet() == 1) throw IOException("upstream reset")
+                respond(query)
+            },
+            maxSessions = 1,
+            idleTimeoutMillis = 3_000
+        ) { server ->
+            connect(server).use { first ->
+                assertEquals(0, requestStatus(first, server, 1, 1, byteArrayOf(10, 0, 0, 1, 0, 53)))
+                DnsTcpFrameCodec.writeFrame(first.getOutputStream(), byteArrayOf(1, 3, 5))
+                awaitClosed(first)
+            }
+
+            connectWithStatus(server).use { replacement ->
+                val query = byteArrayOf(2, 4, 8)
+                DnsTcpFrameCodec.writeFrame(replacement.getOutputStream(), query)
+                assertContentEquals(query, DnsTcpFrameCodec.readFrame(replacement.getInputStream()))
+            }
+        }
+        assertTrue(uncaught.isEmpty(), "Handler I/O failure escaped its session worker: $uncaught")
+    }
+
+    @Test
+    fun peerResetDuringHandlerDoesNotEscapeWorkerOrLeakSessionSlot() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val handlerFinished = CountDownLatch(1)
+        val calls = AtomicInteger()
+        val uncaught = ConcurrentLinkedQueue<Throwable>()
+        withServer(
+            handler = { query, respond ->
+                Thread.currentThread().uncaughtExceptionHandler =
+                    Thread.UncaughtExceptionHandler { _, failure -> uncaught.add(failure) }
+                if (calls.incrementAndGet() == 1) {
+                    entered.countDown()
+                    release.await()
+                    try {
+                        respond(query)
+                    } finally {
+                        handlerFinished.countDown()
+                    }
+                } else {
+                    respond(query)
+                }
+            },
+            maxSessions = 1,
+            idleTimeoutMillis = 3_000
+        ) { server ->
+            val first = connect(server)
+            assertEquals(0, requestStatus(first, server, 1, 1, byteArrayOf(10, 0, 0, 1, 0, 53)))
+            DnsTcpFrameCodec.writeFrame(first.getOutputStream(), byteArrayOf(3, 6, 9))
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            first.setSoLinger(true, 0)
+            first.close()
+            release.countDown()
+            assertTrue(handlerFinished.await(1, TimeUnit.SECONDS), "handler did not finish after peer reset")
+
+            connectWithStatus(server).use { replacement ->
+                val query = byteArrayOf(7, 8, 9)
+                DnsTcpFrameCodec.writeFrame(replacement.getOutputStream(), query)
+                assertContentEquals(query, DnsTcpFrameCodec.readFrame(replacement.getInputStream()))
+            }
+        }
+        assertTrue(uncaught.isEmpty(), "Peer reset escaped its session worker: $uncaught")
+    }
+
+    private fun connectWithStatus(server: SocksDnsServer): Socket {
+        var lastFailure: IOException? = null
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        while (System.nanoTime() < deadline) {
+            val socket = try {
+                connect(server)
+            } catch (failure: IOException) {
+                lastFailure = failure
+                Thread.sleep(10)
+                continue
+            }
+            try {
+                assertEquals(0, requestStatus(socket, server, 1, 1, byteArrayOf(10, 0, 0, 1, 0, 53)))
+                return socket
+            } catch (failure: IOException) {
+                lastFailure = failure
+                socket.close()
+                Thread.sleep(10)
+            }
+        }
+        throw AssertionError("Server did not accept a replacement session", lastFailure)
+    }
     private fun requestStatus(
         server: SocksDnsServer,
         command: Int,

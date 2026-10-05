@@ -86,4 +86,24 @@ class DnsDiagnosticMetricsTest {
         assertEquals(132L, latency.p95Millis)
         assertNull(DnsDiagnosticMetrics().snapshot().latency.p50Millis)
     }
+
+    @Test
+    fun coalescedWaitSummaryIsBoundedAndResettable() {
+        val metrics = DnsDiagnosticMetrics(latencyWindowSize = 4)
+
+        repeat(6) { index ->
+            val request = metrics.begin(0L)
+            metrics.recordCoalescedWait(request, (index + 1L) * 1_000_000L)
+            metrics.complete(request, DnsClientTerminalOutcome.RESOLVED, completedAtNanos = 1L)
+        }
+
+        val wait = metrics.snapshot().coalescedWait
+        assertEquals(4, wait.sampleCount)
+        assertEquals(4L, wait.p50Millis)
+        assertEquals(6L, wait.p95Millis)
+        assertEquals(6L, wait.p99Millis)
+
+        metrics.reset()
+        assertEquals(DnsCoalescedWaitSummary(), metrics.snapshot().coalescedWait)
+    }
 }

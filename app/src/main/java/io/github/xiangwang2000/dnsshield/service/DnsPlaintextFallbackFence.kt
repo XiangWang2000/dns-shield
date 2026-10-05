@@ -8,10 +8,27 @@ import java.util.concurrent.ConcurrentHashMap
 
 internal class DnsPlaintextFallbackFence {
     private class ResolverPolicy(var allowPlaintextFallback: Boolean = true) {
+        @Volatile var requestedAllowed = true
         val activeTcpSockets = HashSet<Socket>()
     }
 
     private val policies = ConcurrentHashMap<Int, ResolverPolicy>()
+
+    /** Publishes the user's request without waiting for socket IO or queued Room work. */
+    fun requestAllowed(resolverId: Int, allowed: Boolean) {
+        policies.computeIfAbsent(resolverId) { ResolverPolicy() }.requestedAllowed = allowed
+    }
+
+    /** Called on IO; a later ALLOW request supersedes this pending strict cleanup. */
+    fun closeSocketsIfRequestedStrict(resolverId: Int) {
+        val policy = policies.computeIfAbsent(resolverId) { ResolverPolicy() }
+        synchronized(policy) {
+            if (!policy.requestedAllowed) {
+                policy.activeTcpSockets.forEach { socket -> runCatching { socket.close() } }
+                policy.activeTcpSockets.clear()
+            }
+        }
+    }
 
     fun setAllowed(resolverId: Int, allowed: Boolean) {
         val policy = policies.computeIfAbsent(resolverId) { ResolverPolicy() }
@@ -26,7 +43,7 @@ internal class DnsPlaintextFallbackFence {
 
     fun allows(resolverId: Int): Boolean {
         val policy = policies.computeIfAbsent(resolverId) { ResolverPolicy() }
-        return synchronized(policy) { policy.allowPlaintextFallback }
+        return synchronized(policy) { policy.requestedAllowed && policy.allowPlaintextFallback }
     }
 
     fun registerTcpSocketIfAllowed(
@@ -37,7 +54,7 @@ internal class DnsPlaintextFallbackFence {
     ): Boolean {
         val policy = policies.computeIfAbsent(resolverId) { ResolverPolicy() }
         return synchronized(policy) {
-            if (!snapshotAllowsPlaintext || !policy.allowPlaintextFallback ||
+            if (!snapshotAllowsPlaintext || !policy.requestedAllowed || !policy.allowPlaintextFallback ||
                 !currentPolicyAllowsPlaintext()
             ) {
                 false
@@ -77,7 +94,7 @@ internal class DnsPlaintextFallbackFence {
     ): Boolean {
         val policy = policies.computeIfAbsent(resolverId) { ResolverPolicy() }
         return synchronized(policy) {
-            if (!snapshotAllowsPlaintext || !policy.allowPlaintextFallback ||
+            if (!snapshotAllowsPlaintext || !policy.requestedAllowed || !policy.allowPlaintextFallback ||
                 !currentPolicyAllowsPlaintext()
             ) {
                 false

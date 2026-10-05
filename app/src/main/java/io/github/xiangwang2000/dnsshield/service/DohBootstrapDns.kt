@@ -18,16 +18,15 @@ internal object DohBootstrapDns : Dns {
 
     override fun lookup(hostname: String): List<InetAddress> = lookup(hostname, builtInAddresses)
 
-    fun forEndpoints(endpoints: List<DnsDohEndpoint>): Dns {
-        val endpointAddresses = endpoints.associate { endpoint ->
-            endpoint.hostname.lowercase(Locale.ROOT) to if (endpoint.canResolveHost) {
-                endpoint.bootstrapAddresses.takeIf { it.isNotEmpty() }?.let { addresses(*it.toTypedArray()) }
-                    ?: listOf(literalAddress(endpoint.hostname))
-            } else {
-                emptyList()
-            }
+    /** Bind one endpoint's host to its configured addresses; another endpoint cannot override it. */
+    fun forEndpoint(endpoint: DnsDohEndpoint): Dns {
+        val configured = if (endpoint.canResolveHost) {
+            endpoint.bootstrapAddresses.takeIf { it.isNotEmpty() }?.let { addresses(*it.toTypedArray()) }
+                ?: listOf(literalAddress(endpoint.hostname))
+        } else {
+            emptyList()
         }
-        val combined = builtInAddresses + endpointAddresses
+        val combined = builtInAddresses + (endpoint.hostname.lowercase(Locale.ROOT) to configured)
         return Dns { hostname -> lookup(hostname, combined) }
     }
 

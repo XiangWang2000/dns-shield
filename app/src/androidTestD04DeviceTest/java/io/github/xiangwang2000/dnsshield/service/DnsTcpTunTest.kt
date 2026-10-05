@@ -118,6 +118,8 @@ class DnsTcpTunTest {
                     kotlinx.coroutines.delay(25)
                 }
             }
+            // Let initial underlying-network callbacks finish before testing steady-state TCP fallback.
+            kotlinx.coroutines.delay(1_000)
             val request = (listOf<Byte>(0, 41, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0) +
                 "d11-large.example.test".split('.').flatMap { listOf(it.length.toByte()) + it.toByteArray().toList() } +
                 listOf<Byte>(0, 0, 16, 0, 1)).toByteArray()

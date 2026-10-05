@@ -40,6 +40,37 @@ internal class VpnLifecycleRequestTracker {
         generation.get() == requestGeneration
 }
 
+internal class VpnLifecycleCommandTracker {
+    private var pendingCommands = 0
+    private var deferredIdleStopStartId: Int? = null
+
+    @Synchronized
+    fun commandEnqueued() {
+        pendingCommands++
+    }
+
+    @Synchronized
+    fun commandCompleted(): Int? {
+        check(pendingCommands > 0) { "No VPN lifecycle command is pending" }
+        pendingCommands--
+        if (pendingCommands > 0) return null
+
+        return deferredIdleStopStartId.also { deferredIdleStopStartId = null }
+    }
+
+    @Synchronized
+    fun requestIdleStop(startId: Int, state: VpnLifecycleState): Int? {
+        if (pendingCommands == 0) {
+            return startId.takeIf { state == VpnLifecycleState.STOPPED || state == VpnLifecycleState.FAILED }
+        }
+        deferredIdleStopStartId = maxOf(deferredIdleStopStartId ?: startId, startId)
+        return null
+    }
+
+    @Synchronized
+    fun pendingCommandCount(): Int = pendingCommands
+}
+
 internal fun isCurrentTunnelEnded(
     endedGeneration: Long,
     currentGeneration: Long,
