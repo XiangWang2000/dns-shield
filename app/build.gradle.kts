@@ -66,6 +66,7 @@ android {
     versionCode = 5
     versionName = "1.2.2"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    buildConfigField("boolean", "D14_DEVICE_TEST", "false")
     buildConfigField("int", "DNS_UPSTREAM_PORT", "53")
     if (d08InstrumentationRequested) testBuildType = "d08test"
     if (d07InstrumentationRequested) testBuildType = "d07test"
@@ -120,6 +121,13 @@ android {
     create("d03test") {
       initWith(getByName("debug"))
       applicationIdSuffix = ".d03test"
+      matchingFallbacks += listOf("debug")
+    }
+    create("d14DeviceTest") {
+      initWith(getByName("debug"))
+      applicationIdSuffix = ".d14test"
+      versionNameSuffix = "-d14test"
+      buildConfigField("boolean", "D14_DEVICE_TEST", "true")
       matchingFallbacks += listOf("debug")
     }
     create("d04DeviceTest") {
