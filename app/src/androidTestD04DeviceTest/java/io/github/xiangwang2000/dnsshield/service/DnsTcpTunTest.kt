@@ -96,10 +96,10 @@ class DnsTcpTunTest {
                     tcpCount.incrementAndGet()
                     val parsed = (DnsMessageValidator.parseQuery(request) as DnsQueryParseResult.Valid).query
                     val response = DnsMessageValidator.buildServFailResponse(parsed).also {
-                        it[2] = 0x81.toByte(); it[3] = 0x80.toByte(); it[7] = 10
+                        it[2] = 0x81.toByte(); it[3] = 0x80.toByte(); it[7] = 30
                     }
                     val record = byteArrayOf(0xc0.toByte(), 12, 0, 16, 0, 1, 0, 0, 0, 60, 0, 201.toByte(), 200.toByte()) + ByteArray(200) { 65 }
-                    DnsTcpFrameCodec.writeFrame(socket.getOutputStream(), response + (1..10).flatMap { record.toList() }.toByteArray())
+                    DnsTcpFrameCodec.writeFrame(socket.getOutputStream(), response + (1..30).flatMap { record.toList() }.toByteArray())
                 }
             } catch (error: Throwable) { if (!tcp.isClosed) failure.set(error) }
         }.apply { start() }
@@ -148,8 +148,9 @@ class DnsTcpTunTest {
                     val next = request.copyOf().also { it[1] = (42 + index).toByte() }
                     DnsTcpFrameCodec.writeFrame(client.getOutputStream(), next)
                     val answer = requireNotNull(DnsTcpFrameCodec.readFrame(client.getInputStream()))
-                    assertTrue("TCP must retain the complete large response: bytes=${answer.size}, flags=${answer[2]}, rcode=${answer[3]}, UDP=${udpCount.get()}, TCP=${tcpCount.get()}, fixture=${failure.get()}", answer.size > 2000)
+                    assertTrue("TCP must retain the complete large response: bytes=${answer.size}, flags=${answer[2]}, rcode=${answer[3]}, UDP=${udpCount.get()}, TCP=${tcpCount.get()}, fixture=${failure.get()}", answer.size > 4096)
                     assertEquals(0, answer[2].toInt() and 2)
+                    assertEquals(30, ((answer[6].toInt() and 255) shl 8) or (answer[7].toInt() and 255))
                     assertEquals(42 + index, answer[1].toInt() and 255)
                     assertTrue(DnsMessageValidator.isValidResponse(answer,
                         (DnsMessageValidator.parseQuery(next) as DnsQueryParseResult.Valid).query))

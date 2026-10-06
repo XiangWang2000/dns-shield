@@ -22,6 +22,28 @@ import okhttp3.OkHttpClient
 
 class DohEndpointHttpsTest {
     @Test
+    fun acceptsMaximumLengthDnsResponseOverLocalHttps() = runBlocking {
+        val queryBytes = DnsTestMessages.query(type = 16)
+        val expected = DnsTestMessages.responseWithLargeTextAnswer(queryBytes)
+        LocalHttpsDns("127.0.0.1", responseFor = { request ->
+            assertContentEquals(queryBytes, request)
+            expected
+        }).use { server ->
+            val ep = endpoint("dns.example.test", server.port, "large-response", "127.0.0.1")
+            val base = trustedClient()
+            try {
+                val query = (DnsMessageValidator.parseQuery(queryBytes) as DnsQueryParseResult.Valid).query
+                val response = base.forDohEndpoint(ep).lookupDoh(
+                    ep.url, query,
+                    DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 3_000)
+                ) { _, _ -> }
+                assertContentEquals(expected, response)
+                assertEquals(DnsMessageValidator.MAX_DNS_RESPONSE_BYTES, response?.size)
+            } finally { closeClient(base) }
+        }
+    }
+
+    @Test
     fun sameHostnameEndpointsUseTheirOwnBootstrapAddress() = runBlocking {
         LocalHttpsDns("127.0.0.1").use { primary ->
             LocalHttpsDns("127.0.0.2", primary.port).use { secondary ->
@@ -176,7 +198,12 @@ class DohEndpointHttpsTest {
         assertContentEquals(DnsTestMessages.response(bytes), response)
     }
 
-    private class LocalHttpsDns(ip: String, requestedPort: Int = 0, private val beforeReply: () -> Unit = {}) : AutoCloseable {
+    private class LocalHttpsDns(
+        ip: String,
+        requestedPort: Int = 0,
+        private val beforeReply: () -> Unit = {},
+        private val responseFor: (ByteArray) -> ByteArray = { DnsTestMessages.response(it) }
+    ) : AutoCloseable {
         val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
         private val server = HttpsServer.create(InetSocketAddress(ip, requestedPort), 0).apply {
             httpsConfigurator = HttpsConfigurator(sslContext())
@@ -185,7 +212,7 @@ class DohEndpointHttpsTest {
                     paths += it.requestURI.path
                     val request = it.requestBody.readBytes()
                     beforeReply()
-                    val response = DnsTestMessages.response(request)
+                    val response = responseFor(request)
                     it.responseHeaders.set("Content-Type", "application/dns-message")
                     it.sendResponseHeaders(200, response.size.toLong())
                     it.responseBody.write(response)

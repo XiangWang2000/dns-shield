@@ -46,7 +46,7 @@ internal object DnsTestMessages {
         }
     }
 
-    fun responseWithAnswer(query: ByteArray, type: Int, data: ByteArray): ByteArray {
+    fun responseWithAnswer(query: ByteArray, type: Int, data: ByteArray, ttlSeconds: Long = 0L): ByteArray {
         val base = response(query)
         val answerOffset = base.size
         return base.copyOf(base.size + 12 + data.size).also { message ->
@@ -56,9 +56,27 @@ internal object DnsTestMessages {
             message[answerOffset + 1] = 12
             writeShort(message, answerOffset + 2, type)
             writeShort(message, answerOffset + 4, 1)
+            message[answerOffset + 6] = (ttlSeconds ushr 24).toByte()
+            message[answerOffset + 7] = (ttlSeconds ushr 16).toByte()
+            message[answerOffset + 8] = (ttlSeconds ushr 8).toByte()
+            message[answerOffset + 9] = ttlSeconds.toByte()
             writeShort(message, answerOffset + 10, data.size)
             System.arraycopy(data, 0, message, answerOffset + 12, data.size)
         }
+    }
+
+    fun responseWithLargeTextAnswer(query: ByteArray, targetSize: Int = 65_535, ttlSeconds: Long = 60L): ByteArray {
+        val baseSize = response(query).size
+        val dataSize = targetSize - baseSize - 12
+        require(dataSize > 0)
+        val data = ByteArray(dataSize)
+        var offset = 0
+        while (offset < data.size) {
+            val chunkSize = minOf(255, data.size - offset - 1)
+            data[offset++] = chunkSize.toByte()
+            repeat(chunkSize) { data[offset++] = 'x'.code.toByte() }
+        }
+        return responseWithAnswer(query, type = 16, data = data, ttlSeconds = ttlSeconds)
     }
 
     fun responseWithARecords(

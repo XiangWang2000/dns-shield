@@ -113,12 +113,12 @@ class DnsUdpUpstreamClientTest {
         val loopback = InetAddress.getByName("127.0.0.1")
         val server = DatagramSocket(0, loopback)
         val client = DatagramSocket()
-        val queryBytes = DnsTestMessages.query(edns = true, udpPayloadSize = DnsMessageValidator.MAX_DNS_MESSAGE_BYTES)
+        val queryBytes = DnsTestMessages.query(edns = true, udpPayloadSize = DnsMessageValidator.MAX_UDP_RESPONSE_BYTES)
         val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
         val fullLengthResponse = DnsTestMessages.responseWithOptPadding(
             queryBytes,
-            targetSize = DnsMessageValidator.MAX_DNS_MESSAGE_BYTES,
-            udpPayloadSize = DnsMessageValidator.MAX_DNS_MESSAGE_BYTES
+            targetSize = DnsMessageValidator.MAX_UDP_RESPONSE_BYTES,
+            udpPayloadSize = DnsMessageValidator.MAX_UDP_RESPONSE_BYTES
         )
         kotlin.test.assertTrue(DnsMessageValidator.isValidResponse(fullLengthResponse, query))
         val oversizedResponse = fullLengthResponse + byteArrayOf(0)

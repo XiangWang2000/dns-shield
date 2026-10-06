@@ -61,13 +61,16 @@ internal data class DnsCacheRecordMetadata(
 )
 
 internal object DnsMessageValidator {
-    const val MAX_DNS_MESSAGE_BYTES = 4096
+    const val MAX_QUERY_MESSAGE_BYTES = 4_096
+    const val MAX_UDP_RESPONSE_BYTES = 4_096
+    const val MAX_DNS_RESPONSE_BYTES = 65_535
+    const val MAX_DNS_MESSAGE_BYTES = MAX_UDP_RESPONSE_BYTES
     private const val HEADER_BYTES = 12
     private const val MAX_NAME_STEPS = 128
 
     fun parseQuery(message: ByteArray): DnsQueryParseResult {
         if (message.size < HEADER_BYTES) return DnsQueryParseResult.Rejected(RejectionReason.TOO_SHORT)
-        if (message.size > MAX_DNS_MESSAGE_BYTES) return DnsQueryParseResult.Rejected(RejectionReason.TOO_LARGE)
+        if (message.size > MAX_QUERY_MESSAGE_BYTES) return DnsQueryParseResult.Rejected(RejectionReason.TOO_LARGE)
 
         val flags = readUnsignedShort(message, 2)
         if (flags and 0x8000 != 0) return DnsQueryParseResult.Rejected(RejectionReason.RESPONSE_PACKET)
@@ -100,14 +103,14 @@ internal object DnsMessageValidator {
                 question = parsedQuestion.question,
                 questionEndOffset = parsedQuestion.nextOffset,
                 opcode = opcode,
-                maxUdpResponseBytes = advertisedUdpPayloadSize.coerceAtLeast(512).coerceAtMost(MAX_DNS_MESSAGE_BYTES),
+                maxUdpResponseBytes = advertisedUdpPayloadSize.coerceAtLeast(512).coerceAtMost(MAX_UDP_RESPONSE_BYTES),
                 udpPayloadSizeOffset = optUdpPayload?.classOffset
             )
         )
     }
 
     fun isValidResponse(response: ByteArray, query: ParsedDnsQuery): Boolean {
-        if (response.size < HEADER_BYTES || response.size > MAX_DNS_MESSAGE_BYTES) return false
+        if (response.size < HEADER_BYTES || response.size > MAX_DNS_RESPONSE_BYTES) return false
         if (readUnsignedShort(response, 0) != query.transactionId) return false
 
         val flags = readUnsignedShort(response, 2)
@@ -244,7 +247,7 @@ internal object DnsMessageValidator {
     fun buildServFailResponse(query: ParsedDnsQuery): ByteArray = buildErrorResponse(query, rcode = 2)
 
     fun buildParseErrorResponse(message: ByteArray, reason: RejectionReason): ByteArray? {
-        if (message.size < HEADER_BYTES || message.size > MAX_DNS_MESSAGE_BYTES) return null
+        if (message.size < HEADER_BYTES || message.size > MAX_QUERY_MESSAGE_BYTES) return null
 
         val requestFlags = readUnsignedShort(message, 2)
         if (requestFlags and 0x8000 != 0) return null
@@ -606,13 +609,13 @@ internal object DnsDohResponseValidator {
         if (contentType?.substringBefore(';')?.trim()?.equals(DNS_MEDIA_TYPE, ignoreCase = true) != true) {
             return null
         }
-        if (contentLength > DnsMessageValidator.MAX_DNS_MESSAGE_BYTES) return null
+        if (contentLength > DnsMessageValidator.MAX_DNS_RESPONSE_BYTES) return null
 
-        val output = ByteArrayOutputStream(minOf(DnsMessageValidator.MAX_DNS_MESSAGE_BYTES, 1024))
+        val output = ByteArrayOutputStream(minOf(DnsMessageValidator.MAX_DNS_RESPONSE_BYTES, 1024))
         val buffer = ByteArray(1024)
         var totalBytes = 0
         while (true) {
-            val remainingWithOverflowByte = DnsMessageValidator.MAX_DNS_MESSAGE_BYTES + 1 - totalBytes
+            val remainingWithOverflowByte = DnsMessageValidator.MAX_DNS_RESPONSE_BYTES + 1 - totalBytes
             if (remainingWithOverflowByte <= 0) return null
             val bytesRead = stream.read(buffer, 0, minOf(buffer.size, remainingWithOverflowByte))
             if (bytesRead < 0) break
@@ -620,12 +623,12 @@ internal object DnsDohResponseValidator {
                 val nextByte = stream.read()
                 if (nextByte < 0) break
                 totalBytes++
-                if (totalBytes > DnsMessageValidator.MAX_DNS_MESSAGE_BYTES) return null
+                if (totalBytes > DnsMessageValidator.MAX_DNS_RESPONSE_BYTES) return null
                 output.write(nextByte)
                 continue
             }
             totalBytes += bytesRead
-            if (totalBytes > DnsMessageValidator.MAX_DNS_MESSAGE_BYTES) return null
+            if (totalBytes > DnsMessageValidator.MAX_DNS_RESPONSE_BYTES) return null
             output.write(buffer, 0, bytesRead)
         }
 

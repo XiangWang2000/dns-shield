@@ -6,12 +6,12 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.nio.channels.Channels
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -77,7 +77,7 @@ class VpnTunnelIoInstrumentedTest {
     }
 
     @Test
-    fun closingActualParcelFileDescriptorUnblocksAndJoinsBlockedReader() = runBlocking {
+    fun closingOwnedChannelUnblocksAndJoinsActualParcelFileDescriptorReader() {
         val endpoints = ParcelFileDescriptor.createSocketPair()
         val readerEndpoint = endpoints[0]
         val peerEndpoint = endpoints[1]
@@ -87,8 +87,11 @@ class VpnTunnelIoInstrumentedTest {
         val finished = CountDownLatch(1)
         val failures = Collections.synchronizedList(mutableListOf<String?>())
         val readerException = AtomicReference<Throwable?>()
-        val joinedAfterDescriptorClose = AtomicBoolean(false)
-        val input = SignalingInputStream(FileInputStream(readerEndpoint.fileDescriptor), readStarted)
+        val joinedAfterInputClose = AtomicBoolean(false)
+        val owner = VpnTunnelInputOwner()
+        val input = owner.open {
+            SignalingInputStream(Channels.newInputStream(FileInputStream(readerEndpoint.fileDescriptor).channel), readStarted)
+        }
         val output = FileOutputStream(readerEndpoint.fileDescriptor)
         val reader = Thread {
             try {
@@ -117,18 +120,10 @@ class VpnTunnelIoInstrumentedTest {
             assertTrue("Reader did not enter its blocking PFD read",
                 readStarted.await(2, TimeUnit.SECONDS))
 
-            closeVpnTunnelThenJoin(
-                closeDescriptor = {
-                    active.set(false)
-                    readerEndpoint.close()
-                },
-                joinSession = {
-                    reader.join(2_000)
-                    joinedAfterDescriptorClose.set(!reader.isAlive)
-                },
-                onCloseFailure = { throw it },
-                onJoinFailure = { throw it }
-            )
+            active.set(false)
+            owner.stop()
+            reader.join(2_000)
+            joinedAfterInputClose.set(!reader.isAlive)
 
             if (reader.isAlive) {
                 // Release the peer only for bounded test cleanup; it does not count as a pass.
@@ -136,14 +131,17 @@ class VpnTunnelIoInstrumentedTest {
                 reader.join(2_000)
             }
 
-            assertTrue("Closing the local PFD did not unblock the real socket read",
-                joinedAfterDescriptorClose.get())
-            assertTrue("Reader did not finish after PFD close", finished.await(0, TimeUnit.SECONDS))
+            assertTrue("Closing the owned channel did not unblock the real socket read",
+                joinedAfterInputClose.get())
+            assertTrue("Reader did not finish after channel close", finished.await(0, TimeUnit.SECONDS))
             assertTrue("Reader did not report its end", ended.await(0, TimeUnit.SECONDS))
             assertNull(readerException.get())
+            assertTrue("The shared PFD must remain valid until session children finish",
+                readerEndpoint.fileDescriptor.valid())
             assertEquals(listOf<String?>(null), synchronized(failures) { failures.toList() })
         } finally {
             active.set(false)
+            owner.stop()
             closeQuietly(readerEndpoint)
             closeQuietly(peerEndpoint)
             if (reader.isAlive) {
