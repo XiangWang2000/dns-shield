@@ -12,7 +12,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import kotlinx.coroutines.runBlocking
 
 class VpnTunnelIoTest {
     @Test
@@ -128,9 +127,10 @@ class VpnTunnelIoTest {
     }
 
     @Test
-    fun stoppingBlockedReaderClosesDescriptorBeforeJoiningAndSuppressesFailure() = runBlocking {
+    fun stoppingBlockedReaderClosesOwnedInputBeforeJoiningAndSuppressesFailure() {
         val active = AtomicBoolean(true)
         val input = BlockingInputStream()
+        val owner = VpnTunnelInputOwner()
         val output = TrackingOutputStream()
         val ended = CountDownLatch(1)
         val finished = CountDownLatch(1)
@@ -139,7 +139,7 @@ class VpnTunnelIoTest {
         val reader = Thread {
             try {
                 runVpnTunnelReader(
-                    openInput = { input },
+                    openInput = { owner.open { input } },
                     openOutput = { output },
                     isActive = active::get,
                     handlePacket = { _, _, _ -> error("Blocked read must not produce a packet") },
@@ -161,18 +161,10 @@ class VpnTunnelIoTest {
 
         assertTrue(input.readStarted.await(1, TimeUnit.SECONDS), "Reader did not enter its blocking read")
 
-        closeVpnTunnelThenJoin(
-            closeDescriptor = {
-                active.set(false)
-                input.close()
-            },
-            joinSession = {
-                reader.join(1_000)
-                assertFalse(reader.isAlive, "Reader remained blocked after descriptor close")
-            },
-            onCloseFailure = { throw it },
-            onJoinFailure = { throw it }
-        )
+        active.set(false)
+        owner.stop()
+        reader.join(1_000)
+        assertFalse(reader.isAlive, "Reader remained blocked after input close")
 
         assertTrue(finished.await(0, TimeUnit.SECONDS))
         assertTrue(ended.await(0, TimeUnit.SECONDS))
@@ -180,6 +172,77 @@ class VpnTunnelIoTest {
         assertEquals(listOf(null), synchronized(failures) { failures.toList() })
         assertTrue(input.closed)
         assertTrue(output.closed)
+    }
+
+    @Test
+    fun stopClosesAnInputThatFinishesOpeningAfterStop() {
+        val owner = VpnTunnelInputOwner()
+        val opening = CountDownLatch(1)
+        val finishOpen = CountDownLatch(1)
+        val input = TrackingInputStream(ByteArrayInputStream(byteArrayOf(1)))
+        var failure: Throwable? = null
+        val opener = Thread {
+            try {
+                owner.open {
+                    opening.countDown()
+                    assertTrue(finishOpen.await(1, TimeUnit.SECONDS))
+                    input
+                }
+            } catch (error: Throwable) { failure = error }
+        }.apply { isDaemon = true; start() }
+        try {
+            assertTrue(opening.await(1, TimeUnit.SECONDS))
+            owner.stop()
+        } finally {
+            finishOpen.countDown()
+            opener.join(1_000)
+        }
+        assertFalse(opener.isAlive)
+        assertTrue(input.closed)
+        assertTrue(failure is IOException, "Late input must be rejected before a read")
+        owner.stop()
+    }
+
+    @Test
+    fun stopBeforeOpenDoesNotAllocateAReader() {
+        val owner = VpnTunnelInputOwner()
+        owner.stop()
+        var opened = false
+        val failure = runCatching {
+            owner.open { opened = true; ByteArrayInputStream(byteArrayOf(1)) }
+        }.exceptionOrNull()
+        assertTrue(failure is IOException)
+        assertFalse(opened)
+        owner.stop()
+    }
+
+    @Test
+    fun stopWakesAReadThroughTheOwnedInterruptibleChannel() {
+        val owner = VpnTunnelInputOwner()
+        val pipe = java.nio.channels.Pipe.open()
+        val entered = CountDownLatch(1)
+        var failure: Throwable? = null
+        val input = owner.open { java.nio.channels.Channels.newInputStream(pipe.source()) }
+        val reader = Thread {
+            try {
+                entered.countDown()
+                input.read(ByteArray(4096))
+            } catch (error: Throwable) { failure = error }
+        }.apply { isDaemon = true; start() }
+        try {
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            assertTrue(reader.isAlive)
+            owner.stop()
+            reader.join(1_000)
+            assertFalse(reader.isAlive, "STOP must wake read before joining")
+            assertTrue(failure is IOException)
+            assertFalse(pipe.source().isOpen)
+            owner.stop()
+        } finally {
+            owner.stop()
+            pipe.sink().close()
+            reader.join(1_000)
+        }
     }
 
     private class TrackingInputStream(

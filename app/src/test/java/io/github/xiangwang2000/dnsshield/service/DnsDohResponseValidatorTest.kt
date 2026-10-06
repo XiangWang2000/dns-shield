@@ -29,20 +29,24 @@ class DnsDohResponseValidatorTest {
     }
 
     @Test
-    fun rejectsAnOversizedUnknownLengthBodyAfterReadingOnlyOneOverflowByte() {
-        val queryBytes = DnsTestMessages.query()
+    fun acceptsTheMaximumResponseAndBoundsOversizedBodiesBeforeAndDuringReads() {
+        val queryBytes = DnsTestMessages.query(type = 16)
         val query = (DnsMessageValidator.parseQuery(queryBytes) as DnsQueryParseResult.Valid).query
-        val stream = CountingInputStream(ByteArray(DnsMessageValidator.MAX_DNS_MESSAGE_BYTES + 20))
+        val maximum = DnsTestMessages.responseWithLargeTextAnswer(queryBytes)
+        kotlin.test.assertEquals(DnsMessageValidator.MAX_DNS_RESPONSE_BYTES, maximum.size)
+        assertContentEquals(maximum, read("application/dns-message", -1, maximum, query))
 
-        assertNull(
-            DnsDohResponseValidator.readValidatedBody(
-                "application/dns-message",
-                -1,
-                stream,
-                query
-            )
-        )
-        kotlin.test.assertEquals(DnsMessageValidator.MAX_DNS_MESSAGE_BYTES + 1, stream.bytesRead)
+        val unknownLength = CountingInputStream(maximum + byteArrayOf(0))
+        assertNull(DnsDohResponseValidator.readValidatedBody(
+            "application/dns-message", -1, unknownLength, query
+        ))
+        kotlin.test.assertEquals(DnsMessageValidator.MAX_DNS_RESPONSE_BYTES + 1, unknownLength.bytesRead)
+
+        val knownOversize = CountingInputStream(maximum + byteArrayOf(0))
+        assertNull(DnsDohResponseValidator.readValidatedBody(
+            "application/dns-message", DnsMessageValidator.MAX_DNS_RESPONSE_BYTES + 1L, knownOversize, query
+        ))
+        kotlin.test.assertEquals(0, knownOversize.bytesRead)
     }
 
     private fun read(type: String, length: Long, bytes: ByteArray, query: ParsedDnsQuery) =

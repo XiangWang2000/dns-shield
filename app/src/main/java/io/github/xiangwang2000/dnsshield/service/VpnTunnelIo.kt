@@ -68,23 +68,36 @@ internal fun <T : OutputStream> runVpnTunnelReader(
     }
 }
 
-internal suspend fun closeVpnTunnelThenJoin(
-    closeDescriptor: () -> Unit,
-    joinSession: suspend () -> Unit,
-    onCloseFailure: (Exception) -> Unit,
-    onJoinFailure: (Exception) -> Unit
-) {
-    try {
-        closeDescriptor()
-    } catch (exception: Exception) {
-        onCloseFailure(exception)
+/** Owns a single session's interruptible input, including STOP racing with open. */
+internal class VpnTunnelInputOwner {
+    private val lock = Any()
+    private var stopped = false
+    private var input: InputStream? = null
+
+    fun open(openInput: () -> InputStream): InputStream {
+        synchronized(lock) {
+            if (stopped) throw IOException("Tunnel reader already stopped")
+        }
+        val opened = openInput()
+        val accepted = synchronized(lock) {
+            if (stopped) false else {
+                input = opened
+                true
+            }
+        }
+        if (!accepted) {
+            opened.close()
+            throw IOException("Tunnel reader stopped while opening input")
+        }
+        return opened
     }
 
-    try {
-        joinSession()
-    } catch (exception: CancellationException) {
-        throw exception
-    } catch (exception: Exception) {
-        onJoinFailure(exception)
+    fun stop() {
+        val opened = synchronized(lock) {
+            stopped = true
+            input.also { input = null }
+        }
+        // A channel close can wait for its reader; never retain the registration lock.
+        opened?.close()
     }
 }

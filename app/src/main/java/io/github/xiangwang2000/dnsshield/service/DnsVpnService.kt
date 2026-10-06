@@ -43,6 +43,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.nio.channels.Channels
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
@@ -236,7 +237,11 @@ class DnsVpnService : VpnService() {
             )
         }
 
-        private val dnsCache = LruCache<DnsQueryKey, DnsResponseCacheEntry>(500)
+        private const val DNS_CACHE_WEIGHT_BUDGET_BYTES = 2_048_000
+        private val dnsCache = object : LruCache<DnsQueryKey, DnsResponseCacheEntry>(DNS_CACHE_WEIGHT_BUDGET_BYTES) {
+            override fun sizeOf(key: DnsQueryKey, value: DnsResponseCacheEntry): Int =
+                value.estimatedCacheWeightBytes
+        }
         private val blockDecisionCache = LruCache<DomainPolicyCacheKey, Boolean>(1024)
         private val domainPolicy = ReloadableDomainPolicy()
 
@@ -690,6 +695,7 @@ class DnsVpnService : VpnService() {
     private var tunnelScope: CoroutineScope? = null
     private val tcpRuntimeLock = Any()
     private var tcpRuntime: NativeDnsTcpRuntime? = null
+    private var tunnelInputOwner: VpnTunnelInputOwner? = null
     @Volatile private var tunnelGeneration = 0L
 
     private val dohFailureBackoff = DohFailureBackoff()
@@ -1595,10 +1601,18 @@ class DnsVpnService : VpnService() {
                 abandonSupersededStartup()
                 return
             }
+            val inputOwner = VpnTunnelInputOwner()
             val generation = ++tunnelGeneration
             val activeJob = SupervisorJob(serviceJob)
+            activeJob.invokeOnCompletion {
+                runCatching { inputOwner.stop() }
+                    .onFailure { Log.e(TAG, "Error releasing tunnel input", it) }
+                runCatching { descriptor.close() }
+                    .onFailure { Log.e(TAG, "Error closing completed tunnel descriptor", it) }
+            }
             val activeTunnelScope = CoroutineScope(activeJob + Dispatchers.IO)
             vpnInterface = descriptor
+            tunnelInputOwner = inputOwner
             tunnelParentJob = activeJob
             tunnelScope = activeTunnelScope
             updateLifecycleState(VpnLifecycleState.RUNNING)
@@ -1609,19 +1623,16 @@ class DnsVpnService : VpnService() {
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .notify(NOTIFICATION_ID, activeNotification)
             addLog("VPN Interface Established. Reading packets...")
-            activeTunnelScope.launch { runTunnel(descriptor, generation) }
+            activeTunnelScope.launch { runTunnel(descriptor, generation, inputOwner) }
             establishedFd = null
         } catch (exception: CancellationException) {
             unregisterUnderlyingNetworkCallback()
             establishedFd?.let { descriptor ->
                 if (vpnInterface === descriptor) {
-                    tunnelGeneration++
-                    vpnInterface = null
-                    tunnelParentJob?.cancel()
-                    tunnelParentJob = null
-                    tunnelScope = null
+                    cancelTunnelSession()
+                } else {
+                    runCatching { descriptor.close() }
                 }
-                runCatching { descriptor.close() }
             }
             updateLifecycleState(VpnLifecycleState.STOPPED)
             throw exception
@@ -1629,13 +1640,10 @@ class DnsVpnService : VpnService() {
             unregisterUnderlyingNetworkCallback()
             establishedFd?.let { descriptor ->
                 if (vpnInterface === descriptor) {
-                    tunnelGeneration++
-                    vpnInterface = null
-                    tunnelParentJob?.cancel()
-                    tunnelParentJob = null
-                    tunnelScope = null
+                    cancelTunnelSession()
+                } else {
+                    runCatching { descriptor.close() }
                 }
-                runCatching { descriptor.close() }
             }
             if (!isCurrentStartRequest(requestGeneration)) {
                 abandonSupersededStartup()
@@ -1653,10 +1661,12 @@ class DnsVpnService : VpnService() {
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
     }
 
-    private fun runTunnel(descriptor: ParcelFileDescriptor, generation: Long) {
+    private fun runTunnel(descriptor: ParcelFileDescriptor, generation: Long, inputOwner: VpnTunnelInputOwner) {
         var tcp: NativeDnsTcpRuntime? = null
         runVpnTunnelReader(
-            openInput = { FileInputStream(descriptor.fileDescriptor) },
+            openInput = {
+                inputOwner.open { Channels.newInputStream(FileInputStream(descriptor.fileDescriptor).channel) }
+            },
             openOutput = { FileOutputStream(descriptor.fileDescriptor) },
             isActive = { isVpnRunning && generation == tunnelGeneration },
             onOutputOpened = { outputStream ->
@@ -1665,7 +1675,11 @@ class DnsVpnService : VpnService() {
                         NativeDnsTcpRuntime(
                             handler = { payload, send -> kotlinx.coroutines.runBlocking { handleTcpQuery(payload, send) } },
                             sendPacket = { packet -> synchronized(outputStream) { outputStream.write(packet) } },
-                            onFailure = { runCatching { descriptor.close() } }
+                            onFailure = {
+                                // Wake the reader; TunnelEnded owns lifecycle cleanup and the PFD.
+                                runCatching { inputOwner.stop() }
+                                    .onFailure { Log.e(TAG, "Error waking failed tunnel input", it) }
+                            }
                         ).also { active ->
                             tcpRuntime = active
                             active.start()
@@ -1683,6 +1697,8 @@ class DnsVpnService : VpnService() {
                 tcp = null
             },
             onEnded = { failure ->
+                runCatching { inputOwner.stop() }
+                    .onFailure { Log.e(TAG, "Error releasing ended tunnel input", it) }
                 enqueueLifecycleCommand(
                     LifecycleCommand.TunnelEnded(generation, descriptor, failure)
                 )
@@ -2304,29 +2320,38 @@ class DnsVpnService : VpnService() {
         VpnLifecycleState.FAILED -> "DNS Shield 防護異常"
     }
 
-    // Service destruction cannot suspend, so it closes the owned descriptor and cancels its session directly.
+    // Destruction cannot suspend; the cancelled session closes its PFD on completion.
     private fun closeTunnelResources() {
         unregisterUnderlyingNetworkCallback()
         rulePolicyStatusFlow.value = RulePolicyStatus.NotLoaded
         val finalState = lifecycleStateFlow.value.stateAfterServiceDestroy()
-        tunnelGeneration++
         if (finalState != VpnLifecycleState.FAILED) {
             updateLifecycleState(VpnLifecycleState.STOPPING)
         }
-        synchronized(tcpRuntimeLock) { tcpRuntime?.requestStop() }
+        cancelTunnelSession()
+        updateLifecycleState(finalState)
+    }
+
+    private fun cancelTunnelSession(): Job? {
+        tunnelGeneration++
+        val tcp = synchronized(tcpRuntimeLock) { tcpRuntime }
+        tcp?.requestStop()
         val descriptor = vpnInterface
         val sessionJob = tunnelParentJob
+        val inputOwner = tunnelInputOwner
         vpnInterface = null
         tunnelParentJob = null
         tunnelScope = null
-
-        try {
-            descriptor?.close()
-        } catch (exception: Exception) {
-            Log.e(TAG, "Error closing vpnInterface descriptor", exception)
-        }
+        tunnelInputOwner = null
         sessionJob?.cancel()
-        updateLifecycleState(finalState)
+        // Channel close signals a pending read on API 26; raw PFD close does not.
+        runCatching { inputOwner?.stop() }
+            .onFailure { Log.e(TAG, "Error waking tunnel input during shutdown", it) }
+        if (sessionJob == null) {
+            runCatching { descriptor?.close() }
+                .onFailure { Log.e(TAG, "Error closing inactive tunnel descriptor", it) }
+        }
+        return sessionJob
     }
 
     private suspend fun restartTunnel(requestGeneration: Long) {
@@ -2348,25 +2373,15 @@ class DnsVpnService : VpnService() {
                 .notify(NOTIFICATION_ID, notification)
         }
 
-        // Invalidate the ending callback before closing the descriptor or joining its job.
-        tunnelGeneration++
-        synchronized(tcpRuntimeLock) { tcpRuntime?.requestStop() }
-        val descriptor = vpnInterface
-        val sessionJob = tunnelParentJob
-        vpnInterface = null
-        tunnelParentJob = null
-        tunnelScope = null
-
-        closeVpnTunnelThenJoin(
-            closeDescriptor = { descriptor?.close() },
-            joinSession = { sessionJob?.cancelAndJoin() },
-            onCloseFailure = { exception ->
-                Log.e(TAG, "Error closing vpnInterface descriptor", exception)
-            },
-            onJoinFailure = { exception ->
-                Log.e(TAG, "Exception cancelling tunnel session during shutdown", exception)
-            }
-        )
+        // The completion callback closes the shared PFD only after every child has exited.
+        val sessionJob = cancelTunnelSession()
+        try {
+            sessionJob?.join()
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            Log.e(TAG, "Exception joining tunnel session during shutdown", exception)
+        }
 
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)

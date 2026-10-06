@@ -18,7 +18,7 @@ internal data class DnsUdpUpstreamEndpoint(
 
 internal object DnsUdpUpstreamClient {
     private const val DEFAULT_ATTEMPT_TIMEOUT_MILLIS = 3_000L
-    private const val DNS_MESSAGE_BUFFER_BYTES = DnsMessageValidator.MAX_DNS_MESSAGE_BYTES + 1
+    private const val DNS_MESSAGE_BUFFER_BYTES = DnsMessageValidator.MAX_UDP_RESPONSE_BYTES + 1
 
     suspend fun query(
         socket: DatagramSocket,

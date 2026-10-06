@@ -16,6 +16,7 @@ DNS Shield 是一款 Android DNS 防護工具，透過系統 `VpnService` 將標
 - 控制中心會顯示目前規則來源、revision、日期、筆數、驗證狀態，以及 Public Suffix List 是否降級為精確網域比對。
 - 支援自訂 DNS、DNS 回應快取及同時重複查詢去重。
 - 明文降級模式遇到上游 UDP 截短回應時，會在原請求期限內以 TCP/53 重試；TUN MTU 設為 1500 bytes，送回用戶端的 DNS payload 上限為 min(EDNS/512 bytes, MTU−28 bytes = 1472 bytes)，超出時只保留完整資源記錄、設定 TC 並更新 section counts。
+- DNS 用戶端查詢（UDP/TCP）上限為 4,096 bytes，較大的查詢不支援；上游 TCP/53 與 DoH 的完整 DNS 回應上限為 65,535 bytes。送回用戶端的 UDP 回應仍受 EDNS 與 TUN MTU 限制，超出時會在完整資源記錄邊界截斷並設定 TC。
 - 支援選擇具有啟動入口的已安裝 App，使其略過 DNS Shield VPN。
 - 在 App 開啟時顯示查詢數、阻擋數、估算節省流量與診斷日誌。
 

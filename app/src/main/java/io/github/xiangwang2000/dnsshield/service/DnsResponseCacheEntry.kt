@@ -8,6 +8,9 @@ internal class DnsResponseCacheEntry private constructor(
     private val lifetimeMillis: Long,
     private val monotonicClock: () -> Long
 ) {
+    internal val estimatedCacheWeightBytes: Int =
+        maxOf(MIN_CACHE_WEIGHT_BYTES, responseData.size + CACHE_ENTRY_OVERHEAD_BYTES + ttlFields.size * TTL_FIELD_WEIGHT_BYTES)
+
     fun responseAtCurrentTime(): ByteArray? {
         val elapsedMillis = (monotonicClock() - insertedAtMillis).coerceAtLeast(0L)
         if (elapsedMillis >= lifetimeMillis) return null
@@ -24,6 +27,11 @@ internal class DnsResponseCacheEntry private constructor(
     private data class TtlField(val offset: Int, val initialTtlSeconds: Long)
 
     companion object {
+        /** Estimate payload and TTL metadata while preserving up to 500 small entries. */
+        internal const val MIN_CACHE_WEIGHT_BYTES = 4_096
+        private const val CACHE_ENTRY_OVERHEAD_BYTES = 256
+        private const val TTL_FIELD_WEIGHT_BYTES = 64
+
         /** Limit cache residency to five minutes without extending any wire TTL. */
         private const val MAX_CACHE_LIFETIME_SECONDS = 300L
 

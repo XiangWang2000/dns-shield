@@ -31,6 +31,39 @@ class DnsMessageValidatorTest {
     }
 
     @Test
+    fun accepts4096ByteValidEdnsPaddingQueryAndRejects4097ByteQuery() {
+        fun queryWithPadding(size: Int): ByteArray {
+            val query = DnsTestMessages.query(edns = true)
+            val optionOffset = query.size
+            val paddingLength = size - optionOffset - 4
+            require(paddingLength >= 0)
+
+            val paddedQuery = query.copyOf(size)
+            fun writeU16(offset: Int, value: Int) {
+                paddedQuery[offset] = (value ushr 8).toByte()
+                paddedQuery[offset + 1] = value.toByte()
+            }
+
+            val optOffset = DnsTestMessages.queryQuestionEnd(query)
+            writeU16(optOffset + 9, paddingLength + 4)
+            writeU16(optionOffset, 12)
+            writeU16(optionOffset + 2, paddingLength)
+            return paddedQuery
+        }
+
+        val atLimit = queryWithPadding(4_096)
+        assertEquals(4_096, atLimit.size)
+        assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(atLimit))
+
+        val overLimit = queryWithPadding(4_097)
+        assertEquals(4_097, overLimit.size)
+        assertEquals(
+            RejectionReason.TOO_LARGE,
+            assertIs<DnsQueryParseResult.Rejected>(DnsMessageValidator.parseQuery(overLimit)).reason
+        )
+    }
+
+    @Test
     fun capsForwardedEdnsUdpPayloadToTheSupportedResponseSize() {
         val oversizedEdnsQuery = DnsTestMessages.query(edns = true, udpPayloadSize = 65_535)
         val parsed = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(oversizedEdnsQuery)).query
@@ -38,15 +71,36 @@ class DnsMessageValidatorTest {
         val upstreamParsed = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(upstreamQuery)).query
 
         assertEquals(65_535, readUnsignedShort(oversizedEdnsQuery, DnsTestMessages.queryQuestionEnd(oversizedEdnsQuery) + 3))
-        assertEquals(DnsMessageValidator.MAX_DNS_MESSAGE_BYTES, parsed.maxUdpResponseBytes)
-        assertEquals(DnsMessageValidator.MAX_DNS_MESSAGE_BYTES, upstreamParsed.maxUdpResponseBytes)
-        assertEquals(DnsMessageValidator.MAX_DNS_MESSAGE_BYTES, readUnsignedShort(upstreamQuery, DnsTestMessages.queryQuestionEnd(upstreamQuery) + 3))
+        assertEquals(DnsMessageValidator.MAX_UDP_RESPONSE_BYTES, parsed.maxUdpResponseBytes)
+        assertEquals(DnsMessageValidator.MAX_UDP_RESPONSE_BYTES, upstreamParsed.maxUdpResponseBytes)
+        assertEquals(DnsMessageValidator.MAX_UDP_RESPONSE_BYTES, readUnsignedShort(upstreamQuery, DnsTestMessages.queryQuestionEnd(upstreamQuery) + 3))
 
         val undersizedEdnsQuery = DnsTestMessages.query(edns = true, udpPayloadSize = 256)
         val undersizedParsed = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(undersizedEdnsQuery)).query
         val minimumSizeQuery = DnsMessageValidator.prepareUpstreamQuery(undersizedParsed)
         assertEquals(512, undersizedParsed.maxUdpResponseBytes)
         assertEquals(512, readUnsignedShort(minimumSizeQuery, DnsTestMessages.queryQuestionEnd(minimumSizeQuery) + 3))
+    }
+
+    @Test
+    fun acceptsMaximumCompleteResponsesCachesThemAndTruncatesForUdp() {
+        val queryBytes = DnsTestMessages.query(type = 16, edns = true, udpPayloadSize = 65_535)
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val response = DnsTestMessages.responseWithLargeTextAnswer(queryBytes)
+
+        assertEquals(DnsMessageValidator.MAX_DNS_RESPONSE_BYTES, response.size)
+        assertTrue(DnsMessageValidator.isValidResponse(response, query))
+        assertTrue(DnsMessageValidator.isCacheableResponse(response, query))
+        assertFalse(DnsMessageValidator.isValidResponse(response + byteArrayOf(0), query))
+
+        val udpLimit = DnsMessageValidator.maxClientUdpResponseBytes(query)
+        assertEquals(1_472, udpLimit)
+        val truncated = assertNotNull(DnsMessageValidator.truncateResponseForClient(response, query, udpLimit))
+        assertTrue(truncated.size <= udpLimit)
+        assertTrue(DnsMessageValidator.isTruncatedResponse(truncated, query))
+        assertTrue(DnsMessageValidator.isValidResponse(truncated, query))
+        assertEquals(0, readUnsignedShort(truncated, 6))
+        assertFalse(DnsMessageValidator.isCacheableResponse(truncated, query))
     }
 
     @Test
@@ -59,7 +113,7 @@ class DnsMessageValidatorTest {
         ).query
         val advertised4096 = assertIs<DnsQueryParseResult.Valid>(
             DnsMessageValidator.parseQuery(
-                DnsTestMessages.query(edns = true, udpPayloadSize = DnsMessageValidator.MAX_DNS_MESSAGE_BYTES)
+                DnsTestMessages.query(edns = true, udpPayloadSize = DnsMessageValidator.MAX_UDP_RESPONSE_BYTES)
             )
         ).query
 
@@ -113,7 +167,7 @@ class DnsMessageValidatorTest {
 
         val ednsBytes = DnsTestMessages.query(
             edns = true,
-            udpPayloadSize = DnsMessageValidator.MAX_DNS_MESSAGE_BYTES
+            udpPayloadSize = DnsMessageValidator.MAX_UDP_RESPONSE_BYTES
         )
         val edns = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(ednsBytes)).query
         val ednsResponse = DnsTestMessages.responseWithARecords(ednsBytes, answerCount = 100)
@@ -184,7 +238,7 @@ class DnsMessageValidatorTest {
         assertNull(DnsMessageValidator.buildParseErrorResponse(ByteArray(11), RejectionReason.TOO_SHORT))
         assertNull(
             DnsMessageValidator.buildParseErrorResponse(
-                ByteArray(DnsMessageValidator.MAX_DNS_MESSAGE_BYTES + 1),
+                ByteArray(DnsMessageValidator.MAX_QUERY_MESSAGE_BYTES + 1),
                 RejectionReason.TOO_LARGE
             )
         )

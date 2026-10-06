@@ -92,12 +92,53 @@ class DnsTcpUpstreamClientTest {
     }
 
     @Test
-    fun rejectsZeroShortAndOversizedTcpFramesBeforeReadingTheBody() {
+    fun readsMaximumLengthTcpResponseFromLocalServer() {
+        val loopback = InetAddress.getByName("127.0.0.1")
+        val server = ServerSocket(0, 1, loopback)
+        val queryBytes = DnsTestMessages.query(type = 16)
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val expected = DnsTestMessages.responseWithLargeTextAnswer(queryBytes)
+        val serverFailure = AtomicReference<Throwable?>()
+        val serverThread = thread(name = "maximum-tcp-dns-upstream") {
+            try {
+                server.accept().use { connection ->
+                    val input = DataInputStream(connection.getInputStream())
+                    val queryLength = input.readUnsignedShort()
+                    input.readFully(ByteArray(queryLength))
+                    val output = connection.getOutputStream()
+                    output.write(expected.size ushr 8)
+                    output.write(expected.size and 0xFF)
+                    output.write(expected)
+                    output.flush()
+                }
+            } catch (failure: Throwable) {
+                serverFailure.set(failure)
+            }
+        }
+        val client = Socket()
+        try {
+            val response = DnsTcpUpstreamClient.queryBlocking(
+                socket = client, query = query, server = loopback, port = server.localPort, timeoutMillis = 1_500
+            )
+            assertContentEquals(expected, response)
+            kotlin.test.assertEquals(DnsMessageValidator.MAX_DNS_RESPONSE_BYTES, response?.size)
+            serverThread.join(1_000)
+            assertTrue(!serverThread.isAlive)
+            assertNull(serverFailure.get())
+        } finally {
+            client.close()
+            server.close()
+            serverThread.join(1_000)
+        }
+    }
+
+    @Test
+    fun rejectsZeroAndShortTcpFramesBeforeReadingTheBody() {
         val loopback = InetAddress.getByName("127.0.0.1")
         val queryBytes = DnsTestMessages.query()
         val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
 
-        listOf(0, 1, DnsMessageValidator.MAX_DNS_MESSAGE_BYTES + 1, 65_535).forEach { badLength ->
+        listOf(0, 1).forEach { badLength ->
             val server = ServerSocket(0, 1, loopback)
             val serverThread = thread(name = "bad-tcp-dns-upstream-$badLength") {
                 server.accept().use { connection ->
