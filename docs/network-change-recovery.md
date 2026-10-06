@@ -43,3 +43,8 @@ Android 10 ASUS_Z01RD / API 29 / serial JCAZB7604377HFP: repeatedWifiAndAirplane
 The first R05 device run timed out waiting for the old OFFLINE log, while the intended unknown-underlay policy reported UNKNOWN after ConnectivityManager confirmed Wi-Fi was unavailable. Preserve `captures/r05-android10-repeat-flight.txt` and logcat as negative evidence. The final harness accepts a fresh OFFLINE or UNKNOWN status only after external Wi-Fi unavailability, retaining generation and DNS response assertions. Final evidence: `captures/r05-android10-repeat-flight-unknown-final.txt` and corresponding logcat. Build invocation without -PandroidTestBuildType initially lacked the instrumentation task; the documented variant invocation passed (`r05-device-build-with-variant.log`).
 
 R05 remains subject to #72 common-version strict/TCP/policy/device acceptance. Unavailable cellular/captive-portal environments remain #73; neither skipped environment nor this Wi-Fi slice is reported as those tests passing.
+
+
+## 2026-10-06–07 真實 Wi-Fi／行動數據雙向驗收
+
+與 main `1a91800` 相同產品 source 已在 ASUS_AI2302／Android15完成三輪持續 VPN 的雙向切換、fresh DoH A／AAAA與實際連線；同PID／TUN不重啟。gated有效舊回應及 strict前後clientreset／零明文各兩方向通過。strict案例不宣稱TLS請求在整個換網期間持續pending。完整範圍、命令、hash、負面前提與清理見 [R10實機驗收](r10-cellular-handoff-validation.md)。本段取代先前「cellular未驗收」狀態；#42維持限定核心Done，#73其餘四項仍延期。

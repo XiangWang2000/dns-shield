@@ -43,3 +43,8 @@ Full `verify.ps1` passed: 29 Python, 222 JVM tests / 44 suites with zero failure
 The integrated candidate `ea3b6b2` was tested again on ASUS_Z01RD / Android 10 (API 29), on IPv4 Wi-Fi with only link-local IPv6. `Ipv6PassThroughTest#ipv4OnlyVpnOffOnOff` passed 1/1 in 1.504 seconds. TCP and AAAA DNS over IPv4 worked before, during, and after the VPN; AAAA through the virtual IPv4 DNS also passed. Raw ignored evidence: `captures/d03-android10-20261001-ipv4.txt`.
 
 Only the two newly installed `.d03test` packages were removed afterward. Production and existing D15 packages were preserved. This confirms the IPv4-only slice again; it does not establish current-head dual-stack, IPv6-only, or NAT64 acceptance. D03 stays In Progress.
+
+
+## 2026-10-06–07 current-main physical LTE dual-stack / IPv4 Wi-Fi
+
+ASUS_AI2302／Android15 API35，用與main `1a91800`相同產品source的隔離D03完成 LTE `dualStackVpnOffOnOff` 1/1（2.380s）及 IPv4 Wi-Fi `ipv4OnlyVpnOffOnOff` 1/1（1.928s）。這次包含當前版本的真實雙棧，並非重用2026-09-25舊head結果。IPv6通行與外部IPv6 DNS可用不等於產品攔截IPv6 DNS或支援IPv6上游設定；IPv6-only／NAT64仍#73未測。hash、命令與cleanup見 [R10驗收](r10-cellular-handoff-validation.md)。#36按限定核心範圍Done，歷史InProgress不代表當前看板。
