@@ -5,10 +5,14 @@ param(
     [string]$Action,
     [string]$Serial,
     [switch]$ManualNetworkHandoff,
+    [switch]$CheckDelayedResponseFence,
     [string]$BenchmarkLabel = "unlabeled"
 )
 
 $ErrorActionPreference = "Stop"
+if ($CheckDelayedResponseFence -and -not $ManualNetworkHandoff) {
+    throw "-CheckDelayedResponseFence requires -ManualNetworkHandoff."
+}
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ProductionPackage = "io.github.xiangwang2000.dnsshield"
 $TestPackage = "io.github.xiangwang2000.dnsshield.d14test"
@@ -172,7 +176,7 @@ switch ($Action) {
         New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
         $before = @(Get-D14Reports $device $TestPackage)
         $previousReports = @($before | ForEach-Object { [IO.Path]::GetFileName($_) })
-        $method = if ($ManualNetworkHandoff) { "networkHandoffInvalidatesCachedAnswerThroughTun" } else { "clientDnsTraversesTunPolicyCacheCoalescingAndFakeUpstream" }
+        $method = if ($CheckDelayedResponseFence) { "networkHandoffRejectsDelayedOldResponseThroughTun" } elseif ($ManualNetworkHandoff) { "networkHandoffInvalidatesCachedAnswerThroughTun" } else { "clientDnsTraversesTunPolicyCacheCoalescingAndFakeUpstream" }
         if ($ManualNetworkHandoff) {
             Write-Host "Manual handoff case: approve .d14test VPN consent if shown, keep USB connected, and observe D14_NETWORK_SWITCH_REQUIRED in logcat before switching Wi-Fi. Runner stdout may be buffered."
         } else {

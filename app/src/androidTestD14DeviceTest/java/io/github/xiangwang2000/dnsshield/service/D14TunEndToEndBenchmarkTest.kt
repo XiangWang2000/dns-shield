@@ -51,7 +51,11 @@ class D14TunEndToEndBenchmarkTest {
     @Test
     fun networkHandoffInvalidatesCachedAnswerThroughTun() = runBenchmark(manualHandoff = true)
 
-    private fun runBenchmark(manualHandoff: Boolean) {
+    @Test
+    fun networkHandoffRejectsDelayedOldResponseThroughTun() =
+        runBenchmark(manualHandoff = true, checkDelayedResponseFence = true)
+
+    private fun runBenchmark(manualHandoff: Boolean, checkDelayedResponseFence: Boolean = false) {
         clientTimeouts.set(0)
         assertTrue("Run only the isolated .d14test target.", BuildConfig.D14_DEVICE_TEST)
 
@@ -211,9 +215,58 @@ class D14TunEndToEndBenchmarkTest {
             if (manualHandoff) {
                 val networkBefore = waitForSelectedValidatedPhysicalNetwork(context, 5_000L)
                 val networkChangeCountBefore = DnsVpnService.d14NetworkChangeCount.get()
+                val delayedDomain = "d14-old-$runId.example.invalid"
+                if (checkDelayedResponseFence) {
+                    upstream.answerGates[delayedDomain] = CountDownLatch(1)
+                }
+                val delayedExecutor = if (checkDelayedResponseFence) Executors.newSingleThreadExecutor { task ->
+                    Thread(task, "d14-delayed-client").apply { isDaemon = true }
+                } else null
+                val delayedResponse = delayedExecutor?.submit(Callable {
+                    observeOldQueryAfterAnswerRelease(delayedDomain, 0x6101, upstream)
+                })
+                if (checkDelayedResponseFence) {
+                    // The fixture gate holds a valid answer until the selected physical route changes.
+                    try {
+                        assertTrue("The old query must reach the fake upstream before switching.",
+                            upstream.waitForCount(delayedDomain, 1, 2_000L))
+                    } catch (failure: Throwable) {
+                        upstream.answerGates[delayedDomain]?.countDown()
+                        delayedExecutor?.shutdownNow()
+                        throw failure
+                    }
+                }
                 networkSwitchAttempted = true
-                println("D14_NETWORK_SWITCH_REQUIRED=Switch Wi-Fi off and back on, or hand off between Wi-Fi and cellular, within 90 seconds.")
-                val networkAfter = waitForNetworkHandoff(context, networkChangeCountBefore, networkBefore, 90_000L)
+                val prompt = "D14_NETWORK_SWITCH_REQUIRED=Switch Wi-Fi off and back on, or hand off between Wi-Fi and cellular, within 90 seconds."
+                println(prompt)
+                android.util.Log.i("D14Handoff", prompt)
+                val networkAfter = try {
+                    waitForNetworkHandoff(context, networkChangeCountBefore, networkBefore, 90_000L).also {
+                        if (checkDelayedResponseFence) {
+                            upstream.answerGates.getValue(delayedDomain).countDown()
+                            val oldPayloads = delayedResponse!!.get(8, TimeUnit.SECONDS)
+                            assertTrue("Fixture must actually send the delayed valid old answer.",
+                                upstream.answeredDomains.contains(delayedDomain))
+                            oldPayloads.forEach { oldPayload ->
+                                assertTrue("A successful old-generation answer escaped to TUN.", responseCode(oldPayload) != 0)
+                            }
+                            upstream.delayDomain = null
+                            val oldUpstreamCount = upstream.count(delayedDomain)
+                            val fresh = sendQuery(delayedDomain, 0x6102)
+                            assertDnsAnswer(fresh.response, 0x6102)
+                            assertEquals("The old answer must not seed the new-generation cache.", oldUpstreamCount + 1, upstream.count(delayedDomain))
+                            scenarioResults.put("delayed_old_response_fence", JSONObject()
+                                .put("passed", true)
+                                .put("valid_delayed_upstream_answer_sent", true)
+                                .put("old_client_response", if (oldPayloads.isEmpty()) "no_response" else "non_success_only")
+                                .put("old_domain_requeried", true))
+                        }
+                    }
+                } finally {
+                    upstream.answerGates[delayedDomain]?.countDown()
+                    delayedExecutor?.shutdownNow()
+                    upstream.delayDomain = null
+                }
                 val networkCacheCountBefore = upstream.count(cacheDomain)
                 val postSwitch = sendQuery(cacheDomain, 0x6001)
                 assertDnsAnswer(postSwitch.response, 0x6001)
@@ -312,6 +365,36 @@ class D14TunEndToEndBenchmarkTest {
                 else throw finalCleanupFailure
             }
         }
+    }
+
+    private fun observeOldQueryAfterAnswerRelease(
+        domain: String,
+        transactionId: Int,
+        upstream: FakeDnsUpstream
+    ): List<ByteArray> = DatagramSocket().use { socket ->
+        val query = buildQuery(domain, transactionId)
+        socket.soTimeout = 250
+        socket.send(DatagramPacket(query, query.size, InetAddress.getByName(DnsVpnService.DUMMY_DNS_IP), 53))
+        val responses = mutableListOf<ByteArray>()
+        val totalDeadline = SystemClock.elapsedRealtime() + 100_000L
+        var responseDeadline: Long? = null
+        while (!Thread.currentThread().isInterrupted && SystemClock.elapsedRealtime() < totalDeadline) {
+            if (responseDeadline == null && upstream.answeredDomains.contains(domain)) {
+                responseDeadline = SystemClock.elapsedRealtime() + 3_000L
+            }
+            if (responseDeadline?.let { SystemClock.elapsedRealtime() >= it } == true) break
+            val packet = DatagramPacket(ByteArray(2_048), 2_048)
+            try {
+                socket.receive(packet)
+                val response = packet.data.copyOf(packet.length)
+                assertTrue("Old query reply is truncated", response.size >= 12)
+                assertEquals(transactionId, ((response[0].toInt() and 255) shl 8) or (response[1].toInt() and 255))
+                responses.add(response)
+            } catch (_: SocketTimeoutException) {
+                // Keep listening after an early SERVFAIL so a late stale success cannot be hidden.
+            }
+        }
+        responses
     }
 
     private fun sendQuery(domain: String, transactionId: Int, timeoutMillis: Int = 7_000): QueryResult {
@@ -699,6 +782,8 @@ class D14TunEndToEndBenchmarkTest {
         val totalRequests = AtomicInteger()
         val droppedRequests = AtomicInteger()
         val droppedDomains = ConcurrentHashMap.newKeySet<String>()
+        val answeredDomains = ConcurrentHashMap.newKeySet<String>()
+        val answerGates = ConcurrentHashMap<String, CountDownLatch>()
         @Volatile var failure: Throwable? = null
         @Volatile var delayDomain: String? = null
         @Volatile var delayMillis: Long = 0L
@@ -737,10 +822,14 @@ class D14TunEndToEndBenchmarkTest {
                         droppedRequests.incrementAndGet()
                         continue
                     }
+                    answerGates[domain]?.let { gate ->
+                        check(gate.await(95, TimeUnit.SECONDS)) { "Delayed answer gate was never released" }
+                    }
                     val delay = if (delayDomain == domain) delayMillis else 0L
                     if (delay > 0L) Thread.sleep(delay)
                     val response = buildAnswer(query)
                     socket.send(DatagramPacket(response, response.size, packet.address, packet.port))
+                    answeredDomains.add(domain)
                 } catch (_: SocketTimeoutException) {
                     continue
                 } catch (_: InterruptedException) {
