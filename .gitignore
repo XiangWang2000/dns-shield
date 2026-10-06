@@ -18,6 +18,12 @@ debug.keystore
 *.jks
 *.keystore
 *.p12
+# Public, test-only TLS fixtures required by the regression suites.
+!app/src/androidTestD08test/assets/d08-test-server.p12
+!app/src/test/resources/doh-local-test.p12
 keystore.properties
 __pycache__/
 *.py[cod]
+
+# Local handoff notes; preserve on disk without publishing.
+/docs/progress-and-next-steps-2026-09-27.md

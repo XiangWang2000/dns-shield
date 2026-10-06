@@ -111,7 +111,7 @@ Android App 使用 Kotlin、Jetpack Compose、ViewModel／Flow、Room、coroutin
 
 ## 開發建置
 
-需求：Python 3、Android Studio JBR（Windows 優先使用內附 JBR）、Android SDK Platform 37、NDK `27.2.12479018`，以及 Git／Gradle Wrapper。Gradle 與依賴版本分別固定於 [Wrapper 設定](gradle/wrapper/gradle-wrapper.properties)及 [版本目錄](gradle/libs.versions.toml)。
+需求：Python 3、JDK 21（Windows 優先使用 Android Studio 內附 JBR 21）、Android SDK Platform 37、NDK `27.2.12479018`，以及 Git／Gradle Wrapper。Gradle 與依賴版本分別固定於 [Wrapper 設定](gradle/wrapper/gradle-wrapper.properties)及 [版本目錄](gradle/libs.versions.toml)。
 
 新 checkout 需取得遞迴子模組：
 
@@ -126,13 +126,13 @@ cd dns-shield
 $env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
 ```
 
-從專案根目錄執行完整驗證：
+Gradle daemon 的既定條件為 JDK 21；CI 先安裝符合條件的 JDK，避免依賴額外的 Foojay 下載。從專案根目錄執行完整驗證：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 
-驗證入口會執行 PowerShell 語法檢查、離線 Python 工具測試、production Public Suffix 與 active blocklist asset 驗證、Android lint、JVM 單元測試及 Kotlin 編譯，並建置 Debug 與 D03／D04／D14 隔離 App／androidTest APK。D07／D08／D12／D15 variants 需另行建置；CI 不會自動執行裝置測試。GitHub Actions 固定使用 Windows 2025、Python 3.13.15 與 Temurin 17.0.20+8 執行同一個 `verify.ps1`，並保存 JVM 測試與 lint 報告。
+驗證入口會執行 PowerShell 語法檢查、離線 Python 工具測試、production Public Suffix 與 active blocklist asset 驗證、Android lint、JVM 單元測試及 Kotlin 編譯，並建置 Debug 與 D03／D04／D14 隔離 App／androidTest APK。D07／D08／D12／D15 variants 需另行建置；CI 不會自動執行裝置測試。GitHub Actions 固定使用 Windows 2025、Python 3.13.15 與 Temurin 21.0.12.1+1 執行同一個 `verify.ps1`，並保存 JVM 測試與 lint 報告。
 
 目前 `main` 已將 GitHub Actions 的 `Windows verification` 設為 required status check，並套用於 repository 管理員；分支不必先與 `main` 同步。CI 執行建置、資產驗證、lint 與 JVM／Python 測試；實機 instrumentation 與耗電量測須另外執行，不能由 CI 建置結果推定通過。
 
