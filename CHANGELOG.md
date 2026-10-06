@@ -6,10 +6,30 @@
 
 - APK 內建固定 commit、SHA-256 驗證的 1Hosts Lite `active.bin`，提供 102,972 筆廣告、追蹤與惡意網域規則。
 - 加入來源下載、deterministic compilation、production artifact 驗證及 Android 實機 benchmark 流程；App 執行期間不會下載規則。
+- 使用者可新增允許／封鎖網域規則、選擇是否包含子網域，並即時套用；日誌中的精確允許操作可短時間復原。
+- 每組解析器可選「加密優先，允許 UDP/53 降級」或「僅加密」，並設定主要／備援 DoH 與 bootstrap IPv4。
+- 支援用戶端 IPv4 TCP/53；明文模式收到截短的上游 UDP 回應時，可在原請求期限內改用 TCP/53。
+- 顯示規則來源、驗證狀態及 DNS 傳輸診斷。
 
 ### Changed
 
 - production blocklist 與 Public Suffix resolver 在同一個 VPN Service lifecycle 內只載入一次；已驗證排序狀態會供後續 policy reload 重用。
+- 網路、解析器與規則變更時失效舊 DNS 狀態，防止舊回應寫入新快取或跨狀態送出；DoH client 可重用，並在設定／底層網路變更時重建。
+- 限制進行中的不同查詢與合併等候數，超額回覆 SERVFAIL；回應快取採估算容量預算。
+- 一般 IPv6 流量允許直接走底層網路；IPv6 DNS 封包仍不攔截。
+- 用戶端查詢上限為 4,096 bytes，上游 TCP／DoH 完整回應上限為 65,535 bytes；用戶端 UDP 回應仍受 EDNS／MTU 限制。
+
+### Fixed
+
+- 修正 API 26 反覆 START／STOP 時，關閉 TUN 後 reader 仍可能阻塞的問題。
+- 啟用／停用意圖以序列化 IO 保存；已驗證 STOP／撤銷完成後立即終止程序仍維持停用，系統背景政策限制仍適用。
+
+### Validation and known limits
+
+- 完整驗證與 Android 10 實機、API 26／35 模擬器的代表性回歸已通過，詳見 [共同驗收](docs/r09-common-validation.md)、[傳輸上限](docs/r08-transport-size-validation.md) 及 [API 26 STOP](docs/api26-tun-stop-validation.md)。
+- Android 15 實機完成三輪 Wi-Fi／LTE 雙向切換、舊回應防護、strict 切換前後防護與行動網路雙棧驗證，詳見 [R10 驗收](docs/r10-cellular-handoff-validation.md)。
+- IPv6-only／NAT64、真正 captive portal、完整 API／廠牌矩陣及真正低記憶體回收、長時間耗電仍未完成，追蹤於 [#73](https://github.com/XiangWang2000/dns-shield/issues/73)。已測 ASUS Android 10 的背景恢復需電池豁免，DNS-only lockdown 不宣稱支援。
+- 本節為尚未發行的原始碼異動；正式簽名 APK 與從 v1.2.2 升級的驗證須在下一版發行前完成。
 
 ## 1.2.2 - 2026-08-21
 
