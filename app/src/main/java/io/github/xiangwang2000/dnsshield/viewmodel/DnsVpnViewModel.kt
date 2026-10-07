@@ -606,19 +606,39 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         val operations = resolverCommandOperations
         val submission = resolverCommandCoordinator.submitFallbackPolicy(
             server.id,
-            onSubmitted = {
-                if (!allow) DnsVpnService.requestPlaintextFallbackAllowed(server.id, false)
+            onSubmitted = { revision ->
+                DnsVpnService.requestPlaintextFallbackAllowed(server.id, revision, allow)
             }
         ) { revision, applyRuntimeFence ->
             persistFallbackPolicy(
                 allow = allow,
                 applyRuntimePolicy = { allowed ->
-                    applyRuntimeFence {
-                        DnsVpnService.requestPlaintextFallbackAllowed(server.id, allowed)
-                        DnsVpnService.setPlaintextFallbackAllowed(server.id, allowed)
+                    var policyApplied = false
+                    val current = applyRuntimeFence {
+                        policyApplied = if (allowed) {
+                            DnsVpnService.applyStoredPlaintextFallbackPolicy(
+                                server.id,
+                                revision,
+                                allowed
+                            )
+                        } else {
+                            DnsVpnService.requestPlaintextFallbackAllowed(
+                                server.id,
+                                revision,
+                                allowed
+                            )
+                        }
                     }
+                    current && policyApplied
                 },
-                onPersisted = { persisted.set(true) },
+                onPersisted = {
+                    persisted.set(true)
+                    DnsVpnService.markPlaintextFallbackPolicyPersisted(
+                        server.id,
+                        revision,
+                        allow
+                    )
+                },
                 persist = { operations.updatePlaintextFallback(server.id, allow) > 0 },
                 dispatch = {
                     val activeServer = operations.getActiveDnsServer()

@@ -334,7 +334,7 @@ class DnsTcpUpstreamClientTest {
         val setterReturned = CountDownLatch(1)
         val strictSetter = thread(start = false, name = "strict-policy-during-deadline-cancelled-write") {
             setterAttempting.countDown()
-            fence.setAllowed(resolverId, false)
+            check(fence.requestPolicy(resolverId, 1, false))
             setterReturned.countDown()
         }
 
@@ -343,14 +343,11 @@ class DnsTcpUpstreamClientTest {
             strictSetter.start()
             assertTrue(setterAttempting.await(1, TimeUnit.SECONDS))
 
-            val lockWaitDeadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
-            while (strictSetter.state != Thread.State.BLOCKED && System.nanoTime() < lockWaitDeadlineNanos) {
-                Thread.yield()
-            }
             assertTrue(
-                strictSetter.state == Thread.State.BLOCKED,
-                "strict activation should wait for the in-flight fenced frame write"
+                setterReturned.await(1, TimeUnit.SECONDS),
+                "strict activation must publish without waiting for the in-flight frame write"
             )
+            assertFalse(fence.allows(resolverId))
 
             assertTrue(
                 socketClosed.await(3, TimeUnit.SECONDS),
@@ -429,7 +426,8 @@ class DnsTcpUpstreamClientTest {
         }
         val setterReturned = CountDownLatch(1)
         val strictSetter = thread(start = false, name = "strict-policy-during-tcp-connect") {
-            fence.setAllowed(resolverId, false)
+            check(fence.requestPolicy(resolverId, 1, false))
+            fence.closeSocketsIfStillStrict(resolverId, 1)
             setterReturned.countDown()
         }
 

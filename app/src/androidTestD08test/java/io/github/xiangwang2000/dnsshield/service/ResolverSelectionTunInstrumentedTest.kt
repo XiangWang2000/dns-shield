@@ -80,12 +80,8 @@ class ResolverSelectionTunInstrumentedTest {
             )[DnsVpnViewModel::class.java]
         }
 
-        val barrierEntered = CompletableDeferred<Unit>()
-        val releaseBarrier = CompletableDeferred<Boolean>()
-        val coordinatorBarrier = ResolverCommandRuntime.coordinator.submit {
-            barrierEntered.complete(Unit)
-            releaseBarrier.await()
-        }
+        var releaseBarrier: CompletableDeferred<Boolean>? = null
+        var barrierResult: kotlinx.coroutines.Deferred<Boolean>? = null
         var upstreamA: FakeUdpDnsUpstream? = null
         var upstreamB: FakeUdpDnsUpstream? = null
         var resolverA: DnsServer? = null
@@ -149,6 +145,14 @@ class ResolverSelectionTunInstrumentedTest {
             assertTrue(requireNotNull(upstreamB).targetCount(domainInitialB) > 0)
             assertEquals(0, requireNotNull(upstreamA).targetCount(domainInitialB))
 
+            val barrierEntered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Boolean>()
+            releaseBarrier = release
+            val coordinatorBarrier = ResolverCommandRuntime.coordinator.submit {
+                barrierEntered.complete(Unit)
+                release.await()
+            }
+            barrierResult = coordinatorBarrier.result
             withTimeout(5_000) { barrierEntered.await() }
             val selectionBase = ResolverCommandRuntime.revisions.next()
             val staleBRevision = selectionBase + 2L
@@ -164,8 +168,8 @@ class ResolverSelectionTunInstrumentedTest {
             val queuedSelectionFence = ResolverCommandRuntime.coordinator.submitReceived(
                 requestedRevision = finalSelectionRevision
             ) { true }
-            releaseBarrier.complete(true)
-            assertTrue(withTimeout(COMMAND_TIMEOUT_MILLIS) { coordinatorBarrier.result.await() })
+            release.complete(true)
+            assertTrue(withTimeout(COMMAND_TIMEOUT_MILLIS) { requireNotNull(barrierResult).await() })
             assertTrue(withTimeout(COMMAND_TIMEOUT_MILLIS) { queuedSelectionFence.result.await() })
             val activeA = requireNotNull(dao.getActiveDnsServer())
             assertEquals(resolverA.id, activeA.id)
@@ -237,7 +241,13 @@ class ResolverSelectionTunInstrumentedTest {
             assertNull(requireNotNull(upstreamA).failure.get())
             assertNull(requireNotNull(upstreamB).failure.get())
         } finally {
-            releaseBarrier.complete(true)
+            releaseBarrier?.complete(true)
+            runCatching {
+                withTimeout(COMMAND_TIMEOUT_MILLIS) {
+                    barrierResult?.await()
+                    ResolverCommandRuntime.coordinator.awaitPriorCommands()
+                }
+            }
             activeMonitor?.cancelAndJoin()
             DnsVpnService.setUiForeground(false)
             try {

@@ -184,20 +184,28 @@ class ResolverCommandResultTest {
     fun sameFallbackPolicyRetryAfterDispatchFailureOpensTheExistingFence() = runBlocking {
         val resolverId = 9391
         val fence = DnsPlaintextFallbackFence()
-        fence.setAllowed(resolverId, false)
-        fence.requestAllowed(resolverId, false)
+        assertTrue(fence.requestPolicy(resolverId, 1, false))
+        assertTrue(fence.markPersisted(resolverId, 1, false))
+        assertTrue(fence.applyStoredPolicy(resolverId, 1, false))
         val persisted = AtomicBoolean(false)
+        var revision = 2L
         val applyPolicy: (Boolean) -> Boolean = { allow ->
-            fence.requestAllowed(resolverId, allow)
-            fence.setAllowed(resolverId, allow)
-            true
+            if (allow) {
+                fence.applyStoredPolicy(resolverId, revision, true)
+            } else {
+                fence.requestPolicy(resolverId, revision, false)
+            }
         }
 
         try {
+            assertTrue(fence.requestPolicy(resolverId, revision, true))
             persistFallbackPolicy(
                 allow = true,
                 applyRuntimePolicy = applyPolicy,
-                onPersisted = { persisted.set(true) },
+                onPersisted = {
+                    persisted.set(true)
+                    fence.markPersisted(resolverId, revision, true)
+                },
                 persist = { true },
                 dispatch = { throw IllegalStateException("service dispatch failure") }
             )
@@ -209,10 +217,15 @@ class ResolverCommandResultTest {
         assertFalse(fence.allows(resolverId))
 
         val retryPersisted = AtomicBoolean(false)
+        revision = 3L
+        assertTrue(fence.requestPolicy(resolverId, revision, true))
         val retried = persistFallbackPolicy(
             allow = true,
             applyRuntimePolicy = applyPolicy,
-            onPersisted = { retryPersisted.set(true) },
+            onPersisted = {
+                retryPersisted.set(true)
+                fence.markPersisted(resolverId, revision, true)
+            },
             persist = { true },
             dispatch = { true }
         )
@@ -221,6 +234,36 @@ class ResolverCommandResultTest {
         assertTrue(retryPersisted.get())
         assertTrue(fence.allows(resolverId))
     }
+    @Test
+    fun failedAllowPersistenceDoesNotOpenStrictFence() = runBlocking {
+        val resolverId = 9392
+        val fence = DnsPlaintextFallbackFence()
+        assertTrue(fence.requestPolicy(resolverId, 1, false))
+        assertTrue(fence.markPersisted(resolverId, 1, false))
+        assertTrue(fence.applyStoredPolicy(resolverId, 1, false))
+        assertTrue(fence.requestPolicy(resolverId, 2, true))
+        var persistedCallbackCalled = false
+
+        val result = persistFallbackPolicy(
+            allow = true,
+            applyRuntimePolicy = { allowed ->
+                if (allowed) fence.applyStoredPolicy(resolverId, 2, true)
+                else fence.requestPolicy(resolverId, 2, false)
+            },
+            onPersisted = {
+                persistedCallbackCalled = true
+                fence.markPersisted(resolverId, 2, true)
+            },
+            persist = { false },
+            dispatch = { true }
+        )
+
+        assertEquals(ResolverCommandApplyStatus.NOT_SAVED, result)
+        assertFalse(persistedCallbackCalled)
+        assertFalse(fence.applyStoredPolicy(resolverId, 3, true))
+        assertFalse(fence.allows(resolverId))
+    }
+
     @Test
     fun nextCommandResyncsLatestPersistedResolverAfterDispatchFailure() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

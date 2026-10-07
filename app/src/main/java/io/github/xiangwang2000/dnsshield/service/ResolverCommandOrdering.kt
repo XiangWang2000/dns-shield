@@ -31,6 +31,8 @@ class ResolverCommandRevisionClock {
         }
     }
 
+    fun current(): Long = synchronized(lock) { highWater }
+
     fun isCurrent(revision: Long): Boolean = synchronized(lock) { highWater == revision }
 
     fun <T : Any> applyIfCurrent(revision: Long, action: () -> T): T? = synchronized(lock) {
@@ -102,15 +104,26 @@ class ResolverCommandCoordinator(
         enqueueLocked(revision) { action(revision) }
     }
 
-    /** The same-server latest policy token only controls the immediate runtime fence. */
+    /** Waits for commands submitted before this FIFO barrier without advancing the revision. */
+    suspend fun awaitPriorCommands() {
+        val barrier = synchronized(submissionLock) {
+            enqueueLocked(revisions.current()) { Unit }
+        }
+        barrier.result.await()
+    }
+
+    /**
+     * The same-server latest policy token controls publication. Callbacks inside this lock must
+     * only perform bounded, nonblocking versioned publication; socket cleanup runs after it.
+     */
     fun <T> submitFallbackPolicy(
         resolverId: Int,
-        onSubmitted: () -> Unit = {},
+        onSubmitted: (revision: Long) -> Unit = {},
         action: suspend (Long, applyRuntimeFence: (() -> Unit) -> Boolean) -> T
     ): ResolverCommandSubmission<T> = synchronized(submissionLock) {
         val revision = revisions.next()
         latestFallbackRevisionByResolver[resolverId] = revision
-        onSubmitted()
+        onSubmitted(revision)
         enqueueLocked(revision) {
             action(revision) { applyFence ->
                 synchronized(submissionLock) {
