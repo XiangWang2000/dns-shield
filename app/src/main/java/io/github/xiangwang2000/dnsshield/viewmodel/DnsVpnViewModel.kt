@@ -548,17 +548,27 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         val persisted = AtomicBoolean(false)
         val operations = resolverCommandOperations
         val submission = resolverCommandCoordinator.submit { revision ->
-            val success = operations.setActiveDnsServer(serverId)
-            if (success) persisted.set(true)
-            val activeServer = operations.getActiveDnsServer()
-            resolverCommandCoordinator.dispatchIfCurrent(revision, activeServer, operations.dispatch)
-            success
+            if (!operations.setActiveDnsServer(serverId)) {
+                ResolverCommandApplyStatus.NOT_SAVED
+            } else {
+                persisted.set(true)
+                val activeServer = operations.getActiveDnsServer()
+                if (resolverCommandCoordinator.dispatchIfCurrent(revision, activeServer, operations.dispatch)) {
+                    ResolverCommandApplyStatus.APPLIED
+                } else {
+                    ResolverCommandApplyStatus.SAVED_UNSYNCED
+                }
+            }
         }
         resolverCommandWaiterScope.launch(Dispatchers.IO) {
             when (val result = awaitResolverCommandResult(submission.result, persisted)) {
                 is ResolverCommandResult.Completed -> {
-                    if (!result.value) {
-                        showResolverCommandMessage("DNS 切換失敗：找不到指定的 DNS Server id=$serverId")
+                    when (result.value) {
+                        ResolverCommandApplyStatus.NOT_SAVED ->
+                            showResolverCommandMessage("找不到這組 DNS，請重新選擇。")
+                        ResolverCommandApplyStatus.SAVED_UNSYNCED ->
+                            addLog(ResolverCommandFailureMessages.SELECT_SAVED_UNSYNCED)
+                        ResolverCommandApplyStatus.APPLIED -> Unit
                     }
                 }
                 is ResolverCommandResult.Failed -> {
@@ -619,16 +629,19 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         resolverCommandWaiterScope.launch(Dispatchers.IO) {
             when (val result = awaitResolverCommandResult(submission.result, persisted)) {
                 is ResolverCommandResult.Completed -> {
-                    if (result.value) {
-                        addLog(
-                            if (allow) "DNS 傳輸政策已設為加密優先，可在 DoH 失敗時降級 UDP/53"
-                            else "DNS 傳輸政策已設為僅加密；DoH 無法使用時將回覆 SERVFAIL"
-                        )
-                    } else {
-                        showResolverCommandMessage(
-                            if (allow) ResolverCommandFailureMessages.FALLBACK_ALLOW_NOT_SAVED
-                            else ResolverCommandFailureMessages.FALLBACK_STRICT_NOT_SAVED
-                        )
+                    when (result.value) {
+                        ResolverCommandApplyStatus.APPLIED ->
+                            addLog(
+                                if (allow) "DNS 傳輸政策已設為加密優先，可在 DoH 失敗時降級 UDP/53"
+                                else "DNS 傳輸政策已設為僅加密；DoH 無法使用時將回覆 SERVFAIL"
+                            )
+                        ResolverCommandApplyStatus.NOT_SAVED ->
+                            showResolverCommandMessage(
+                                if (allow) ResolverCommandFailureMessages.FALLBACK_ALLOW_NOT_SAVED
+                                else ResolverCommandFailureMessages.FALLBACK_STRICT_NOT_SAVED
+                            )
+                        ResolverCommandApplyStatus.SAVED_UNSYNCED ->
+                            addLog(ResolverCommandFailureMessages.FALLBACK_SAVED_UNSYNCED)
                     }
                 }
                 is ResolverCommandResult.Failed -> {
@@ -760,22 +773,32 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         val persisted = AtomicBoolean(false)
         val operations = resolverCommandOperations
         val submission = resolverCommandCoordinator.submit { revision ->
-            val deleted = operations.deleteDnsServerSafely(server.id)
-            if (deleted) persisted.set(true)
-            val activeServer = operations.getActiveDnsServer()
-            resolverCommandCoordinator.dispatchIfCurrent(revision, activeServer, operations.dispatch)
-            deleted
+            if (!operations.deleteDnsServerSafely(server.id)) {
+                ResolverCommandApplyStatus.NOT_SAVED
+            } else {
+                persisted.set(true)
+                val activeServer = operations.getActiveDnsServer()
+                if (resolverCommandCoordinator.dispatchIfCurrent(revision, activeServer, operations.dispatch)) {
+                    ResolverCommandApplyStatus.APPLIED
+                } else {
+                    ResolverCommandApplyStatus.SAVED_UNSYNCED
+                }
+            }
         }
         resolverCommandWaiterScope.launch(Dispatchers.IO) {
             when (val result = awaitResolverCommandResult(submission.result, persisted)) {
                 is ResolverCommandResult.Completed -> {
-                    if (!result.value) {
-                        addLog("無法刪除 DNS：至少需要保留一組 DNS Server")
-                        withContext(Dispatchers.Main) {
-                            Toast.makeText(getApplication(), "不可刪除！至少需要保留一組 DNS 伺服器", Toast.LENGTH_SHORT).show()
+                    when (result.value) {
+                        ResolverCommandApplyStatus.NOT_SAVED -> {
+                            addLog("無法刪除 DNS：至少需要保留一組 DNS Server")
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(getApplication(), "不可刪除！至少需要保留一組 DNS 伺服器", Toast.LENGTH_SHORT).show()
+                            }
                         }
-                    } else {
-                        addLog("刪除 DNS 設定：" + server.name)
+                        ResolverCommandApplyStatus.SAVED_UNSYNCED ->
+                            addLog(ResolverCommandFailureMessages.DELETE_SAVED_UNSYNCED)
+                        ResolverCommandApplyStatus.APPLIED ->
+                            addLog("刪除 DNS 設定：" + server.name)
                     }
                 }
                 is ResolverCommandResult.Failed -> {

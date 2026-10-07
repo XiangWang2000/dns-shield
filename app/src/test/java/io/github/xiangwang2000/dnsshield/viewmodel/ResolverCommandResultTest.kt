@@ -144,6 +144,43 @@ class ResolverCommandResultTest {
     }
 
     @Test
+    fun dispatchReturningFalseReportsSavedButUnsyncedAndDoesNotOpenAllow() = runBlocking {
+        val runtimeAllowed = AtomicBoolean(false)
+        val persisted = AtomicBoolean(false)
+
+        val applied = persistFallbackPolicy(
+            allow = true,
+            applyRuntimePolicy = { allowed ->
+                runtimeAllowed.set(allowed)
+                true
+            },
+            onPersisted = { persisted.set(true) },
+            persist = { true },
+            dispatch = { false }
+        )
+
+        assertTrue(persisted.get())
+        assertFalse(runtimeAllowed.get())
+        assertEquals(ResolverCommandApplyStatus.SAVED_UNSYNCED, applied)
+    }
+
+    @Test
+    fun rejectedRuntimeAllowFenceReportsSavedButUnsynced() = runBlocking {
+        val persisted = AtomicBoolean(false)
+
+        val applied = persistFallbackPolicy(
+            allow = true,
+            applyRuntimePolicy = { false },
+            onPersisted = { persisted.set(true) },
+            persist = { true },
+            dispatch = { true }
+        )
+
+        assertTrue(persisted.get())
+        assertEquals(ResolverCommandApplyStatus.SAVED_UNSYNCED, applied)
+    }
+
+    @Test
     fun sameFallbackPolicyRetryAfterDispatchFailureOpensTheExistingFence() = runBlocking {
         val resolverId = 9391
         val fence = DnsPlaintextFallbackFence()
@@ -180,7 +217,7 @@ class ResolverCommandResultTest {
             dispatch = { true }
         )
 
-        assertTrue(retried)
+        assertEquals(ResolverCommandApplyStatus.APPLIED, retried)
         assertTrue(retryPersisted.get())
         assertTrue(fence.allows(resolverId))
     }

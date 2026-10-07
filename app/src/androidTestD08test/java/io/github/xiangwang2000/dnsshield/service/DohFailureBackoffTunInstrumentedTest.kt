@@ -190,11 +190,11 @@ class DohFailureBackoffTunInstrumentedTest {
             }
             assertTrue(
                 "The old generation did not reach the local DoH server",
-                primary.firstRequest.await(SERVER_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                primary.firstRequest.await(SERVER_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
             )
             assertTrue(
                 "The old HTTP response was not held at the test barrier",
-                primary.firstResponseHeld.await(SERVER_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                primary.firstResponseHeld.await(SERVER_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
             )
             assertFalse("The old request completed before the resolver fence", requireNotNull(oldQuery).isCompleted)
 
@@ -223,7 +223,7 @@ class DohFailureBackoffTunInstrumentedTest {
             assertFalse("The old request timed out before its late failure could be observed", requireNotNull(oldQuery).isCompleted)
 
             primary.releaseFirstResponse()
-            val oldResponse = withTimeout(QUERY_TIMEOUT_MILLIS) { requireNotNull(oldQuery).await() }
+            val oldResponse = withTimeout(QUERY_TIMEOUT_MILLIS.toLong()) { requireNotNull(oldQuery).await() }
             assertDnsResponseCode(oldResponse, 2, 0x8500)
             assertEquals("The released old-generation failure was not processed", 3, primary.requestCount.get())
 

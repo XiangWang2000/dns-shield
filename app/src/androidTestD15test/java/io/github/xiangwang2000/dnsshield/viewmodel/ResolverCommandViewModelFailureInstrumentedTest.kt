@@ -16,6 +16,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -108,9 +109,63 @@ class ResolverCommandViewModelFailureInstrumentedTest {
         val logs = viewModel.liveLogs.value
         assertTrue(logs.any { it.contains("DNS 切換已儲存") })
         assertTrue(logs.any { it.contains("DNS 傳輸政策已儲存") })
-        assertTrue(logs.any { it.contains("本次未啟用明文備援") })
+        assertTrue(logs.any { it.contains("請關閉後再開啟明文備援。") })
         assertTrue(logs.any { it.contains("DNS 設定已刪除") })
+        assertTrue(logs.any { it.contains("DNS 切換已儲存，但這次未同步至防護服務；請重新選取目前的 DNS 以套用設定。") })
+        assertTrue(logs.any { it.contains("DNS 設定已刪除，但這次未同步至防護服務；請重新選取目前的 DNS 以套用設定。") })
         assertEquals(setOf("select", "fallback", "delete"), committed.toSet())
+        assertEquals(emptyList<Throwable>(), waiterFailures.toList())
+    }
+
+    @Test
+    fun savedCommandsWithoutActiveResolverReportUnsyncedWithoutSuccessLogs() = runBlocking {
+        val server = server(9303)
+        val persisted = Collections.synchronizedSet(mutableSetOf<String>())
+        val fallbackMessage = "DNS 傳輸設定已儲存，這次未同步至防護服務；請確認最新設定。"
+        val selectMessage = "DNS 切換已儲存，但這次未同步至防護服務；請重新選取目前的 DNS 以套用設定。"
+        val deleteMessage = "DNS 設定已刪除，但這次未同步至防護服務；請重新選取目前的 DNS 以套用設定。"
+        viewModel.resolverCommandOperations = operations(
+            setActive = { persisted += "select"; true },
+            updateFallback = { _, _ -> persisted += "fallback"; 1 },
+            deleteSafely = { persisted += "delete"; true },
+            getActive = { null },
+            dispatch = { _, _ -> error("dispatch must not run without an active resolver") }
+        )
+
+        viewModel.setPlaintextFallback(server, allow = true)
+        awaitLogOrFailure(fallbackMessage, 1)
+        viewModel.selectDnsServer(server.id)
+        awaitLogOrFailure(selectMessage, 1)
+        viewModel.deleteDnsServer(server)
+        awaitLogOrFailure(deleteMessage, 1)
+
+        val logs = viewModel.liveLogs.value
+        assertTrue(logs.any { it.contains(fallbackMessage) })
+        assertTrue(logs.any { it.contains(selectMessage) })
+        assertTrue(logs.any { it.contains(deleteMessage) })
+        assertFalse(logs.any { it.contains("DNS 傳輸政策已設為加密優先") })
+        assertFalse(logs.any { it.contains("DNS 切換失敗") })
+        assertFalse(logs.any { it.contains("刪除 DNS 設定：") })
+        assertEquals(setOf("select", "fallback", "delete"), persisted.toSet())
+        assertEquals(emptyList<Throwable>(), waiterFailures.toList())
+    }
+
+    @Test
+    fun selectingMissingDnsShowsRecoveryGuidanceWithoutInternalId() = runBlocking {
+        viewModel.resolverCommandOperations = operations(
+            setActive = { false },
+            updateFallback = { _, _ -> 1 },
+            deleteSafely = { true },
+            getActive = { null },
+            dispatch = { _, _ -> error("dispatch must not run after selection failure") }
+        )
+
+        viewModel.selectDnsServer(9304)
+        awaitLogOrFailure("找不到這組 DNS，請重新選擇。", 1)
+
+        val logs = viewModel.liveLogs.value
+        assertTrue(logs.any { it.contains("找不到這組 DNS，請重新選擇。") })
+        assertFalse(logs.any { it.contains("9304") })
         assertEquals(emptyList<Throwable>(), waiterFailures.toList())
     }
 
@@ -141,10 +196,11 @@ class ResolverCommandViewModelFailureInstrumentedTest {
         setActive: suspend (Int) -> Boolean,
         updateFallback: suspend (Int, Boolean) -> Int,
         deleteSafely: suspend (Int) -> Boolean,
+        getActive: suspend () -> DnsServer? = { server(9300) },
         dispatch: (DnsServer, Long) -> Unit
     ) = ResolverCommandOperations(
         setActiveDnsServer = setActive,
-        getActiveDnsServer = { server(9300) },
+        getActiveDnsServer = getActive,
         updatePlaintextFallback = updateFallback,
         deleteDnsServerSafely = deleteSafely,
         dispatch = dispatch
