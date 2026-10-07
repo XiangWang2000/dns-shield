@@ -2,6 +2,8 @@
 
 <img src="app/src/main/res/drawable/dns_shield_icon_1780828904628.png" width="96" alt="DNS Shield 應用程式圖示">
 
+**你的 DNS，照你的規則走。**
+
 Android DNS 防護工具，透過本機 VPN 比對網域規則，封鎖廣告、追蹤與惡意網域。支援 Android 7.0（API 24）以上，不需要 Root。
 
 ## 主要功能
