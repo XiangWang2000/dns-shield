@@ -1,9 +1,14 @@
 package io.github.xiangwang2000.dnsshield.service
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 class DnsTransportPolicyTest {
     @Test
@@ -20,7 +25,7 @@ class DnsTransportPolicyTest {
             allowPlaintextFallback = false,
             endpoints = endpoints,
             deadline = newDeadline(),
-            dohQuery = {
+            dohQuery = { _, _ ->
                 encryptedAttempts++
                 null // Includes HTTP, certificate, body-validation and backoff failures.
             },
@@ -50,7 +55,7 @@ class DnsTransportPolicyTest {
                 endpoint("https://secondary.example/dns-query", "secondary.example", "192.0.2.2")
             ),
             deadline = newDeadline(),
-            dohQuery = { endpoint ->
+            dohQuery = { endpoint, _ ->
                 attempted += endpoint.url
                 if (endpoint.hostname == "secondary.example") expected else null
             },
@@ -84,7 +89,7 @@ class DnsTransportPolicyTest {
             allowPlaintextFallback = false,
             endpoints = listOf(endpoint),
             deadline = newDeadline(),
-            dohQuery = {
+            dohQuery = { _, _ ->
                 encryptedAttempts++
                 byteArrayOf(1)
             },
@@ -107,7 +112,7 @@ class DnsTransportPolicyTest {
             allowPlaintextFallback = true,
             endpoints = listOf(endpoint("https://one.example/dns-query", "one.example", "192.0.2.1")),
             deadline = newDeadline(),
-            dohQuery = { null },
+            dohQuery = { _, _ -> null },
             plaintextQuery = {
                 udpAttempts++
                 DnsResolutionOutcome(byteArrayOf(1, 2), DnsTransport.PLAINTEXT_UDP)
@@ -124,7 +129,7 @@ class DnsTransportPolicyTest {
             allowPlaintextFallback = true,
             endpoints = emptyList(),
             deadline = newDeadline(),
-            dohQuery = { null },
+            dohQuery = { _, _ -> null },
             plaintextQuery = {
                 DnsResolutionOutcome(byteArrayOf(3, 4), DnsTransport.PLAINTEXT_TCP)
             }
@@ -132,6 +137,76 @@ class DnsTransportPolicyTest {
 
         assertSame(DnsTransport.PLAINTEXT_TCP, result.transport)
         kotlin.test.assertContentEquals(byteArrayOf(3, 4), result.response)
+    }
+
+    @Test
+    fun attemptBudgetSharesDeadlineAcrossUniqueEndpointsAndPlaintextFallback() = runBlocking {
+        var nowNanos = 0L
+        val deadline = DnsRequestDeadline.fromReceivedAt(nowNanos, timeoutMillis = 6_000)
+        val primary = endpoint("https://resolver.example/dns-query", "resolver.example", "192.0.2.1")
+        val duplicate = primary.copy(isCustom = false)
+        val alternateBootstrap = primary.copy(bootstrapAddresses = listOf("192.0.2.2"))
+        val budgets = mutableListOf<Pair<List<String>, Long>>()
+        var fallbackRemainingMillis = 0L
+
+        val result = DnsTransportPolicy.resolve(
+            allowPlaintextFallback = true,
+            endpoints = listOf(primary, duplicate, alternateBootstrap),
+            deadline = deadline,
+            nowNanos = { nowNanos },
+            dohQuery = { endpoint, attemptTimeoutMillis ->
+                budgets += endpoint.bootstrapAddresses to attemptTimeoutMillis
+                nowNanos += java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(attemptTimeoutMillis)
+                null
+            },
+            plaintextQuery = {
+                fallbackRemainingMillis = deadline.remainingMillis(nowNanos)
+                DnsResolutionOutcome(byteArrayOf(1), DnsTransport.PLAINTEXT_UDP)
+            }
+        )
+
+        assertEquals(
+            listOf(listOf("192.0.2.1") to 2_000L, listOf("192.0.2.2") to 2_000L),
+            budgets
+        )
+        assertEquals(2_000L, fallbackRemainingMillis)
+        assertSame(DnsTransport.PLAINTEXT_UDP, result.transport)
+    }
+
+    @Test
+    fun parentCancellationPropagatesWithoutStartingBackupOrFallback() = runBlocking {
+        val enteredPrimary = CompletableDeferred<Unit>()
+        var backupAttempts = 0
+        var fallbackAttempts = 0
+        val resolution = async {
+            DnsTransportPolicy.resolve(
+                allowPlaintextFallback = true,
+                endpoints = listOf(
+                    endpoint("https://primary.example/dns-query", "primary.example", "192.0.2.1"),
+                    endpoint("https://backup.example/dns-query", "backup.example", "192.0.2.2")
+                ),
+                deadline = newDeadline(),
+                dohQuery = { endpoint, _ ->
+                    if (endpoint.hostname == "primary.example") {
+                        enteredPrimary.complete(Unit)
+                        awaitCancellation()
+                    }
+                    backupAttempts++
+                    byteArrayOf(1)
+                },
+                plaintextQuery = {
+                    fallbackAttempts++
+                    null
+                }
+            )
+        }
+
+        enteredPrimary.await()
+        resolution.cancelAndJoin()
+
+        assertTrue(resolution.isCancelled)
+        assertEquals(0, backupAttempts)
+        assertEquals(0, fallbackAttempts)
     }
 
     private fun endpoint(url: String, hostname: String, bootstrap: String) =

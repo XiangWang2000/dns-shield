@@ -9,6 +9,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -222,6 +225,54 @@ class ResolverCommandOrderingTest {
         }
     }
 
+    @Test
+    fun fallbackRevisionCheckAndFenceEffectAreAtomic() = runBlocking {
+        val fixture = Fixture()
+        val coordinator = fixture.coordinator
+        val allowEnteredFence = CountDownLatch(1)
+        val releaseAllowFence = CountDownLatch(1)
+        val strictSubmitStarted = CountDownLatch(1)
+        val effects = mutableListOf<String>()
+
+        try {
+            val allow = coordinator.submitFallbackPolicy(1) { _, applyFence ->
+                applyFence {
+                    allowEnteredFence.countDown()
+                    check(releaseAllowFence.await(2, TimeUnit.SECONDS))
+                    effects += "allow"
+                }
+            }
+            assertTrue(allowEnteredFence.await(2, TimeUnit.SECONDS))
+
+            val strict = async(Dispatchers.IO) {
+                strictSubmitStarted.countDown()
+                coordinator.submitFallbackPolicy(
+                    1,
+                    onSubmitted = { effects += "strict-request" }
+                ) { _, applyFence ->
+                    applyFence { effects += "strict" }
+                }
+            }
+            assertTrue(strictSubmitStarted.await(2, TimeUnit.SECONDS))
+            val strictReturnedBeforeAllowEffect = withTimeoutOrNull(100) {
+                strict.await()
+                true
+            } ?: false
+
+            releaseAllowFence.countDown()
+            allow.result.await()
+            strict.await().result.await()
+
+            assertFalse(
+                strictReturnedBeforeAllowEffect,
+                "A newer STRICT request must wait until the current ALLOW check/effect finishes"
+            )
+            assertTrue(effects.indexOf("allow") < effects.indexOf("strict"))
+        } finally {
+            releaseAllowFence.countDown()
+            fixture.close()
+        }
+    }
     @Test
     fun strictRequestRejectsPlaintextBeforeBlockedRoomWorkerIsReleased() = runBlocking {
         val fixture = Fixture()

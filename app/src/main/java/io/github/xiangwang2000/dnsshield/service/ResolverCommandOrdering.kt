@@ -113,11 +113,11 @@ class ResolverCommandCoordinator(
         onSubmitted()
         enqueueLocked(revision) {
             action(revision) { applyFence ->
-                val current = synchronized(submissionLock) {
-                    latestFallbackRevisionByResolver[resolverId] == revision
+                synchronized(submissionLock) {
+                    val current = latestFallbackRevisionByResolver[resolverId] == revision
+                    if (current) applyFence()
+                    current
                 }
-                if (current) applyFence()
-                current
             }
         }
     }

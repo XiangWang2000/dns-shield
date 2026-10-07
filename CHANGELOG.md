@@ -13,6 +13,7 @@
 
 ### Changed
 
+- 純 Markdown 文件變更改用文件與連結檢查；程式變更保留完整 CI，並加入 D08／D15 隔離 App 與測試 APK 編譯。
 - production blocklist 與 Public Suffix resolver 在同一個 VPN Service lifecycle 內只載入一次；已驗證排序狀態會供後續 policy reload 重用。
 - 網路、解析器與規則變更時失效舊 DNS 狀態，防止舊回應寫入新快取或跨狀態送出；DoH client 可重用，並在設定／底層網路變更時重建。
 - 限制進行中的不同查詢與合併等候數，超額回覆 SERVFAIL；回應快取採估算容量預算。
@@ -21,6 +22,9 @@
 
 ### Fixed
 
+- DoH 故障冷卻依端點設定與解析器／網路 generation 隔離，避免備援互相影響或舊請求污染新狀態。
+- 單次 DoH 嘗試保留主備及允許的明文降級時間，避免慢速回應耗盡總期限。
+- DNS 設定操作失敗會顯示可恢復的提示，區分尚未儲存與已儲存但尚未同步；僅加密防護維持關閉明文。
 - 修正 API 26 反覆 START／STOP 時，關閉 TUN 後 reader 仍可能阻塞的問題。
 - 啟用／停用意圖以序列化 IO 保存；已驗證 STOP／撤銷完成後立即終止程序仍維持停用，系統背景政策限制仍適用。
 
