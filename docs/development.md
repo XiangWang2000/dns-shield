@@ -119,7 +119,7 @@ Gradle daemon 的既定條件為 JDK 21；CI 先安裝符合條件的 JDK，避�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 
-驗證入口會執行 PowerShell 語法檢查、離線 Python 工具測試、production Public Suffix 與 active blocklist asset 驗證、Android lint、JVM 單元測試及 Kotlin 編譯，並建置 Debug 與 D03／D04／D14 隔離 App／androidTest APK。D07／D08／D12／D15 variants 需另行建置；CI 不會自動執行裝置測試。GitHub Actions 固定使用 Windows 2025、Python 3.13.15 與 Temurin 21.0.12.1+1 執行同一個 `verify.ps1`，並保存 JVM 測試與 lint 報告。
+驗證入口會執行 PowerShell 語法檢查、離線 Python 工具測試、production Public Suffix 與 active blocklist asset 驗證、Android lint、JVM 單元測試及 Kotlin 編譯，並建置 Debug 與 D03／D04／D08／D14／D15 隔離 App／androidTest APK。D07／D12 variants 需另行建置；CI 不會自動執行裝置測試。GitHub Actions 固定使用 Windows 2025、Python 3.13.15 與 Temurin 21.0.12.1+1 執行同一個 `verify.ps1`，並保存 JVM 測試與 lint 報告。
 
 目前 `main` 已將 GitHub Actions 的 `Windows verification` 設為 required status check，並套用於 repository 管理員；分支不必先與 `main` 同步。CI 執行建置、資產驗證、lint 與 JVM／Python 測試；實機 instrumentation 與耗電量測須另外執行，不能由 CI 建置結果推定通過。
 
@@ -218,6 +218,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix-an
 CI 保留必要檢查名稱「Windows verification」。只有 README、CHANGELOG、PRIVACY、THIRD_PARTY_NOTICES、AGENTS 的根目錄 Markdown，以及 docs/ 內的 Markdown 變更，才走文件檢查；任何程式、資產、工具或 CI 設定變更都執行完整 verify.ps1。PR 以 merge base 比較全部變更，push 以 before／after 比較；無法確認歷史時執行完整驗證。
 
 文件檢查驗證本地檔案連結、HTML 圖片、空連結、code fence 與控制字元，不連網檢查遠端網址或頁內錨點。歷史驗收報告的 captures/ 連結指向本機保留的 ignored 原始證據，會明確列為未檢查。本地可執行 python tools/ci.py verify-docs；路徑分流與壞連結回歸使用 python -m unittest discover tools/tests -p test_ci.py。
+
 ## 正式發行
 
 正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前程式版本為 `1.2.2`、`versionCode 5`；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。

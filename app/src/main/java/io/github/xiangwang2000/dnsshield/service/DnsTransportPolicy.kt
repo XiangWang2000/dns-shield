@@ -20,13 +20,24 @@ internal object DnsTransportPolicy {
         allowPlaintextFallback: Boolean,
         endpoints: List<DnsDohEndpoint>,
         deadline: DnsRequestDeadline,
-        dohQuery: suspend (DnsDohEndpoint) -> ByteArray?,
+        nowNanos: () -> Long = System::nanoTime,
+        dohQuery: suspend (DnsDohEndpoint, Long) -> ByteArray?,
         plaintextQuery: suspend () -> DnsResolutionOutcome?
     ): DnsResolutionOutcome {
-        for (endpoint in endpoints) {
-            if (!endpoint.canResolveHost || deadline.remainingMillis() <= 0L) continue
+        val candidates = endpoints.asSequence()
+            .filter { it.canResolveHost }
+            .distinctBy { it.url to it.bootstrapAddresses }
+            .toList()
+
+        for ((index, endpoint) in candidates.withIndex()) {
+            val remainingMillis = deadline.remainingMillis(nowNanos())
+            if (remainingMillis <= 0L) break
+            val stagesRemaining = candidates.size - index + if (allowPlaintextFallback) 1 else 0
+            val attemptTimeoutMillis = remainingMillis / stagesRemaining
+            if (attemptTimeoutMillis <= 0L) continue
+
             val response = try {
-                dohQuery(endpoint)
+                dohQuery(endpoint, attemptTimeoutMillis)
             } catch (exception: CancellationException) {
                 throw exception
             } catch (_: Exception) {
@@ -37,7 +48,7 @@ internal object DnsTransportPolicy {
             }
         }
 
-        if (allowPlaintextFallback && deadline.remainingMillis() > 0L) {
+        if (allowPlaintextFallback && deadline.remainingMillis(nowNanos()) > 0L) {
             val response = try {
                 plaintextQuery()
             } catch (exception: CancellationException) {

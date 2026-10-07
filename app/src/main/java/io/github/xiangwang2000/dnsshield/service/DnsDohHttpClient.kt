@@ -24,11 +24,14 @@ internal suspend fun OkHttpClient.lookupDoh(
     endpointUrl: String,
     query: ParsedDnsQuery,
     deadline: DnsRequestDeadline,
+    attemptTimeoutMillis: Long? = null,
     onCallQueued: () -> Unit = {},
     logFailure: (String, Throwable?) -> Unit
 ): ByteArray? {
     val remainingMillis = deadline.remainingMillis()
     if (remainingMillis <= 0L) return null
+    val callTimeoutMillis = attemptTimeoutMillis?.let { minOf(remainingMillis, it) } ?: remainingMillis
+    if (callTimeoutMillis <= 0L) return null
 
     val mediaType = "application/dns-message".toMediaType()
     val requestBody = DnsMessageValidator.prepareUpstreamQuery(query).toRequestBody(mediaType)
@@ -39,7 +42,7 @@ internal suspend fun OkHttpClient.lookupDoh(
         .post(requestBody)
         .build()
     val call = newCall(request)
-    call.timeout().timeout(remainingMillis, TimeUnit.MILLISECONDS)
+    call.timeout().timeout(callTimeoutMillis, TimeUnit.MILLISECONDS)
 
     return suspendCancellableCoroutine { continuation ->
         continuation.invokeOnCancellation { call.cancel() }

@@ -44,6 +44,66 @@ class DohEndpointHttpsTest {
     }
 
     @Test
+    fun slowPrimaryTlsBodyAllowsSameUrlWithAlternateBootstrapBeforeDeadline() = runBlocking {
+        val releasePrimaryBody = java.util.concurrent.CountDownLatch(1)
+        LocalHttpsDns("127.0.0.1", slowBodyGate = releasePrimaryBody).use { primary ->
+            LocalHttpsDns("127.0.0.2", primary.port).use { secondary ->
+                val primaryEndpoint = endpoint("dns.example.test", primary.port, "dns-query", "127.0.0.1")
+                val secondaryEndpoint = primaryEndpoint.copy(bootstrapAddresses = listOf("127.0.0.2"))
+                val queryBytes = DnsTestMessages.query(name = "slow-body.example")
+                val query = (DnsMessageValidator.parseQuery(queryBytes) as DnsQueryParseResult.Valid).query
+                val requestStartedAtNanos = System.nanoTime()
+                val deadline = DnsRequestDeadline.fromReceivedAt(requestStartedAtNanos, timeoutMillis = 6_000)
+                val base = trustedClient()
+                val udpAttempts = AtomicInteger()
+                val resolution = async {
+                    DnsTransportPolicy.resolve(
+                        allowPlaintextFallback = false,
+                        endpoints = listOf(primaryEndpoint, secondaryEndpoint),
+                        deadline = deadline,
+                        dohQuery = { endpoint, attemptTimeoutMillis ->
+                            base.forDohEndpoint(endpoint).lookupDoh(
+                                endpointUrl = endpoint.url,
+                                query = query,
+                                deadline = deadline,
+                                attemptTimeoutMillis = attemptTimeoutMillis
+                            ) { _, _ -> }
+                        },
+                        plaintextQuery = {
+                            udpAttempts.incrementAndGet()
+                            null
+                        }
+                    )
+                }
+
+                try {
+                    val slowBodyStarted = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        primary.bodyStarted.await(4, java.util.concurrent.TimeUnit.SECONDS)
+                    }
+                    kotlin.test.assertTrue(slowBodyStarted, "Primary should enter its TLS response body")
+
+                    val outcome = resolution.await()
+                    assertEquals(DnsTransport.ENCRYPTED_HTTPS, outcome.transport)
+                    assertContentEquals(DnsTestMessages.response(queryBytes), outcome.response)
+                    assertEquals(primaryEndpoint.url, secondaryEndpoint.url)
+                    assertEquals(listOf("/dns-query"), primary.paths.toList())
+                    assertEquals(listOf("/dns-query"), secondary.paths.toList())
+                    assertEquals(0, udpAttempts.get())
+                    val elapsedMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                        System.nanoTime() - requestStartedAtNanos
+                    )
+                    kotlin.test.assertTrue(elapsedMillis in 2_000L until 6_000L, "Resolution exceeded its original deadline")
+                } finally {
+                    releasePrimaryBody.countDown()
+                    resolution.cancel()
+                    resolution.join()
+                    closeClient(base)
+                }
+            }
+        }
+    }
+
+    @Test
     fun sameHostnameEndpointsUseTheirOwnBootstrapAddress() = runBlocking {
         LocalHttpsDns("127.0.0.1").use { primary ->
             LocalHttpsDns("127.0.0.2", primary.port).use { secondary ->
@@ -202,9 +262,11 @@ class DohEndpointHttpsTest {
         ip: String,
         requestedPort: Int = 0,
         private val beforeReply: () -> Unit = {},
-        private val responseFor: (ByteArray) -> ByteArray = { DnsTestMessages.response(it) }
+        private val responseFor: (ByteArray) -> ByteArray = { DnsTestMessages.response(it) },
+        private val slowBodyGate: java.util.concurrent.CountDownLatch? = null
     ) : AutoCloseable {
         val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val bodyStarted = java.util.concurrent.CountDownLatch(1)
         private val server = HttpsServer.create(InetSocketAddress(ip, requestedPort), 0).apply {
             httpsConfigurator = HttpsConfigurator(sslContext())
             createContext("/") { exchange ->
@@ -215,7 +277,14 @@ class DohEndpointHttpsTest {
                     val response = responseFor(request)
                     it.responseHeaders.set("Content-Type", "application/dns-message")
                     it.sendResponseHeaders(200, response.size.toLong())
-                    it.responseBody.write(response)
+                    if (slowBodyGate == null) {
+                        it.responseBody.write(response)
+                    } else {
+                        it.responseBody.write(response, 0, 1)
+                        it.responseBody.flush()
+                        bodyStarted.countDown()
+                        slowBodyGate.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                    }
                 }
             }
             start()

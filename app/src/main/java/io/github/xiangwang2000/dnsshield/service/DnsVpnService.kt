@@ -267,6 +267,19 @@ class DnsVpnService : VpnService() {
             }
         }
 
+        /**
+         * Replaces the DoH client only in the isolated D08 test application.
+         * This lets instrumentation trust its pinned local TLS fixture without changing production trust.
+         */
+        internal fun setD08TestHttpClient(client: OkHttpClient?) {
+            check(BuildConfig.APPLICATION_ID.endsWith(".d08test")) {
+                "The D08 test client hook is unavailable in production variants"
+            }
+            synchronized(this) {
+                okHttpClientInstance?.connectionPool?.evictAll()
+                okHttpClientInstance = client
+            }
+        }
         private fun resetOkHttpClientForUnderlyingNetworkChange() {
             synchronized(this) {
                 val client = okHttpClientInstance ?: return
@@ -726,6 +739,9 @@ class DnsVpnService : VpnService() {
             upstreamDnsServer = server
             resolverGeneration++
             clearDnsStateLocked()
+            dohFailureBackoff.resetForGeneration(
+                DohFailureBackoff.Generation(resolverGeneration, underlyingNetworkGeneration)
+            )
         }
         dnsTransportStatusFlow.value = "設定已更新，等待下一次查詢"
     }
@@ -1080,9 +1096,11 @@ class DnsVpnService : VpnService() {
                     underlyingNetworkGeneration++
                     underlyingNetworkChangePending = true
                     clearDnsAnswerCacheLocked()
+                    dohFailureBackoff.resetForGeneration(
+                        DohFailureBackoff.Generation(resolverGeneration, underlyingNetworkGeneration)
+                    )
                     underlyingNetworkGeneration
                 }
-                dohFailureBackoff.resetForGeneration(currentGeneration)
                 activeDnsLeaders.forEach { (job, state) ->
                     if (state.underlyingNetworkGeneration != currentGeneration) {
                         job.cancel(CancellationException("Underlying network changed"))
@@ -1957,6 +1975,7 @@ class DnsVpnService : VpnService() {
         resolverEndpoints: List<DnsDohEndpoint>,
         query: ParsedDnsQuery,
         deadline: DnsRequestDeadline,
+        attemptTimeoutMillis: Long,
         metricsRequest: DnsDiagnosticMetrics.Request
     ): ByteArray? {
         if (deadline.remainingMillis() <= 0L) return null
@@ -1965,6 +1984,7 @@ class DnsVpnService : VpnService() {
                 endpointUrl = endpoint.url,
                 query = query,
                 deadline = deadline,
+                attemptTimeoutMillis = attemptTimeoutMillis,
                 onCallQueued = { recordTransportAttempt(metricsRequest, DnsUpstreamTransport.DOH_CALL_QUEUED) },
                 logFailure = { message, error -> logDnsTransportFailure(message, error) }
             )
@@ -2100,29 +2120,33 @@ class DnsVpnService : VpnService() {
         request: DnsDiagnosticMetrics.Request
     ): ByteArray? {
         val endpoints = DohEndpointConfiguration.endpoints(dnsState.server)
+        val backoffGeneration = DohFailureBackoff.Generation(
+            resolverGeneration = dnsState.resolverGeneration,
+            networkGeneration = dnsState.underlyingNetworkGeneration
+        )
         val outcome = DnsTransportPolicy.resolve(
             allowPlaintextFallback = dnsState.server.allowPlaintextFallback,
             endpoints = endpoints,
             deadline = deadline,
-            dohQuery = { endpoint ->
+            dohQuery = { endpoint, attemptTimeoutMillis ->
                 if (!isCurrentDnsState(dnsState) ||
-                    !dohFailureBackoff.tryAcquire(endpoint.url, dnsState.underlyingNetworkGeneration)) {
+                    !dohFailureBackoff.tryAcquire(endpoint, backoffGeneration)) {
                     null
                 } else {
                     val response = try {
-                        performDohLookup(endpoint, endpoints, query, deadline, request)
+                        performDohLookup(endpoint, endpoints, query, deadline, attemptTimeoutMillis, request)
                     } catch (exception: CancellationException) {
-                        dohFailureBackoff.cancelAttempt(endpoint.url, dnsState.underlyingNetworkGeneration)
+                        dohFailureBackoff.cancelAttempt(endpoint, backoffGeneration)
                         throw exception
                     } catch (exception: Exception) {
-                        dohFailureBackoff.recordFailure(endpoint.url, dnsState.underlyingNetworkGeneration)
+                        dohFailureBackoff.recordFailure(endpoint, backoffGeneration)
                         logDnsTransportFailure("DoH resolution failed for ${endpoint.url}", exception)
                         null
                     }
                     if (response == null) {
-                        dohFailureBackoff.recordFailure(endpoint.url, dnsState.underlyingNetworkGeneration)
+                        dohFailureBackoff.recordFailure(endpoint, backoffGeneration)
                     } else {
-                        dohFailureBackoff.recordSuccess(endpoint.url, dnsState.underlyingNetworkGeneration)
+                        dohFailureBackoff.recordSuccess(endpoint, backoffGeneration)
                     }
                     response
                 }

@@ -8,6 +8,15 @@ internal class DohFailureBackoff(
     cooldownMillis: Long = DEFAULT_COOLDOWN_MILLIS,
     private val nanoTime: () -> Long = System::nanoTime
 ) {
+    data class Generation(val resolverGeneration: Int, val networkGeneration: Long)
+
+    private data class EndpointIdentity(
+        val url: String,
+        val hostname: String,
+        val bootstrapAddresses: List<String>,
+        val isCustom: Boolean
+    )
+
     private class State(
         var consecutiveFailures: Int = 0,
         var retryAfterNanos: Long = 0L,
@@ -16,24 +25,20 @@ internal class DohFailureBackoff(
 
     private val cooldownNanos = cooldownMillis * NANOS_PER_MILLISECOND
     private val lock = Any()
-    private val states = HashMap<String, State>()
-    private var activeGeneration = 0L
+    private val states = HashMap<EndpointIdentity, State>()
+    private var activeGeneration = Generation(resolverGeneration = 0, networkGeneration = 0L)
 
     init {
         require(failureThreshold > 0)
         require(cooldownMillis > 0)
     }
 
-    fun tryAcquire(endpoint: String): Boolean = synchronized(lock) {
-        tryAcquireLocked(endpoint)
-    }
-
-    fun tryAcquire(endpoint: String, generation: Long): Boolean = synchronized(lock) {
+    fun tryAcquire(endpoint: DnsDohEndpoint, generation: Generation): Boolean = synchronized(lock) {
         if (generation != activeGeneration) return@synchronized false
-        tryAcquireLocked(endpoint)
+        tryAcquireLocked(endpoint.identity())
     }
 
-    private fun tryAcquireLocked(endpoint: String): Boolean {
+    private fun tryAcquireLocked(endpoint: EndpointIdentity): Boolean {
         val state = states[endpoint] ?: return true
         if (state.retryAfterNanos == 0L) return true
 
@@ -44,31 +49,19 @@ internal class DohFailureBackoff(
         return true
     }
 
-    fun recordSuccess(endpoint: String) {
+    fun recordSuccess(endpoint: DnsDohEndpoint, generation: Generation) {
         synchronized(lock) {
-            states.remove(endpoint)
+            if (generation == activeGeneration) states.remove(endpoint.identity())
         }
     }
 
-    fun recordSuccess(endpoint: String, generation: Long) {
+    fun recordFailure(endpoint: DnsDohEndpoint, generation: Generation) {
         synchronized(lock) {
-            if (generation == activeGeneration) states.remove(endpoint)
+            if (generation == activeGeneration) recordFailureLocked(endpoint.identity())
         }
     }
 
-    fun recordFailure(endpoint: String) {
-        synchronized(lock) {
-            recordFailureLocked(endpoint)
-        }
-    }
-
-    fun recordFailure(endpoint: String, generation: Long) {
-        synchronized(lock) {
-            if (generation == activeGeneration) recordFailureLocked(endpoint)
-        }
-    }
-
-    private fun recordFailureLocked(endpoint: String) {
+    private fun recordFailureLocked(endpoint: EndpointIdentity) {
         val now = nanoTime()
         val state = states.getOrPut(endpoint, ::State)
 
@@ -83,19 +76,13 @@ internal class DohFailureBackoff(
         }
     }
 
-    fun cancelAttempt(endpoint: String) {
+    fun cancelAttempt(endpoint: DnsDohEndpoint, generation: Generation) {
         synchronized(lock) {
-            states[endpoint]?.probeInFlight = false
+            if (generation == activeGeneration) states[endpoint.identity()]?.probeInFlight = false
         }
     }
 
-    fun cancelAttempt(endpoint: String, generation: Long) {
-        synchronized(lock) {
-            if (generation == activeGeneration) states[endpoint]?.probeInFlight = false
-        }
-    }
-
-    fun resetForGeneration(generation: Long) {
+    fun resetForGeneration(generation: Generation) {
         synchronized(lock) {
             if (generation != activeGeneration) {
                 activeGeneration = generation
@@ -103,6 +90,13 @@ internal class DohFailureBackoff(
             }
         }
     }
+
+    private fun DnsDohEndpoint.identity() = EndpointIdentity(
+        url = url,
+        hostname = hostname,
+        bootstrapAddresses = bootstrapAddresses.toList(),
+        isCustom = isCustom
+    )
 
     private companion object {
         const val DEFAULT_FAILURE_THRESHOLD = 3
