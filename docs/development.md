@@ -213,6 +213,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix-an
 
 腳本只把 benchmark artifact 複製到 `app/build/generated` 的 androidTest asset；結果會拉回 `build/public-suffix.android-benchmark.json`。Production APK 另包含已釘選且驗證的 PSL asset，只有有效 `active.bin` 需要 parent-domain matching 時才由 service lifecycle lazy 載入；載入失敗時 compiled blocklist 退回 exact-only。測試流程與指標解讀請參閱 [docs/public-suffix-android-benchmark.md](public-suffix-android-benchmark.md)。
 
+## CI 檢查範圍
+
+CI 保留必要檢查名稱「Windows verification」。只有 README、CHANGELOG、PRIVACY、THIRD_PARTY_NOTICES、AGENTS 的根目錄 Markdown，以及 docs/ 內的 Markdown 變更，才走文件檢查；任何程式、資產、工具或 CI 設定變更都執行完整 verify.ps1。PR 以 merge base 比較全部變更，push 以 before／after 比較；無法確認歷史時執行完整驗證。
+
+文件檢查驗證本地檔案連結、HTML 圖片、空連結、code fence 與控制字元，不連網檢查遠端網址或頁內錨點。歷史驗收報告的 captures/ 連結指向本機保留的 ignored 原始證據，會明確列為未檢查。本地可執行 python tools/ci.py verify-docs；路徑分流與壞連結回歸使用 python -m unittest discover tools/tests -p test_ci.py。
 ## 正式發行
 
 正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前程式版本為 `1.2.2`、`versionCode 5`；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
