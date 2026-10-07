@@ -67,6 +67,15 @@ import org.junit.runner.RunWith
 class DohFailureBackoffTunInstrumentedTest {
     @Test
     fun savedAllowThenSelectingSameResolverConvergesThroughRealTun() = runBlocking {
+        runSavedAllowConvergence(initialStoredAllowed = false)
+    }
+
+    @Test
+    fun savedAllowReconcilesWhenAppliedResolverRowIsEqual() = runBlocking {
+        runSavedAllowConvergence(initialStoredAllowed = true)
+    }
+
+    private suspend fun runSavedAllowConvergence(initialStoredAllowed: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue("Run only in the isolated D08 test package", context.packageName.endsWith(".d08test"))
@@ -78,8 +87,9 @@ class DohFailureBackoffTunInstrumentedTest {
         val suffix = UUID.randomUUID().toString().replace("-", "").take(8)
         val resolverName = "D08 same-resolver ALLOW $suffix"
         val domain = "d08-same-allow-$suffix.example.test"
+        val initialStrictDomain = "d08-same-allow-initial-strict-$suffix.example.test"
         val doh = LocalTlsDohServer(PRIMARY_IP, 0, answer = null)
-        val plaintext = PlaintextUdpCounter(expectedDomains = setOf(domain), answer = ::buildDnsResponse)
+        val plaintext = PlaintextUdpCounter(expectedDomains = setOf(domain, initialStrictDomain), answer = ::buildDnsResponse)
         val testStore = ViewModelStore()
         val owner = object : ViewModelStoreOwner {
             override val viewModelStore = testStore
@@ -103,7 +113,7 @@ class DohFailureBackoffTunInstrumentedTest {
                     primaryIp = PRIMARY_IP,
                     secondaryIp = null,
                     isCustom = true,
-                    allowPlaintextFallback = false,
+                    allowPlaintextFallback = initialStoredAllowed,
                     primaryDohUrl = dohUrl(doh.port),
                     primaryDohBootstrapIps = PRIMARY_IP
                 )
@@ -118,6 +128,15 @@ class DohFailureBackoffTunInstrumentedTest {
             awaitActiveVpnNetwork(context)
             awaitServiceNetworkReady()
             DnsVpnService.setD08TestHttpClient(pinnedD08HttpClient())
+
+            val beforeRow = dao.getActiveDnsServer()
+            if (initialStoredAllowed) {
+                assertTrue(requireNotNull(beforeRow).allowPlaintextFallback)
+                val initialStrictResponse = sendQueryThroughTun(buildDnsQuery(initialStrictDomain, 0x8600))
+                assertDnsResponseCode(initialStrictResponse, 2, 0x8600)
+                assertEquals(0, plaintext.queryCount(initialStrictDomain))
+                assertTrue("The initial strict query should reach the controlled DoH failure", doh.requestCount.get() > 0)
+            }
 
             val gateEntered = CompletableDeferred<Unit>()
             val release = CompletableDeferred<Boolean>()
@@ -142,6 +161,7 @@ class DohFailureBackoffTunInstrumentedTest {
             }
             assertTrue(dao.getDnsServerById(resolver.id)?.allowPlaintextFallback == true)
             assertEquals(resolver.id, dao.getActiveDnsServer()?.id)
+            if (initialStoredAllowed) assertEquals(beforeRow, dao.getActiveDnsServer())
 
             val response = sendQueryThroughTun(buildDnsQuery(domain, 0x8601))
             assertTrue("The controlled DoH failure should reach the local server", doh.requestCount.get() > 0)
