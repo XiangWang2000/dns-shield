@@ -190,8 +190,10 @@ class ResolverCommandOrderingTest {
         val fixture = Fixture()
         val coordinator = fixture.coordinator
         val resolverId = 1
-        var storedAllow = false
-        var runtimeAllow = false
+        val fence = DnsPlaintextFallbackFence()
+        assertTrue(fence.requestPolicy(resolverId, 1, false))
+        assertTrue(fence.markPersisted(resolverId, 1, false))
+        assertTrue(fence.applyStoredPolicy(resolverId, 1, false))
         val blockerStarted = CompletableDeferred<Unit>()
         val releaseBlocker = CompletableDeferred<Unit>()
 
@@ -201,24 +203,28 @@ class ResolverCommandOrderingTest {
                 releaseBlocker.await()
             }
             blockerStarted.await()
-            val allow = coordinator.submitFallbackPolicy(resolverId) { _, applyFence ->
-                val fenced = applyFence { runtimeAllow = true }
-                storedAllow = true
-                fenced
+            val allow = coordinator.submitFallbackPolicy(
+                resolverId,
+                onSubmitted = { revision -> fence.requestPolicy(resolverId, revision, true) }
+            ) { revision, applyFence ->
+                fence.markPersisted(resolverId, revision, true)
+                applyFence { fence.applyStoredPolicy(resolverId, revision, true) }
             }
-            val strict = coordinator.submitFallbackPolicy(resolverId) { _, applyFence ->
-                val fenced = applyFence { runtimeAllow = false }
-                storedAllow = false
-                fenced
+            val strict = coordinator.submitFallbackPolicy(
+                resolverId,
+                onSubmitted = { revision -> fence.requestPolicy(resolverId, revision, false) }
+            ) { revision, applyFence ->
+                fence.markPersisted(resolverId, revision, false)
+                applyFence { fence.applyStoredPolicy(resolverId, revision, false) }
             }
+            assertFalse(fence.allows(resolverId), "STRICT publishes while Room work is queued")
 
             releaseBlocker.complete(Unit)
             blocker.result.await()
             assertFalse(allow.result.await())
             assertTrue(strict.result.await())
 
-            assertFalse(storedAllow)
-            assertFalse(runtimeAllow)
+            assertFalse(fence.allows(resolverId))
         } finally {
             releaseBlocker.complete(Unit)
             fixture.close()
@@ -229,47 +235,46 @@ class ResolverCommandOrderingTest {
     fun fallbackRevisionCheckAndFenceEffectAreAtomic() = runBlocking {
         val fixture = Fixture()
         val coordinator = fixture.coordinator
-        val allowEnteredFence = CountDownLatch(1)
-        val releaseAllowFence = CountDownLatch(1)
-        val strictSubmitStarted = CountDownLatch(1)
-        val effects = mutableListOf<String>()
+        val resolverId = 45
+        val fence = DnsPlaintextFallbackFence()
+        val initialRevision = fixture.revisions.next()
+        assertTrue(fence.requestPolicy(resolverId, initialRevision, false))
+        assertTrue(fence.markPersisted(resolverId, initialRevision, false))
+        assertTrue(fence.applyStoredPolicy(resolverId, initialRevision, false))
+        val allowQueued = CompletableDeferred<Unit>()
+        val releaseAllow = CompletableDeferred<Unit>()
+        val allowPublished = java.util.concurrent.atomic.AtomicBoolean(false)
 
         try {
-            val allow = coordinator.submitFallbackPolicy(1) { _, applyFence ->
+            val allow = coordinator.submitFallbackPolicy(
+                resolverId,
+                onSubmitted = { revision -> fence.requestPolicy(resolverId, revision, true) }
+            ) { revision, applyFence ->
+                allowQueued.complete(Unit)
+                releaseAllow.await()
+                fence.markPersisted(resolverId, revision, true)
                 applyFence {
-                    allowEnteredFence.countDown()
-                    check(releaseAllowFence.await(2, TimeUnit.SECONDS))
-                    effects += "allow"
+                    allowPublished.set(fence.applyStoredPolicy(resolverId, revision, true))
                 }
             }
-            assertTrue(allowEnteredFence.await(2, TimeUnit.SECONDS))
+            allowQueued.await()
 
-            val strict = async(Dispatchers.IO) {
-                strictSubmitStarted.countDown()
-                coordinator.submitFallbackPolicy(
-                    1,
-                    onSubmitted = { effects += "strict-request" }
-                ) { _, applyFence ->
-                    applyFence { effects += "strict" }
-                }
+            val strict = coordinator.submitFallbackPolicy(
+                resolverId,
+                onSubmitted = { revision -> fence.requestPolicy(resolverId, revision, false) }
+            ) { revision, applyFence ->
+                fence.markPersisted(resolverId, revision, false)
+                applyFence { fence.applyStoredPolicy(resolverId, revision, false) }
             }
-            assertTrue(strictSubmitStarted.await(2, TimeUnit.SECONDS))
-            val strictReturnedBeforeAllowEffect = withTimeoutOrNull(100) {
-                strict.await()
-                true
-            } ?: false
+            assertFalse(fence.allows(resolverId), "STRICT publishes immediately")
 
-            releaseAllowFence.countDown()
-            allow.result.await()
-            strict.await().result.await()
-
-            assertFalse(
-                strictReturnedBeforeAllowEffect,
-                "A newer STRICT request must wait until the current ALLOW check/effect finishes"
-            )
-            assertTrue(effects.indexOf("allow") < effects.indexOf("strict"))
+            releaseAllow.complete(Unit)
+            assertFalse(allow.result.await(), "The queued older ALLOW is superseded")
+            assertTrue(strict.result.await())
+            assertFalse(allowPublished.get(), "The older ALLOW publication callback must not run")
+            assertFalse(fence.allows(resolverId))
         } finally {
-            releaseAllowFence.countDown()
+            releaseAllow.complete(Unit)
             fixture.close()
         }
     }
@@ -279,40 +284,36 @@ class ResolverCommandOrderingTest {
         val fence = DnsPlaintextFallbackFence()
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        var storedAllow = true
         try {
             val blocker = fixture.coordinator.submit {
                 started.complete(Unit)
                 release.await()
             }
             started.await()
-            assertTrue(fence.allows(1))
             val olderAllow = fixture.coordinator.submitFallbackPolicy(
-                1, onSubmitted = { fence.requestAllowed(1, true) }
-            ) { _, applyFence ->
-                applyFence { fence.setAllowed(1, true) }
-                storedAllow = true
+                1, onSubmitted = { revision -> fence.requestPolicy(1, revision, true) }
+            ) { revision, applyFence ->
+                fence.markPersisted(1, revision, true)
+                applyFence { fence.applyStoredPolicy(1, revision, true) }
             }
             val strict = fixture.coordinator.submitFallbackPolicy(
-                1, onSubmitted = { fence.requestAllowed(1, false) }
-            ) { _, applyFence ->
-                applyFence { fence.setAllowed(1, false) }
-                storedAllow = false
+                1, onSubmitted = { revision -> fence.requestPolicy(1, revision, false) }
+            ) { revision, applyFence ->
+                fence.markPersisted(1, revision, false)
+                applyFence { fence.applyStoredPolicy(1, revision, false) }
             }
             assertFalse(blocker.result.isCompleted)
-            assertTrue(storedAllow, "Room is still blocked; rejection must not depend on persistence")
             assertFalse(fence.allows(1))
             var sent = false
             assertFalse(fence.sendIfAllowed(1, true, { true }) { sent = true })
             assertFalse(sent)
             // A setter that passed its revision check before strict submission cannot reopen the guard.
-            fence.setAllowed(1, true)
+            assertFalse(fence.requestPolicy(1, olderAllow.revision, true))
             assertFalse(fence.allows(1))
             release.complete(Unit)
             blocker.result.await()
             olderAllow.result.await()
             strict.result.await()
-            assertFalse(storedAllow)
             assertFalse(fence.allows(1))
         } finally {
             release.complete(Unit)
@@ -401,6 +402,32 @@ class ResolverCommandOrderingTest {
     }
 
     @Test
+    fun startupBarrierWaitsForEarlierCommandsWithoutAdvancingRevision() = runBlocking {
+        val fixture = Fixture()
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        try {
+            val blockedMutation = fixture.coordinator.submit {
+                started.complete(Unit)
+                release.await()
+            }
+            started.await()
+            val revisionBeforeBarrier = fixture.revisions.current()
+            val startupBarrier = async { fixture.coordinator.awaitPriorCommands() }
+
+            assertFalse(startupBarrier.isCompleted)
+            release.complete(Unit)
+            blockedMutation.result.await()
+            startupBarrier.await()
+
+            assertEquals(revisionBeforeBarrier, fixture.revisions.current())
+        } finally {
+            release.complete(Unit)
+            fixture.close()
+        }
+    }
+
+    @Test
     fun delayedServiceReadRejectsOldPayloadAndAppliesCurrentActiveResolver() = runBlocking {
         val revisions = ResolverCommandRevisionClock()
         val fence = ResolverCommandRevisionFence(revisions)
@@ -452,5 +479,167 @@ class ResolverCommandOrderingTest {
         assertFalse(ResolverCommandRuntime.revisions.isCurrent(oldRequest.revision))
         assertEquals(oldRequest.revision, oldRequest.result.await())
         assertEquals(newRequest.revision, newRequest.result.await())
+    }
+    @Test
+    fun supersededAllowConvergesWhenSelectionReappliesSameActiveRow() = runBlocking {
+        val fixture = Fixture()
+        val fence = DnsPlaintextFallbackFence()
+        val initialRevision = fixture.revisions.next()
+        assertTrue(fence.requestPolicy(1, initialRevision, false))
+        assertTrue(fence.markPersisted(1, initialRevision, false))
+        assertTrue(fence.applyStoredPolicy(1, initialRevision, false))
+        val storedAllow = java.util.concurrent.atomic.AtomicBoolean(false)
+        val persisted = CompletableDeferred<Unit>()
+        val selectionSubmitted = CompletableDeferred<Unit>()
+
+        try {
+            val allow = fixture.coordinator.submitFallbackPolicy(
+                1,
+                onSubmitted = { revision -> fence.requestPolicy(1, revision, true) }
+            ) { revision, applyFence ->
+                io.github.xiangwang2000.dnsshield.viewmodel.persistFallbackPolicy(
+                    allow = true,
+                    applyRuntimePolicy = { allowed ->
+                        var policyApplied = false
+                        val current = applyFence {
+                            policyApplied = if (allowed) {
+                                fence.applyStoredPolicy(1, revision, storedAllow.get())
+                            } else {
+                                fence.requestPolicy(1, revision, false)
+                            }
+                        }
+                        current && policyApplied
+                    },
+                    onPersisted = {
+                        fence.markPersisted(1, revision, true)
+                        persisted.complete(Unit)
+                    },
+                    persist = { storedAllow.set(true); true },
+                    dispatch = {
+                        selectionSubmitted.await()
+                        fixture.coordinator.dispatchIfCurrent(
+                            revision,
+                            server(1).copy(allowPlaintextFallback = storedAllow.get())
+                        ) { _, _ -> }
+                    }
+                )
+            }
+
+            persisted.await()
+            val selectA = fixture.coordinator.submit { revision ->
+                val activeRow = server(1).copy(allowPlaintextFallback = storedAllow.get())
+                var selected = false
+                fixture.coordinator.dispatchIfCurrent(revision, activeRow) { row, appliedRevision ->
+                    selected = fence.applyStoredPolicy(
+                        row.id,
+                        appliedRevision,
+                        row.allowPlaintextFallback
+                    )
+                }
+                selected
+            }
+            selectionSubmitted.complete(Unit)
+
+            assertEquals(
+                io.github.xiangwang2000.dnsshield.viewmodel.ResolverCommandApplyStatus.SAVED_UNSYNCED,
+                allow.result.await()
+            )
+            assertTrue(selectA.result.await())
+            assertTrue(storedAllow.get())
+            assertTrue(fence.allows(1), "The later active-row apply must reconcile the saved ALLOW")
+        } finally {
+            selectionSubmitted.complete(Unit)
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun blockedResolverSendDoesNotHoldGlobalSubmissionLock() = runBlocking {
+        val fixture = Fixture()
+        val fence = DnsPlaintextFallbackFence()
+        val sendStarted = CountDownLatch(1)
+        val releaseSend = CountDownLatch(1)
+        val sendFailure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val inFlightWriteCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val sender = Thread {
+            try {
+                check(fence.sendIfAllowed(1, true, { true }) {
+                    sendStarted.countDown()
+                    check(releaseSend.await(5, TimeUnit.SECONDS))
+                    inFlightWriteCompleted.set(true)
+                })
+            } catch (failure: Throwable) {
+                sendFailure.set(failure)
+            }
+        }
+        val allowEffectEntered = CountDownLatch(1)
+        val allowPublished = CountDownLatch(1)
+        val allowPolicyPublished = java.util.concurrent.atomic.AtomicBoolean(false)
+        val allow = java.util.concurrent.atomic.AtomicReference<ResolverCommandSubmission<Unit>?>()
+        val strictStarted = CountDownLatch(1)
+        val strictReturned = CountDownLatch(1)
+        val strict = java.util.concurrent.atomic.AtomicReference<ResolverCommandSubmission<Unit>?>()
+        val strictSubmitter = Thread {
+            strictStarted.countDown()
+            strict.set(
+                fixture.coordinator.submitFallbackPolicy(
+                    1,
+                    onSubmitted = { revision -> fence.requestPolicy(1, revision, false) }
+                ) { revision, applyFence ->
+                    fence.markPersisted(1, revision, false)
+                    applyFence { fence.applyStoredPolicy(1, revision, false) }
+                    Unit
+                }
+            )
+            strictReturned.countDown()
+        }
+
+        try {
+            sender.start()
+            assertTrue(sendStarted.await(2, TimeUnit.SECONDS))
+            allow.set(
+                fixture.coordinator.submitFallbackPolicy(
+                    1,
+                    onSubmitted = { revision -> fence.requestPolicy(1, revision, true) }
+                ) { revision, applyFence ->
+                    check(fence.markPersisted(1, revision, true))
+                    check(
+                        applyFence {
+                            allowEffectEntered.countDown()
+                            allowPolicyPublished.set(fence.applyStoredPolicy(1, revision, true))
+                            allowPublished.countDown()
+                        }
+                    )
+                    Unit
+                }
+            )
+            assertTrue(allowEffectEntered.await(2, TimeUnit.SECONDS))
+            assertTrue(allowPublished.await(2, TimeUnit.SECONDS))
+            assertTrue(allowPolicyPublished.get(), "ALLOW publication completes while the send is blocked")
+            assertTrue(sender.isAlive, "The admitted send remains in flight through the policy update")
+
+            strictSubmitter.start()
+            assertTrue(strictStarted.await(2, TimeUnit.SECONDS))
+
+            assertTrue(
+                strictReturned.await(1, TimeUnit.SECONDS),
+                "A blocked socket write must not retain the global resolver submission lock"
+            )
+            assertTrue(sender.isAlive, "STRICT submission returns while the admitted send is still blocked")
+            assertFalse(fence.allows(1))
+            var sentAfterStrict = false
+            assertFalse(fence.sendIfAllowed(1, true, { true }) { sentAfterStrict = true })
+            assertFalse(sentAfterStrict)
+        } finally {
+            releaseSend.countDown()
+            sender.join(2_000)
+            strictSubmitter.join(2_000)
+            allow.get()?.let { runCatching { it.result.await() } }
+            strict.get()?.let { runCatching { it.result.await() } }
+            fixture.close()
+        }
+        assertFalse(sender.isAlive)
+        assertNull(sendFailure.get())
+        assertTrue(inFlightWriteCompleted.get(), "STRICT cannot retract an already admitted write")
     }
 }

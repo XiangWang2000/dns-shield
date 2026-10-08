@@ -37,6 +37,7 @@ import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidation
 import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidator
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
+import io.github.xiangwang2000.dnsshield.data.BypassedApp
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -144,15 +145,64 @@ class DnsVpnService : VpnService() {
 
         private val plaintextFenceCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-        fun requestPlaintextFallbackAllowed(resolverId: Int, allowed: Boolean) {
-            plaintextFallbackFence.requestAllowed(resolverId, allowed)
-            if (!allowed) plaintextFenceCleanupScope.launch {
-                plaintextFallbackFence.closeSocketsIfRequestedStrict(resolverId)
+        fun requestPlaintextFallbackAllowed(
+            resolverId: Int,
+            revision: Long,
+            allowed: Boolean
+        ): Boolean {
+            val published = plaintextFallbackFence.requestPolicy(resolverId, revision, allowed)
+            if (published && !allowed) closePlaintextFallbackSocketsAsync(resolverId, revision)
+            return published
+        }
+
+        fun markPlaintextFallbackPolicyPersisted(
+            resolverId: Int,
+            revision: Long,
+            allowed: Boolean
+        ): Boolean = plaintextFallbackFence.markPersisted(resolverId, revision, allowed)
+
+        fun applyStoredPlaintextFallbackPolicy(
+            resolverId: Int,
+            revision: Long,
+            allowed: Boolean
+        ): Boolean {
+            val applied = plaintextFallbackFence.applyStoredPolicy(resolverId, revision, allowed)
+            if (applied && !allowed) closePlaintextFallbackSocketsAsync(resolverId, revision)
+            return applied
+        }
+
+        private fun closePlaintextFallbackSocketsAsync(resolverId: Int, revision: Long) {
+            plaintextFenceCleanupScope.launch {
+                plaintextFallbackFence.closeSocketsIfStillStrict(resolverId, revision)
             }
         }
 
-        fun setPlaintextFallbackAllowed(resolverId: Int, allowed: Boolean) {
-            plaintextFallbackFence.setAllowed(resolverId, allowed)
+        internal fun setD08TestPlaintextFallbackPolicy(resolverId: Int, allowed: Boolean) {
+            check(BuildConfig.APPLICATION_ID.endsWith(".d08test")) {
+                "The D08 plaintext policy hook is unavailable in production variants"
+            }
+            val revision = ResolverCommandRuntime.revisions.next()
+            check(plaintextFallbackFence.requestPolicy(resolverId, revision, allowed))
+            check(plaintextFallbackFence.markPersisted(resolverId, revision, allowed))
+            check(plaintextFallbackFence.applyStoredPolicy(resolverId, revision, allowed))
+            if (!allowed) closePlaintextFallbackSocketsAsync(resolverId, revision)
+        }
+
+        internal fun runD08TestPlaintextSend(
+            resolverId: Int,
+            snapshotAllowsPlaintext: Boolean,
+            currentPolicyAllowsPlaintext: () -> Boolean,
+            send: () -> Unit
+        ): Boolean {
+            check(BuildConfig.APPLICATION_ID.endsWith(".d08test")) {
+                "The D08 plaintext send hook is unavailable in production variants"
+            }
+            return plaintextFallbackFence.sendIfAllowed(
+                resolverId,
+                snapshotAllowsPlaintext,
+                currentPolicyAllowsPlaintext,
+                send
+            )
         }
         val liveDecisionEventsFlow = MutableStateFlow<List<DnsDecisionEvent>>(emptyList())
         val rulePolicyStatusFlow = MutableStateFlow(RulePolicyStatus.NotLoaded)
@@ -1309,6 +1359,11 @@ class DnsVpnService : VpnService() {
                                         }
                                     },
                                     apply = { server ->
+                                        applyStoredPlaintextFallbackPolicy(
+                                            server.id,
+                                            command.command.revision,
+                                            server.allowPlaintextFallback
+                                        )
                                         if (upstreamDnsServer != server) updateResolverState(server)
                                         activeDnsFlow.value = "${server.name} (${server.primaryIp})"
                                         addLog("[DNS 變更同步] 已即時套用新 DNS 設定：${server.name} (${server.primaryIp})")
@@ -1535,29 +1590,51 @@ class DnsVpnService : VpnService() {
                 abandonSupersededStartup()
                 return
             }
-            val (activeServer, bypassedList) = withContext(Dispatchers.IO) {
-                val database = AppDatabase.getDatabase(this@DnsVpnService)
-                database.dnsDao().getActiveDnsServer() to database.dnsDao().getBypassedAppsList()
+            var bypassedList: List<BypassedApp> = emptyList()
+            while (true) {
+                yield()
+                if (!isCurrentStartRequest(requestGeneration)) {
+                    abandonSupersededStartup()
+                    return
+                }
+                ResolverCommandRuntime.coordinator.awaitPriorCommands()
+                val resolverRevision = ResolverCommandRuntime.revisions.current()
+                val (activeServer, bypassedApps) = withContext(Dispatchers.IO) {
+                    val database = AppDatabase.getDatabase(this@DnsVpnService)
+                    database.dnsDao().getActiveDnsServer() to database.dnsDao().getBypassedAppsList()
+                }
+                if (!isCurrentStartRequest(requestGeneration)) {
+                    abandonSupersededStartup()
+                    return
+                }
+                val testUpstream = d14DeviceTestUpstream()
+                val candidate = if (testUpstream != null) DnsServer(
+                    name = "D14 loopback DNS",
+                    primaryIp = testUpstream.first,
+                    secondaryIp = testUpstream.first,
+                    allowPlaintextFallback = true
+                ) else activeServer ?: DnsServer(
+                    name = "Google DNS",
+                    primaryIp = "8.8.8.8",
+                    secondaryIp = "8.8.4.4"
+                )
+                val applied = ResolverCommandRuntime.revisions.applyIfCurrent(resolverRevision) {
+                    applyStoredPlaintextFallbackPolicy(
+                        candidate.id,
+                        resolverRevision,
+                        candidate.allowPlaintextFallback
+                    )
+                    updateResolverState(candidate)
+                    dnsTransportStatusFlow.value = "尚無上游查詢"
+                    activeDnsFlow.value = "${candidate.name} (${candidate.primaryIp})"
+                    addLog("Database loaded. Upstream DNS: ${candidate.name} (${candidate.primaryIp})")
+                    true
+                } == true
+                if (applied) {
+                    bypassedList = bypassedApps
+                    break
+                }
             }
-            if (!isCurrentStartRequest(requestGeneration)) {
-                abandonSupersededStartup()
-                return
-            }
-            val testUpstream = d14DeviceTestUpstream()
-            val resolver = if (testUpstream != null) DnsServer(
-                name = "D14 loopback DNS",
-                primaryIp = testUpstream.first,
-                secondaryIp = testUpstream.first,
-                allowPlaintextFallback = true
-            ) else activeServer ?: DnsServer(
-                name = "Google DNS",
-                primaryIp = "8.8.8.8",
-                secondaryIp = "8.8.4.4"
-            )
-            updateResolverState(resolver)
-            dnsTransportStatusFlow.value = "尚無上游查詢"
-            activeDnsFlow.value = "${resolver.name} (${resolver.primaryIp})"
-            addLog("Database loaded. Upstream DNS: ${resolver.name} (${resolver.primaryIp})")
             if (BuildConfig.D14_DEVICE_TEST) {
                 addLog("D14 validation ignores saved app bypass rules and is limited to the test packages.")
             } else {
