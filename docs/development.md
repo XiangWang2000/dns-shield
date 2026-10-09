@@ -221,7 +221,7 @@ CI 保留必要檢查名稱「Windows verification」。只有 README、CHANGELO
 
 ## 正式發行
 
-正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前程式版本為 `1.2.2`、`versionCode 5`；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
+正式套件識別為 `io.github.xiangwang2000.dnsshield`。目前候選版本為 `1.3.0`、`versionCode 6`（尚未發布）；不要變更 `applicationId`，每次發布新版都必須增加 `versionCode`。
 
 第一次建立本機發行金鑰：
 

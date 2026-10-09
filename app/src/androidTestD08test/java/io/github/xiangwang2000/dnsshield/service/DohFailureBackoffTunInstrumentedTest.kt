@@ -49,6 +49,7 @@ import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -65,6 +66,144 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class DohFailureBackoffTunInstrumentedTest {
+    @Test
+    fun oneTunTransmissionCompletesAfterHeldUpstreamResponse() = runBlocking {
+        runSameKeyRetryCapacityScenario(retransmit = false)
+    }
+
+    @Test
+    fun sameSocketRetriesHitWaiterCapacityWhileLeaderIsHeld() = runBlocking {
+        runSameKeyRetryCapacityScenario(retransmit = true)
+    }
+
+    private suspend fun runSameKeyRetryCapacityScenario(retransmit: Boolean) = coroutineScope {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        assertTrue("Run only in the isolated D08 test package", context.packageName.endsWith(".d08test"))
+        assertEquals(15353, BuildConfig.DNS_UPSTREAM_PORT)
+        ensureVpnConsent(context)
+        assertNull("Approve VPN consent for .d08test", VpnService.prepare(context))
+
+        val dao = AppDatabase.getDatabase(context).dnsDao()
+        val originalServers = dao.getDnsServersList()
+        val suffix = UUID.randomUUID().toString().replace("-", "").take(8)
+        val resolverName = "D08 held upstream capacity $suffix"
+        val domain = "d08-held-capacity-$suffix.example.test"
+        val primary = LocalTlsDohServer(PRIMARY_IP, 0, answer = null, holdFirstResponse = true)
+        val doh = LocalTlsDohServer(SECONDARY_IP, primary.port, answer = ::buildDnsResponse, holdFirstResponse = true)
+        val plaintext = PlaintextUdpCounter()
+        var resolverId: Int? = null
+        var queryTask: kotlinx.coroutines.Deferred<ByteArray>? = null
+
+        try {
+            stopVpnIfRunning(context)
+            dao.insertDnsServer(
+                DnsServer(
+                    name = resolverName,
+                    primaryIp = PRIMARY_IP,
+                    secondaryIp = SECONDARY_IP,
+                    isCustom = true,
+                    allowPlaintextFallback = false,
+                    primaryDohUrl = dohUrl(primary.port),
+                    primaryDohBootstrapIps = PRIMARY_IP,
+                    secondaryDohUrl = dohUrl(primary.port),
+                    secondaryDohBootstrapIps = SECONDARY_IP
+                )
+            )
+            val resolver = dao.getDnsServersList().first { it.name == resolverName }
+            resolverId = resolver.id
+            assertTrue(dao.setActiveDnsServer(resolver.id))
+            DnsVpnService.setUiForeground(true)
+            DnsVpnService.clearLogs()
+            startVpn(context)
+            awaitActiveVpnNetwork(context)
+            awaitServiceNetworkReady()
+            DnsVpnService.setD08TestHttpClient(pinnedD08HttpClient())
+
+            val transactionId = if (retransmit) 0x8701 else 0x8700
+            queryTask = async(Dispatchers.IO) {
+                val query = buildDnsQuery(domain, transactionId)
+                if (retransmit) sendQueryThroughTun(query) else sendQueryThroughTunOnce(query)
+            }
+            assertTrue("The primary request did not reach its barrier",
+                primary.firstResponseHeld.await(SERVER_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS))
+            delay(2_000)
+            primary.releaseFirstResponse()
+            assertTrue(
+                "The query did not reach the local DoH server",
+                doh.firstRequest.await(SERVER_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
+            )
+            assertTrue(
+                "The upstream response was not held at the test barrier",
+                doh.firstResponseHeld.await(SERVER_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
+            )
+
+            if (retransmit) {
+                withTimeout(SERVICE_TIMEOUT_MILLIS) {
+                    DnsVpnService.liveLogsFlow.first { lines ->
+                        lines.any { "有界請求容量已滿" in it }
+                    }
+                }
+                val response = withTimeout(QUERY_TIMEOUT_MILLIS.toLong()) { requireNotNull(queryTask).await() }
+                assertDnsResponseCode(response, 2, transactionId)
+            } else {
+                delay(2_600)
+                assertFalse("A single transmission completed while its upstream response was held", requireNotNull(queryTask).isCompleted)
+                assertEquals(1, doh.requestCount.get())
+                doh.releaseFirstResponse()
+                val response = withTimeout(QUERY_TIMEOUT_MILLIS.toLong()) { requireNotNull(queryTask).await() }
+                assertDnsResponseCode(response, 0, transactionId)
+                assertEquals(1, dnsAnswerCount(response))
+            }
+
+            val heldMetrics = DnsVpnService.d14DiagnosticsSnapshot()
+            android.util.Log.i("CapacityReview", "retransmit=$retransmit held=$heldMetrics")
+            if (retransmit) {
+                assertEquals(8L, heldMetrics.coalesced)
+                assertEquals(1L, heldMetrics.overloaded)
+            } else {
+                assertEquals(0L, heldMetrics.coalesced)
+                assertEquals(0L, heldMetrics.overloaded)
+            }
+            assertEquals("One primary upstream call", 1, primary.requestCount.get())
+            assertEquals("The repeated same-key datagrams must share one DoH leader", 1, doh.requestCount.get())
+            assertEquals("Strict DoH mode sent a query over UDP", 0, plaintext.queryCount.get())
+            doh.releaseFirstResponse()
+            withTimeout(2_000L) {
+                while (DnsVpnService.d14DiagnosticsSnapshot().pending != 0L) delay(10)
+            }
+            val drained = DnsVpnService.d14DiagnosticsSnapshot()
+            assertEquals(drained.received, drained.terminalCount)
+            val next = sendQueryThroughTunOnce(buildDnsQuery("next-$domain", 0x8702))
+            assertDnsResponseCode(next, 0, 0x8702)
+            android.util.Log.i("CapacityReview", "retransmit=$retransmit drained=$drained subsequentRcode=0")
+            assertNull(doh.failure.get())
+            assertNull(plaintext.failure.get())
+        } finally {
+            primary.releaseFirstResponse()
+            doh.releaseFirstResponse()
+            runCatching {
+                queryTask?.let { withTimeout(QUERY_TIMEOUT_MILLIS.toLong()) { it.await() } }
+            }
+            try {
+                stopVpnIfRunning(context)
+            } finally {
+                DnsVpnService.setD08TestHttpClient(null)
+                DnsVpnService.clearLogs()
+                DnsVpnService.setUiForeground(false)
+                try {
+                    resolverId?.let { dao.deleteDnsServerById(it) }
+                    dao.getDnsServersList().filter { it.name == resolverName }
+                        .forEach { dao.deleteDnsServerById(it.id) }
+                    originalServers.forEach { dao.insertDnsServer(it) }
+                } finally {
+                    plaintext.close()
+                    doh.close()
+                    primary.close()
+                }
+            }
+        }
+    }
+
     @Test
     fun savedAllowThenSelectingSameResolverConvergesThroughRealTun() = runBlocking {
         runSavedAllowConvergence(initialStoredAllowed = false)
