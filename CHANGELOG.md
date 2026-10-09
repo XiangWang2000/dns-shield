@@ -39,7 +39,7 @@
 - 完整驗證與 Android 10 實機、API 26／35 模擬器的代表性回歸已通過，詳見 [共同驗收](docs/r09-common-validation.md)、[傳輸上限](docs/r08-transport-size-validation.md) 及 [API 26 STOP](docs/api26-tun-stop-validation.md)。
 - Android 15 實機完成三輪 Wi-Fi／LTE 雙向切換、舊回應防護、strict 切換前後防護與行動網路雙棧驗證，詳見 [R10 驗收](docs/r10-cellular-handoff-validation.md)。
 - IPv6-only／NAT64、真正 captive portal、完整 API／廠牌矩陣及真正低記憶體回收、長時間耗電仍未完成，追蹤於 [#73](https://github.com/XiangWang2000/dns-shield/issues/73)。已測 ASUS Android 10 的背景恢復需電池豁免，DNS-only lockdown 不宣稱支援。
-- 本節為尚未發行的原始碼異動；正式簽名 APK 與從 v1.2.2 升級的驗證須在下一版發行前完成。
+- 本候選尚未發布；正式簽章 APK 與 API35 模擬器 v1.2.2 原地升級、資料保留及基本功能已通過，實機驗收仍待完成。詳見 [發版前審查](docs/release-1.3.0-preflight.md)。
 
 ## 1.2.2 - 2026-08-21
 
