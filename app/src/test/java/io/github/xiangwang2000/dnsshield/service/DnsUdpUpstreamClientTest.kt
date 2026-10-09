@@ -28,6 +28,12 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class DnsUdpUpstreamClientTest {
+    private fun countingReceiveBufferAllocator(allocations: AtomicInteger): (Int) -> ByteArray = { size ->
+        assertEquals(DnsMessageValidator.MAX_UDP_RESPONSE_BYTES + 1, size)
+        allocations.incrementAndGet()
+        ByteArray(size)
+    }
+
     private class QueuedDispatcher : CoroutineDispatcher() {
         private var pending: Runnable? = null
 
@@ -291,6 +297,7 @@ class DnsUdpUpstreamClientTest {
         val secondaryReceived = CountDownLatch(1)
         val udpAttempts = AtomicInteger()
         val udpRetries = AtomicInteger()
+        val receiveBufferAllocations = AtomicInteger()
         val silentPrimary = thread(name = "silent-primary-dns") {
             runCatching {
                 primary.receive(DatagramPacket(ByteArray(4096), 4096))
@@ -316,7 +323,8 @@ class DnsUdpUpstreamClientTest {
                 ),
                 deadline = deadline,
                 onAttempt = { udpAttempts.incrementAndGet() },
-                onRetry = { udpRetries.incrementAndGet() }
+                onRetry = { udpRetries.incrementAndGet() },
+                receiveBufferAllocator = countingReceiveBufferAllocator(receiveBufferAllocations)
             )
             val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L
 
@@ -326,6 +334,7 @@ class DnsUdpUpstreamClientTest {
             assertTrue(secondaryReceived.await(1, TimeUnit.SECONDS))
             assertEquals(2, udpAttempts.get())
             assertEquals(1, udpRetries.get())
+            assertEquals(1, receiveBufferAllocations.get())
             assertTrue(elapsedMillis < 1_000, "UDP fallback exceeded the total deadline: ${elapsedMillis}ms")
             respondingSecondary.join(1_000)
             assertTrue(!respondingSecondary.isAlive)
@@ -335,6 +344,190 @@ class DnsUdpUpstreamClientTest {
             secondary.close()
             silentPrimary.join(1_000)
             respondingSecondary.join(1_000)
+        }
+    }
+
+    @Test
+    fun bothUdpAttemptsFailWithOneReceiveBufferAllocation() = runBlocking {
+        val loopback = InetAddress.getByName("127.0.0.1")
+        val primary = DatagramSocket(0, loopback)
+        val secondary = DatagramSocket(0, loopback)
+        val client = DatagramSocket()
+        val queryBytes = DnsTestMessages.query()
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val requestsReceived = CountDownLatch(2)
+        val serverFailure = AtomicReference<Throwable?>()
+        val servers = listOf(primary, secondary)
+        val listeners = servers.mapIndexed { index, server ->
+            thread(name = "silent-fallback-$index") {
+                try {
+                    server.receive(DatagramPacket(ByteArray(4096), 4096))
+                    requestsReceived.countDown()
+                } catch (failure: Throwable) {
+                    serverFailure.compareAndSet(null, failure)
+                }
+            }
+        }
+        val allocations = AtomicInteger()
+
+        try {
+            val result = DnsUdpUpstreamClient.queryWithFallback(
+                socket = client,
+                query = query,
+                upstreams = listOf(
+                    DnsUdpUpstreamEndpoint(loopback, primary.localPort),
+                    DnsUdpUpstreamEndpoint(loopback, secondary.localPort)
+                ),
+                deadline = DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 1_200),
+                receiveBufferAllocator = countingReceiveBufferAllocator(allocations)
+            )
+
+            assertNull(result)
+            assertTrue(requestsReceived.await(1, TimeUnit.SECONDS))
+            assertEquals(1, allocations.get())
+            listeners.forEach { it.join(1_000) }
+            assertTrue(listeners.none { it.isAlive })
+            assertNull(serverFailure.get())
+        } finally {
+            client.close()
+            primary.close()
+            secondary.close()
+            listeners.forEach { it.join(1_000) }
+        }
+    }
+
+    @Test
+    fun concurrentFallbackQueriesUseIndependentReceiveBuffers() = runBlocking {
+        val loopback = InetAddress.getByName("127.0.0.1")
+        val servers = List(2) { DatagramSocket(0, loopback) }
+        val clients = List(2) { DatagramSocket() }
+        val queryBytes = DnsTestMessages.query()
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val expectedResponse = DnsTestMessages.response(queryBytes)
+        val requestsReceived = CountDownLatch(2)
+        val responsesReleased = CountDownLatch(1)
+        val allocationsObserved = CountDownLatch(2)
+        val allocatedBuffers = Array(2) { AtomicReference<ByteArray?>() }
+        val allocationCounts = Array(2) { AtomicInteger() }
+        val serverFailure = AtomicReference<Throwable?>()
+        val responders = servers.mapIndexed { index, server ->
+            thread(name = "concurrent-dns-$index") {
+                try {
+                    val request = DatagramPacket(ByteArray(4096), 4096)
+                    server.receive(request)
+                    requestsReceived.countDown()
+                    check(responsesReleased.await(2, TimeUnit.SECONDS))
+                    server.send(
+                        DatagramPacket(expectedResponse, expectedResponse.size, request.address, request.port)
+                    )
+                } catch (failure: Throwable) {
+                    serverFailure.compareAndSet(null, failure)
+                }
+            }
+        }
+        val queries = clients.mapIndexed { index, client ->
+            async(Dispatchers.IO) {
+                DnsUdpUpstreamClient.queryWithFallback(
+                    socket = client,
+                    query = query,
+                    upstreams = listOf(DnsUdpUpstreamEndpoint(loopback, servers[index].localPort)),
+                    deadline = DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 3_000),
+                    receiveBufferAllocator = { size ->
+                        allocationCounts[index].incrementAndGet()
+                        ByteArray(size).also {
+                            allocatedBuffers[index].set(it)
+                            allocationsObserved.countDown()
+                        }
+                    }
+                )
+            }
+        }
+
+        try {
+            assertTrue(requestsReceived.await(1, TimeUnit.SECONDS))
+            assertTrue(allocationsObserved.await(1, TimeUnit.SECONDS))
+            assertEquals(1, allocationCounts[0].get())
+            assertEquals(1, allocationCounts[1].get())
+            val firstBuffer = checkNotNull(allocatedBuffers[0].get())
+            val secondBuffer = checkNotNull(allocatedBuffers[1].get())
+            assertTrue(firstBuffer !== secondBuffer)
+            assertEquals(DnsMessageValidator.MAX_UDP_RESPONSE_BYTES + 1, firstBuffer.size)
+            assertEquals(DnsMessageValidator.MAX_UDP_RESPONSE_BYTES + 1, secondBuffer.size)
+
+            responsesReleased.countDown()
+            val outcomes = queries.map { it.await() }
+            outcomes.forEach { assertContentEquals(expectedResponse, it?.response) }
+            assertNull(serverFailure.get())
+        } finally {
+            responsesReleased.countDown()
+            queries.forEach { it.cancel() }
+            clients.forEach { it.close() }
+            servers.forEach { it.close() }
+            responders.forEach { it.join(1_000) }
+        }
+    }
+
+    @Test
+    fun reusedFallbackBufferDoesNotMutateEarlierTruncatedResponse() = runBlocking {
+        val loopback = InetAddress.getByName("127.0.0.1")
+        val primary = DatagramSocket(0, loopback)
+        val secondary = DatagramSocket(0, loopback)
+        val client = DatagramSocket()
+        val queryBytes = DnsTestMessages.query()
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val truncatedResponse = DnsTestMessages.response(queryBytes, flags = 0x8380)
+        val malformedResponse = byteArrayOf(0x12, 0x34)
+        val secondaryReceived = CountDownLatch(1)
+        val serverFailure = AtomicReference<Throwable?>()
+        val primaryResponder = thread(name = "truncated-primary-dns") {
+            try {
+                val request = DatagramPacket(ByteArray(4096), 4096)
+                primary.receive(request)
+                primary.send(
+                    DatagramPacket(truncatedResponse, truncatedResponse.size, request.address, request.port)
+                )
+            } catch (failure: Throwable) {
+                serverFailure.compareAndSet(null, failure)
+            }
+        }
+        val secondaryResponder = thread(name = "malformed-secondary-dns") {
+            try {
+                val request = DatagramPacket(ByteArray(4096), 4096)
+                secondary.receive(request)
+                secondaryReceived.countDown()
+                secondary.send(
+                    DatagramPacket(malformedResponse, malformedResponse.size, request.address, request.port)
+                )
+            } catch (failure: Throwable) {
+                serverFailure.compareAndSet(null, failure)
+            }
+        }
+        val allocations = AtomicInteger()
+
+        try {
+            val outcome = DnsUdpUpstreamClient.queryWithFallback(
+                socket = client,
+                query = query,
+                upstreams = listOf(
+                    DnsUdpUpstreamEndpoint(loopback, primary.localPort),
+                    DnsUdpUpstreamEndpoint(loopback, secondary.localPort)
+                ),
+                deadline = DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 1_000),
+                tcpQuery = { null },
+                receiveBufferAllocator = countingReceiveBufferAllocator(allocations)
+            )
+
+            assertContentEquals(truncatedResponse, outcome?.response)
+            assertSame(DnsTransport.PLAINTEXT_UDP, outcome?.transport)
+            assertTrue(secondaryReceived.await(1, TimeUnit.SECONDS))
+            assertEquals(1, allocations.get())
+            assertNull(serverFailure.get())
+        } finally {
+            client.close()
+            primary.close()
+            secondary.close()
+            primaryResponder.join(1_000)
+            secondaryResponder.join(1_000)
         }
     }
 

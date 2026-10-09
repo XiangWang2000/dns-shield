@@ -204,6 +204,13 @@ class DnsVpnService : VpnService() {
                 send
             )
         }
+        internal fun recordD08TestBlockedDomain(domain: String, reason: DnsDecisionReason) {
+            check(BuildConfig.APPLICATION_ID.endsWith(".d08test")) {
+                "The D08 blocked-event hook is unavailable in production variants"
+            }
+            recordBlockedDomain(domain, reason)
+        }
+
         val liveDecisionEventsFlow = MutableStateFlow<List<DnsDecisionEvent>>(emptyList())
         val rulePolicyStatusFlow = MutableStateFlow(RulePolicyStatus.NotLoaded)
 
@@ -377,12 +384,16 @@ class DnsVpnService : VpnService() {
         }
 
         private val logList = mutableListOf<String>()
-        private val decisionEvents = mutableListOf<DnsDecisionEvent>()
-        private val decisionEventId = AtomicInteger(0)
+        private val decisionEvents = DnsDecisionEventBuffer(
+            scope = flowFlushScope,
+            capacity = MAX_LOG_LINES,
+            publish = { liveDecisionEventsFlow.value = it }
+        )
 
         fun setUiForeground(isForeground: Boolean) {
             synchronized(flushLock) {
                 isUiForeground = isForeground
+                decisionEvents.setForeground(isForeground)
                 logFlushJob?.cancel()
                 logFlushJob = null
                 statsFlushJob?.cancel()
@@ -439,10 +450,7 @@ class DnsVpnService : VpnService() {
                 }
             }
             diagnosticMetrics.reset()
-            synchronized(decisionEvents) {
-                decisionEvents.clear()
-                liveDecisionEventsFlow.value = emptyList()
-            }
+            decisionEvents.clear()
             if (isUiForeground) {
                 flushStatsNow()
             }
@@ -504,22 +512,7 @@ class DnsVpnService : VpnService() {
             reason: DnsDecisionReason
         ) {
             val normalized = DomainNameNormalizer.normalize(domain) ?: return
-            synchronized(decisionEvents) {
-                decisionEvents.add(
-                    0,
-                    DnsDecisionEvent(
-                        id = decisionEventId.incrementAndGet().toLong(),
-                        domain = normalized,
-                        decision = DnsDecision.BLOCK,
-                        reason = reason,
-                        occurredAtMillis = System.currentTimeMillis()
-                    )
-                )
-                if (decisionEvents.size > MAX_LOG_LINES) {
-                    decisionEvents.removeAt(decisionEvents.lastIndex)
-                }
-                liveDecisionEventsFlow.value = decisionEvents.toList()
-            }
+            decisionEvents.record(normalized, reason)
         }
 
         private fun scheduleLogFlush() {
@@ -763,6 +756,9 @@ class DnsVpnService : VpnService() {
 
     private val dohFailureBackoff = DohFailureBackoff()
     private val backgroundFailureLogLimiter = MonotonicIntervalGate(intervalMillis = 5_000)
+    private val successfulTransportLogPolicy = BackgroundDnsLogPolicy(
+        sink = { addLogInternal(it, writeDebugLog = true) }
+    )
 
     // One verified Public Suffix resolver owner per service lifecycle. The lazy is only touched when
     // a validated compiled blocklist actually needs parent-domain matching.
@@ -2329,24 +2325,9 @@ class DnsVpnService : VpnService() {
 
         if (!isCurrentDnsState(dnsState)) return null
         when (outcome.transport) {
-            DnsTransport.ENCRYPTED_HTTPS -> {
-                dnsTransportStatusFlow.value = "DoH 加密"
-                addDnsQueryLog {
-                    "🌐 [DoH 解析] [ID=${formatTxId(dnsPayload)}]: 透過 HTTPS 解析 $domain"
-                }
-            }
-            DnsTransport.PLAINTEXT_UDP -> {
-                dnsTransportStatusFlow.value = "UDP/53 明文降級"
-                addDnsQueryLog(important = true) {
-                    "⚠️ [DNS 降級] [ID=${formatTxId(dnsPayload)}]: DoH 不可用，改用 UDP/53 解析 $domain"
-                }
-            }
-            DnsTransport.PLAINTEXT_TCP -> {
-                dnsTransportStatusFlow.value = "TCP/53 明文降級"
-                addDnsQueryLog(important = true) {
-                    "⚠️ [DNS 降級] [ID=${formatTxId(dnsPayload)}]: UDP 回應遭截短，改用 TCP/53 解析 $domain"
-                }
-            }
+            DnsTransport.ENCRYPTED_HTTPS -> dnsTransportStatusFlow.value = "DoH 加密"
+            DnsTransport.PLAINTEXT_UDP -> dnsTransportStatusFlow.value = "UDP/53 明文降級"
+            DnsTransport.PLAINTEXT_TCP -> dnsTransportStatusFlow.value = "TCP/53 明文降級"
             DnsTransport.UNAVAILABLE -> {
                 dnsTransportStatusFlow.value = if (dnsState.server.allowPlaintextFallback) {
                     "上游不可用 · SERVFAIL"
@@ -2355,6 +2336,34 @@ class DnsVpnService : VpnService() {
                 }
             }
         }
+        successfulTransportLogPolicy.logSuccessfulResolution(
+            transport = outcome.transport,
+            resolverId = dnsState.server.id,
+            isForeground = isUiForeground,
+            detailMessage = {
+                when (outcome.transport) {
+                    DnsTransport.ENCRYPTED_HTTPS ->
+                        "🌐 [DoH 解析] [ID=${formatTxId(dnsPayload)}]: 透過 HTTPS 解析 $domain"
+                    DnsTransport.PLAINTEXT_UDP -> if (endpoints.isEmpty()) {
+                        "🌐 [DNS 明文] [ID=${formatTxId(dnsPayload)}]: 此解析器使用傳統 DNS，以 UDP/53 解析 $domain"
+                    } else {
+                        "⚠️ [DNS 降級] [ID=${formatTxId(dnsPayload)}]: 本次 DoH 未取得可用回應，改用 UDP/53 解析 $domain"
+                    }
+                    DnsTransport.PLAINTEXT_TCP ->
+                        "⚠️ [DNS 明文] [ID=${formatTxId(dnsPayload)}]: UDP 回應遭截短，改用 TCP/53 解析 $domain"
+                    DnsTransport.UNAVAILABLE -> error("Unavailable outcomes are not successful resolution logs")
+                }
+            },
+            summaryMessage = { summary ->
+                val transport = when (summary.latestTransport) {
+                    DnsTransport.ENCRYPTED_HTTPS -> "DoH 加密"
+                    DnsTransport.PLAINTEXT_UDP -> "UDP/53 明文"
+                    DnsTransport.PLAINTEXT_TCP -> "TCP/53 明文"
+                    DnsTransport.UNAVAILABLE -> error("Unavailable outcomes cannot produce a success summary")
+                }
+                "📋 [DNS 傳輸摘要] 上次通知後合併了 ${summary.coalescedEventCount} 筆背景明文查詢或傳輸／解析器變更；本次解析器 #${summary.latestResolverId} 使用 $transport。"
+            }
+        )
         return outcome.response?.takeIf { deadline.remainingMillis() > 0L && isCurrentDnsState(dnsState) }
     }
 
