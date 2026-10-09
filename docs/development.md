@@ -146,13 +146,13 @@ adb uninstall io.github.xiangwang2000.dnsshield.d15test
 
 此 smoke test 驗證隔離套件的實際 VPN 啟動／停止、使用者開關意圖，以及顯式停止後不因空 action 自動恢復；測試前須先同意該隔離套件的 Android VPN 權限。完整 Always-on／撤銷流程需額外的系統設定與程序死亡操作；較早紀錄見 [D15 驗證紀錄](d15-device-acceptance.md)，最新整合結果見 [共同驗收](r09-common-validation.md)。
 
-### 當前驗收範圍（2026-10-08）
+### 當前驗收範圍（2026-10-09）
 
 | 範圍 | 已完成的代表性驗證 |
 | --- | --- |
 | DNS／規則／strict／用戶端及上游 TCP | Android 10 實機整合回歸；大回應／快取與生命週期另在 API 26／35 模擬器驗證。見 [共同驗收](r09-common-validation.md)、[R08 傳輸上限](r08-transport-size-validation.md)、[API 26 STOP](api26-tun-stop-validation.md)。 |
 | Wi-Fi ↔ LTE、IPv6 pass-through | Android 15 實機同一 VPN 三輪雙向切換，DNS 與實際連線、延遲舊回應防護、strict 切換前後防護，以及行動網路雙棧／IPv4 Wi-Fi 的 VPN off/on/off 通過。見 [R10 驗收](r10-cellular-handoff-validation.md)。strict 案例不宣稱 TLS 請求在整個切網期間持續 pending。 |
-| 主機端完整驗證 | 最新本地完整驗證為 37 Python、305 JVM 測試通過；API35 政策接線另有 19 項通過（見 [R15／R16 驗證](r15-r16-policy-convergence-validation.md)）；這些數字描述該次紀錄，不取代目前 `verify.ps1` 的實際結果。 |
+| 主機端完整驗證 | 最新本地完整驗證為 37 Python、322 JVM 測試通過；本輪 API35 背景診斷與安全回歸有 13 項通過（見 [R17–R19 驗證](r17-r19-background-work-validation.md)）；先前政策接線另見 [R15／R16 驗證](r15-r16-policy-convergence-validation.md)；這些數字描述該次紀錄，不取代目前 `verify.ps1` 的實際結果。 |
 
 [環境追蹤 #73](https://github.com/XiangWang2000/dns-shield/issues/73) 仍保留四項未完成驗收：IPv6-only／NAT64、真正 captive portal、完整 API／OEM 矩陣與真正低記憶體回收，以及 8–10 小時拔除充電線的耗電 A/B。Android 10 未設定電池豁免時的背景恢復限制仍存在，DNS-only lockdown 不宣稱支援。
 

@@ -13,6 +13,9 @@
 
 ### Changed
 
+- 背景成功明文查詢改為首次即時記錄、後續限流摘要；封鎖事件在背景只保留最新 100 筆，回到前景再發布並批次更新。
+- 單次 UDP 主備查詢恢復共用接收緩衝；並行查詢仍各自持有緩衝，保留取消、期限與回應驗證。
+
 - 純 Markdown 文件變更改用文件與連結檢查；程式變更保留完整 CI，並加入 D08／D15 隔離 App 與測試 APK 編譯。
 - production blocklist 與 Public Suffix resolver 在同一個 VPN Service lifecycle 內只載入一次；已驗證排序狀態會供後續 policy reload 重用。
 - 網路、解析器與規則變更時失效舊 DNS 狀態，防止舊回應寫入新快取或跨狀態送出；DoH client 可重用，並在設定／底層網路變更時重建。
