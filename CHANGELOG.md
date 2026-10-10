@@ -15,6 +15,7 @@
 
 - 背景成功明文查詢改為首次即時記錄、後續限流摘要；封鎖事件在背景只保留最新 100 筆，回到前景再發布並批次更新。
 - 單次 UDP 主備查詢恢復共用接收緩衝；並行查詢仍各自持有緩衝，保留取消、期限與回應驗證。
+- 切網等待改由狀態通知喚醒，移除 25 ms 輪詢並保留原查詢期限；背景受抑制成功日誌不再建立訊息 closure。
 
 - 純 Markdown 文件變更改用文件與連結檢查；程式變更保留完整 CI，並加入 D08／D15 隔離 App 與測試 APK 編譯。
 - production blocklist 與 Public Suffix resolver 在同一個 VPN Service lifecycle 內只載入一次；已驗證排序狀態會供後續 policy reload 重用。
