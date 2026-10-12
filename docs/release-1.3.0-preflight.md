@@ -1,6 +1,6 @@
 # 1.3.0 發版前獨立審查（2026-10-09）
 
-狀態：獨立審查通過，可進入出包與實機驗收。正式簽章 APK 已完成，API35 模擬器原地升級與基本功能通過；實機驗收尚未完成，禁止發布。沒有遠端 push、tag 或 Release。
+歷史狀態（2026-10-09）：獨立審查通過，當時完成初版 APK 與模擬器驗收。本報告保留首次審查及原始失敗證據；最新 APK、兩項優化與後續實機驗收以 [候選優化與實機驗收](release-1.3.0-optimization-validation.md) 為準。維持不發布。
 
 ## 審查對象與結論
 
@@ -42,7 +42,7 @@
 - 對照 `0022b34772a73a17cdd69ba421dd7987db280967`：TUN 仍為阻塞讀取；失敗 DoH 仍有 threshold / cooldown / 單一恢復探測；背景失敗日誌仍有 5 秒 gate；UDP 單次主備接收 buffer 重用已恢復。
 - resolver / network / policy generation fence、舊回應快取失效、STRICT 禁止明文、immutable response commit 後才在 state lock 外寫入的邊界均保留。
 - STOP 取消 session、關閉 owned input 喚醒 reader、join 後關閉共享 descriptor；late TunnelEnded 依 generation / descriptor / state 排除。網路 callback 解除時清除 pending flag；query completion handler 釋放 lease。
-- 可延後：網路變更期間每個待處理 leader 仍可能每 25 ms 檢查 pending flag（受 debounce 與 deadline 限制，不是閒置常駐輪詢）；受抑制成功日誌仍可能建立 capturing lambda。兩者均無本次可證實的整機耗電退化，沒有據此要求發版前重構。
+- 當時可延後（現已由後續候選處理）：網路變更期間每個待處理 leader 仍可能每 25 ms 檢查 pending flag（受 debounce 與 deadline 限制，不是閒置常駐輪詢）；受抑制成功日誌仍可能建立 capturing lambda。兩者均無本次可證實的整機耗電退化，沒有據此要求發版前重構。
 - 新 API35 元件量測與歷史 JVM benchmark 只證明該工作負載的成本；沒有拔線長時間 paired power 測量，不宣稱整機省電百分比。
 
 ## 本次執行的驗證
