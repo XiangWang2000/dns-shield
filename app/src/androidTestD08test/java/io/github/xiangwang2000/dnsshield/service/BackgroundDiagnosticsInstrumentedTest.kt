@@ -172,9 +172,11 @@ class BackgroundDiagnosticsInstrumentedTest {
             reportFile = reportFile,
             correctness = JSONObject()
                 .put("oldFormatterAndSinkCallsPerSample", SUCCESS_WORKLOAD)
-                .put("currentDetailBuilderCallsPerSample", 1)
-                .put("currentSummaryBuilderCallsPerSample", 1)
-                .put("currentSinkCallsPerSample", 2)
+                .put("currentDetailFormatCallsDuringTimedWorkloadPerSample", 1)
+                .put("currentSummaryFormatCallsDuringTimedWorkloadPerSample", 0)
+                .put("currentEmittedLogLinesDuringTimedWorkloadPerSample", 1)
+                .put("currentSummaryProbeFormatCallsOutsideTimedWorkload", 1)
+                .put("currentEmittedLogLinesForSummaryProbe", 1)
                 .put("summaryProbeOutcomesOutsideTimedWorkload", 1)
         )
     }
@@ -341,64 +343,69 @@ class BackgroundDiagnosticsInstrumentedTest {
 
     private fun measureCurrentBackgroundLogPolicy(outcomes: List<DnsTransport>): BenchmarkMetrics {
         val lines = ArrayList<String>(EVENT_CAPACITY)
-        var detailBuildCount = 0
-        var summaryBuildCount = 0
-        var sinkCount = 0
+        var detailFormatCount = 0
+        var summaryFormatCount = 0
+        var emittedLogLineCount = 0
         var currentNanos = 0L
         var observedSummary: BackgroundDnsLogSummary? = null
         val policy = BackgroundDnsLogPolicy(
             intervalMillis = 60_000L,
-            nanoTime = { currentNanos },
-            sink = { message ->
-                sinkCount++
-                lines.add(0, message)
-                if (lines.size > EVENT_CAPACITY) lines.removeAt(lines.lastIndex)
-            }
+            nanoTime = { currentNanos }
         )
         val metrics = measure {
             outcomes.forEachIndexed { index, transport ->
                 val resolverId = index % 3 + 1
-                policy.logSuccessfulResolution(
+                when (val decision = policy.recordSuccessfulResolution(
                     transport = transport,
                     resolverId = resolverId,
-                    isForeground = false,
-                    detailMessage = {
-                        detailBuildCount++
-                        formatSuccessMessage(transport, resolverId)
-                    },
-                    summaryMessage = { summary ->
-                        summaryBuildCount++
-                        observedSummary = summary
-                        formatSummaryMessage(summary)
+                    isForeground = false
+                )) {
+                    BackgroundDnsLogPolicy.Decision.Detail -> {
+                        detailFormatCount++
+                        lines.add(0, formatSuccessMessage(transport, resolverId))
+                        emittedLogLineCount++
                     }
-                )
+                    is BackgroundDnsLogPolicy.Decision.Summary -> {
+                        summaryFormatCount++
+                        observedSummary = decision.summary
+                        lines.add(0, formatSummaryMessage(decision.summary))
+                        emittedLogLineCount++
+                    }
+                    BackgroundDnsLogPolicy.Decision.None -> Unit
+                }
+                if (lines.size > EVENT_CAPACITY) lines.removeAt(lines.lastIndex)
             }
         }
 
-        assertEquals(1, detailBuildCount)
-        assertEquals(0, summaryBuildCount)
-        assertEquals(1, sinkCount)
+        assertEquals(1, detailFormatCount)
+        assertEquals(0, summaryFormatCount)
+        assertEquals(1, emittedLogLineCount)
         assertEquals(1, lines.size)
 
-        // This unmeasured outcome crosses the coalescing interval and verifies the lazy summary path.
+        // This unmeasured outcome crosses the interval and verifies the due summary decision.
         currentNanos = 60_000_000_000L
-        policy.logSuccessfulResolution(
+        when (val decision = policy.recordSuccessfulResolution(
             transport = DnsTransport.PLAINTEXT_TCP,
             resolverId = 42,
-            isForeground = false,
-            detailMessage = {
-                detailBuildCount++
-                formatSuccessMessage(DnsTransport.PLAINTEXT_TCP, 42)
-            },
-            summaryMessage = { summary ->
-                summaryBuildCount++
-                observedSummary = summary
-                formatSummaryMessage(summary)
+            isForeground = false
+        )) {
+            BackgroundDnsLogPolicy.Decision.Detail -> {
+                detailFormatCount++
+                lines.add(0, formatSuccessMessage(DnsTransport.PLAINTEXT_TCP, 42))
+                emittedLogLineCount++
             }
-        )
-        assertEquals(1, detailBuildCount)
-        assertEquals(1, summaryBuildCount)
-        assertEquals(2, sinkCount)
+            is BackgroundDnsLogPolicy.Decision.Summary -> {
+                summaryFormatCount++
+                observedSummary = decision.summary
+                lines.add(0, formatSummaryMessage(decision.summary))
+                emittedLogLineCount++
+            }
+            BackgroundDnsLogPolicy.Decision.None -> Unit
+        }
+        if (lines.size > EVENT_CAPACITY) lines.removeAt(lines.lastIndex)
+        assertEquals(1, detailFormatCount)
+        assertEquals(1, summaryFormatCount)
+        assertEquals(2, emittedLogLineCount)
         assertEquals(2, lines.size)
         assertEquals(
             BackgroundDnsLogSummary(

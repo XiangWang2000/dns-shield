@@ -7,183 +7,166 @@ class BackgroundDnsLogPolicyTest {
     @Test
     fun firstBackgroundPlaintextIsImmediateAndRapidTransportResolverChangesShareGlobalRate() {
         var now = 0L
-        val messages = mutableListOf<String>()
-        val policy = policy(now = { now }, messages = messages, intervalMillis = 10)
-
-        record(policy, DnsTransport.PLAINTEXT_UDP, 1)
-        repeat(500) { index ->
-            record(policy, DnsTransport.ENCRYPTED_HTTPS, if (index % 2 == 0) 1 else 2)
-            record(
-                policy,
-                if (index % 2 == 0) DnsTransport.PLAINTEXT_TCP else DnsTransport.PLAINTEXT_UDP,
-                if (index % 2 == 0) 2 else 1
-            )
-        }
-        record(policy, DnsTransport.ENCRYPTED_HTTPS, 2)
-
-        assertEquals(listOf("detail:1:PLAINTEXT_UDP"), messages)
-
-        now = 10_000_000L
-        record(policy, DnsTransport.ENCRYPTED_HTTPS, 2)
+        val policy = policy(now = { now }, intervalMillis = 10)
 
         assertEquals(
-            listOf(
-                "detail:1:PLAINTEXT_UDP",
-                "summary:1001:ENCRYPTED_HTTPS:2"
+            BackgroundDnsLogPolicy.Decision.Detail,
+            record(policy, DnsTransport.PLAINTEXT_UDP, 1)
+        )
+        var quietDecisions = 0
+        repeat(500) { index ->
+            assertEquals(
+                BackgroundDnsLogPolicy.Decision.None,
+                record(policy, DnsTransport.ENCRYPTED_HTTPS, if (index % 2 == 0) 1 else 2)
+            )
+            assertEquals(
+                BackgroundDnsLogPolicy.Decision.None,
+                record(
+                    policy,
+                    if (index % 2 == 0) DnsTransport.PLAINTEXT_TCP else DnsTransport.PLAINTEXT_UDP,
+                    if (index % 2 == 0) 2 else 1
+                )
+            )
+            quietDecisions += 2
+        }
+        assertEquals(BackgroundDnsLogPolicy.Decision.None, record(policy, DnsTransport.ENCRYPTED_HTTPS, 2))
+        quietDecisions++
+        assertEquals(1001, quietDecisions)
+
+        now = 10_000_000L
+        assertEquals(
+            BackgroundDnsLogPolicy.Decision.Summary(
+                BackgroundDnsLogSummary(
+                    coalescedEventCount = 1001,
+                    latestTransport = DnsTransport.ENCRYPTED_HTTPS,
+                    latestResolverId = 2
+                )
             ),
-            messages
+            record(policy, DnsTransport.ENCRYPTED_HTTPS, 2)
         )
     }
 
     @Test
-    fun largeUdpTcpBurstIsRateLimitedWithoutRepeatedFormatting() {
+    fun largeUdpTcpBurstIsRateLimitedToOneDetailAndOneSummaryDecision() {
         var now = 0L
-        val messages = mutableListOf<String>()
-        var detailsFormatted = 0
-        var summariesFormatted = 0
-        val policy = BackgroundDnsLogPolicy(
-            intervalMillis = 10,
-            nanoTime = { now },
-            sink = messages::add
+        val policy = policy(now = { now }, intervalMillis = 10)
+
+        assertEquals(
+            BackgroundDnsLogPolicy.Decision.Detail,
+            record(policy, DnsTransport.PLAINTEXT_UDP, 7)
         )
-        fun record(transport: DnsTransport) {
-            policy.logSuccessfulResolution(
-                transport = transport,
-                resolverId = 7,
-                isForeground = false,
-                detailMessage = { detailsFormatted++; "detail" },
-                summaryMessage = {
-                    summariesFormatted++
-                    "summary:${it.coalescedEventCount}:${it.latestTransport}:${it.latestResolverId}"
-                }
-            )
-        }
-
-        record(DnsTransport.PLAINTEXT_UDP)
+        var quietDecisions = 0
         repeat(10_000) { index ->
-            record(if (index % 2 == 0) DnsTransport.PLAINTEXT_TCP else DnsTransport.PLAINTEXT_UDP)
+            assertEquals(
+                BackgroundDnsLogPolicy.Decision.None,
+                record(
+                    policy,
+                    if (index % 2 == 0) DnsTransport.PLAINTEXT_TCP else DnsTransport.PLAINTEXT_UDP,
+                    7
+                )
+            )
+            quietDecisions++
         }
-
-        assertEquals(1, detailsFormatted)
-        assertEquals(0, summariesFormatted)
-        assertEquals(listOf("detail"), messages)
+        assertEquals(10_000, quietDecisions)
 
         now = 10_000_000L
-        record(DnsTransport.PLAINTEXT_TCP)
-
-        assertEquals(1, detailsFormatted)
-        assertEquals(1, summariesFormatted)
-        assertEquals(listOf("detail", "summary:10001:PLAINTEXT_TCP:7"), messages)
+        assertEquals(
+            BackgroundDnsLogPolicy.Decision.Summary(
+                BackgroundDnsLogSummary(
+                    coalescedEventCount = 10_001,
+                    latestTransport = DnsTransport.PLAINTEXT_TCP,
+                    latestResolverId = 7
+                )
+            ),
+            record(policy, DnsTransport.PLAINTEXT_TCP, 7)
+        )
     }
 
     @Test
     fun doHRecoveryAndResolverSwitchAreSummarizedWithLatestActualContext() {
         var now = 0L
-        val messages = mutableListOf<String>()
-        val policy = policy(now = { now }, messages = messages, intervalMillis = 10)
+        val policy = policy(now = { now }, intervalMillis = 10)
 
-        record(policy, DnsTransport.PLAINTEXT_TCP, 1)
-        record(policy, DnsTransport.ENCRYPTED_HTTPS, 1)
-        record(policy, DnsTransport.ENCRYPTED_HTTPS, 2)
-        assertEquals(listOf("detail:1:PLAINTEXT_TCP"), messages)
+        assertEquals(BackgroundDnsLogPolicy.Decision.Detail, record(policy, DnsTransport.PLAINTEXT_TCP, 1))
+        assertEquals(BackgroundDnsLogPolicy.Decision.None, record(policy, DnsTransport.ENCRYPTED_HTTPS, 1))
+        assertEquals(BackgroundDnsLogPolicy.Decision.None, record(policy, DnsTransport.ENCRYPTED_HTTPS, 2))
 
         now = 10_000_000L
-        record(policy, DnsTransport.ENCRYPTED_HTTPS, 2)
-
         assertEquals(
-            listOf(
-                "detail:1:PLAINTEXT_TCP",
-                "summary:2:ENCRYPTED_HTTPS:2"
+            BackgroundDnsLogPolicy.Decision.Summary(
+                BackgroundDnsLogSummary(
+                    coalescedEventCount = 2,
+                    latestTransport = DnsTransport.ENCRYPTED_HTTPS,
+                    latestResolverId = 2
+                )
             ),
-            messages
+            record(policy, DnsTransport.ENCRYPTED_HTTPS, 2)
         )
     }
 
     @Test
     fun foregroundDetailsDoNotResetTheWindowOrCountAsCoalescedBackgroundEvents() {
         var now = 0L
-        val messages = mutableListOf<String>()
-        val policy = policy(now = { now }, messages = messages, intervalMillis = 10)
+        val policy = policy(now = { now }, intervalMillis = 10)
 
-        record(policy, DnsTransport.PLAINTEXT_UDP, 1)
-        record(policy, DnsTransport.PLAINTEXT_TCP, 1)
-        record(policy, DnsTransport.ENCRYPTED_HTTPS, 2, isForeground = true)
-        record(policy, DnsTransport.PLAINTEXT_TCP, 2, isForeground = true)
-        record(policy, DnsTransport.PLAINTEXT_TCP, 2)
-
+        assertEquals(BackgroundDnsLogPolicy.Decision.Detail, record(policy, DnsTransport.PLAINTEXT_UDP, 1))
+        assertEquals(BackgroundDnsLogPolicy.Decision.None, record(policy, DnsTransport.PLAINTEXT_TCP, 1))
         assertEquals(
-            listOf(
-                "detail:1:PLAINTEXT_UDP",
-                "detail:2:ENCRYPTED_HTTPS",
-                "detail:2:PLAINTEXT_TCP"
-            ),
-            messages
+            BackgroundDnsLogPolicy.Decision.Detail,
+            record(policy, DnsTransport.ENCRYPTED_HTTPS, 2, isForeground = true)
         )
+        assertEquals(
+            BackgroundDnsLogPolicy.Decision.Detail,
+            record(policy, DnsTransport.PLAINTEXT_TCP, 2, isForeground = true)
+        )
+        assertEquals(BackgroundDnsLogPolicy.Decision.None, record(policy, DnsTransport.PLAINTEXT_TCP, 2))
 
         now = 10_000_000L
-        record(policy, DnsTransport.PLAINTEXT_TCP, 2)
-
         assertEquals(
-            listOf(
-                "detail:1:PLAINTEXT_UDP",
-                "detail:2:ENCRYPTED_HTTPS",
-                "detail:2:PLAINTEXT_TCP",
-                "summary:3:PLAINTEXT_TCP:2"
+            BackgroundDnsLogPolicy.Decision.Summary(
+                BackgroundDnsLogSummary(
+                    coalescedEventCount = 3,
+                    latestTransport = DnsTransport.PLAINTEXT_TCP,
+                    latestResolverId = 2
+                )
             ),
-            messages
+            record(policy, DnsTransport.PLAINTEXT_TCP, 2)
         )
     }
 
     @Test
     fun doHOutcomesBeforeFirstBackgroundFallbackAreSilent() {
-        val messages = mutableListOf<String>()
-        val policy = policy(now = { 0L }, messages = messages, intervalMillis = 10)
+        val policy = policy(now = { 0L }, intervalMillis = 10)
 
-        record(policy, DnsTransport.ENCRYPTED_HTTPS, 1)
-        record(policy, DnsTransport.ENCRYPTED_HTTPS, 2)
-        assertEquals(emptyList<String>(), messages)
-
-        record(policy, DnsTransport.PLAINTEXT_UDP, 2)
-        assertEquals(listOf("detail:2:PLAINTEXT_UDP"), messages)
+        assertEquals(BackgroundDnsLogPolicy.Decision.None, record(policy, DnsTransport.ENCRYPTED_HTTPS, 1))
+        assertEquals(BackgroundDnsLogPolicy.Decision.None, record(policy, DnsTransport.ENCRYPTED_HTTPS, 2))
+        assertEquals(
+            BackgroundDnsLogPolicy.Decision.Detail,
+            record(policy, DnsTransport.PLAINTEXT_UDP, 2)
+        )
     }
 
     @Test
-    fun suppressedEventsDoNotFormatMessagesOrCallSink() {
+    fun unavailableOutcomesAreIgnoredAndDueEventsReturnASummary() {
         var now = 0L
-        val messages = mutableListOf<String>()
-        var detailsFormatted = 0
-        var summariesFormatted = 0
-        val policy = BackgroundDnsLogPolicy(
-            intervalMillis = 5,
-            nanoTime = { now },
-            sink = messages::add
-        )
-        fun record(transport: DnsTransport, resolverId: Int, isForeground: Boolean = false) {
-            policy.logSuccessfulResolution(
-                transport = transport,
-                resolverId = resolverId,
-                isForeground = isForeground,
-                detailMessage = { detailsFormatted++; "detail" },
-                summaryMessage = {
-                    summariesFormatted++
-                    "summary:${it.coalescedEventCount}:${it.latestTransport}:${it.latestResolverId}"
-                }
-            )
-        }
+        val policy = policy(now = { now }, intervalMillis = 5)
 
-        record(DnsTransport.PLAINTEXT_UDP, 1)
-        record(DnsTransport.ENCRYPTED_HTTPS, 1)
-        record(DnsTransport.ENCRYPTED_HTTPS, 1)
-        record(DnsTransport.UNAVAILABLE, 1)
-        assertEquals(1, detailsFormatted)
-        assertEquals(0, summariesFormatted)
-        assertEquals(listOf("detail"), messages)
+        assertEquals(BackgroundDnsLogPolicy.Decision.Detail, record(policy, DnsTransport.PLAINTEXT_UDP, 1))
+        assertEquals(BackgroundDnsLogPolicy.Decision.None, record(policy, DnsTransport.ENCRYPTED_HTTPS, 1))
+        assertEquals(BackgroundDnsLogPolicy.Decision.None, record(policy, DnsTransport.ENCRYPTED_HTTPS, 1))
+        assertEquals(BackgroundDnsLogPolicy.Decision.None, record(policy, DnsTransport.UNAVAILABLE, 1))
 
         now = 5_000_000L
-        record(DnsTransport.ENCRYPTED_HTTPS, 1)
-        assertEquals(1, detailsFormatted)
-        assertEquals(1, summariesFormatted)
-        assertEquals(listOf("detail", "summary:1:ENCRYPTED_HTTPS:1"), messages)
+        assertEquals(
+            BackgroundDnsLogPolicy.Decision.Summary(
+                BackgroundDnsLogSummary(
+                    coalescedEventCount = 1,
+                    latestTransport = DnsTransport.ENCRYPTED_HTTPS,
+                    latestResolverId = 1
+                )
+            ),
+            record(policy, DnsTransport.ENCRYPTED_HTTPS, 1)
+        )
     }
 
     private fun record(
@@ -191,25 +174,17 @@ class BackgroundDnsLogPolicyTest {
         transport: DnsTransport,
         resolverId: Int,
         isForeground: Boolean = false
-    ) {
-        policy.logSuccessfulResolution(
-            transport = transport,
-            resolverId = resolverId,
-            isForeground = isForeground,
-            detailMessage = { "detail:$resolverId:$transport" },
-            summaryMessage = {
-                "summary:${it.coalescedEventCount}:${it.latestTransport}:${it.latestResolverId}"
-            }
-        )
-    }
+    ): BackgroundDnsLogPolicy.Decision = policy.recordSuccessfulResolution(
+        transport = transport,
+        resolverId = resolverId,
+        isForeground = isForeground
+    )
 
     private fun policy(
         now: () -> Long,
-        messages: MutableList<String>,
         intervalMillis: Long
     ) = BackgroundDnsLogPolicy(
         intervalMillis = intervalMillis,
-        nanoTime = now,
-        sink = messages::add
+        nanoTime = now
     )
 }

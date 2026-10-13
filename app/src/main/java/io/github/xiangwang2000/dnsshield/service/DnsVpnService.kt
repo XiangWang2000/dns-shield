@@ -127,7 +127,6 @@ class DnsVpnService : VpnService() {
         private const val FOREGROUND_STATS_FLUSH_MS = 500L
         private const val MEMORY_TRIM_CLEAR_CACHE_LEVEL = 60
         private const val NETWORK_CHANGE_DEBOUNCE_MS = 500L
-        private const val NETWORK_CHANGE_POLL_MS = 25L
 
         const val VPN_IP = "10.0.0.2"
         const val DUMMY_DNS_IP = "10.0.0.1"
@@ -733,6 +732,7 @@ class DnsVpnService : VpnService() {
     private var resolverGeneration = 0
     private var underlyingNetworkGeneration = 0L
     private var underlyingNetworkChangePending = false
+    private val networkReadiness = DnsNetworkReadiness()
     private val queryAdmission = BoundedDnsQueryAdmission<DnsQueryKey>(
         maxUniqueKeys = MAX_CONCURRENT_DNS_QUERIES,
         maxWaitersPerKey = MAX_COALESCED_DNS_QUERY_WAITERS
@@ -756,9 +756,7 @@ class DnsVpnService : VpnService() {
 
     private val dohFailureBackoff = DohFailureBackoff()
     private val backgroundFailureLogLimiter = MonotonicIntervalGate(intervalMillis = 5_000)
-    private val successfulTransportLogPolicy = BackgroundDnsLogPolicy(
-        sink = { addLogInternal(it, writeDebugLog = true) }
-    )
+    private val successfulTransportLogPolicy = BackgroundDnsLogPolicy()
 
     // One verified Public Suffix resolver owner per service lifecycle. The lazy is only touched when
     // a validated compiled blocklist actually needs parent-domain matching.
@@ -788,6 +786,7 @@ class DnsVpnService : VpnService() {
             dohFailureBackoff.resetForGeneration(
                 DohFailureBackoff.Generation(resolverGeneration, underlyingNetworkGeneration)
             )
+            networkReadiness.signalChange()
         }
         dnsTransportStatusFlow.value = "設定已更新，等待下一次查詢"
     }
@@ -856,6 +855,8 @@ class DnsVpnService : VpnService() {
                 domainPolicy.install(assembly) {
                     invalidatePolicyState()
                 }
+                // Notify after publication so waiting queries observe the new policy identity.
+                synchronized(dnsStateLock) { networkReadiness.signalChange() }
                 if (rejectedRuleCount > 0) {
                     addLog("[網域規則] 有 $rejectedRuleCount 條無效或無法通過 PSL 驗證的規則未套用。")
                 }
@@ -1141,6 +1142,7 @@ class DnsVpnService : VpnService() {
                 currentGeneration = synchronized(dnsStateLock) {
                     underlyingNetworkGeneration++
                     underlyingNetworkChangePending = true
+                    networkReadiness.signalChange()
                     clearDnsAnswerCacheLocked()
                     dohFailureBackoff.resetForGeneration(
                         DohFailureBackoff.Generation(resolverGeneration, underlyingNetworkGeneration)
@@ -1215,6 +1217,7 @@ class DnsVpnService : VpnService() {
                             false
                         } else {
                             underlyingNetworkChangePending = false
+                            networkReadiness.signalChange()
                             true
                         }
                     }
@@ -1272,6 +1275,7 @@ class DnsVpnService : VpnService() {
         }
         synchronized(dnsStateLock) {
             underlyingNetworkChangePending = false
+            networkReadiness.signalChange()
         }
         registration?.let {
             it.callbacks.forEach { callback ->
@@ -1295,14 +1299,19 @@ class DnsVpnService : VpnService() {
         dnsState: DnsStateSnapshot,
         deadline: DnsRequestDeadline
     ): Boolean {
-        while (true) {
-            if (!isCurrentDnsState(dnsState)) return false
-            val changePending = synchronized(dnsStateLock) { underlyingNetworkChangePending }
-            if (!changePending) return true
-
-            val remainingMillis = deadline.remainingMillis()
-            if (remainingMillis <= 0L) return false
-            delay(minOf(remainingMillis, NETWORK_CHANGE_POLL_MS))
+        // Ordinary queries avoid a collector, timeout job and capturing predicate.
+        synchronized(dnsStateLock) {
+            if (!isCurrentDnsStateLocked(dnsState)) return false
+            if (!underlyingNetworkChangePending) return deadline.remainingMillis() > 0L
+        }
+        return networkReadiness.awaitReady(deadline) {
+            synchronized(dnsStateLock) {
+                when {
+                    !isCurrentDnsStateLocked(dnsState) -> DnsNetworkReadiness.State.STALE
+                    underlyingNetworkChangePending -> DnsNetworkReadiness.State.WAITING
+                    else -> DnsNetworkReadiness.State.READY
+                }
+            }
         }
     }
 
@@ -2336,11 +2345,14 @@ class DnsVpnService : VpnService() {
                 }
             }
         }
-        successfulTransportLogPolicy.logSuccessfulResolution(
+        val logDecision = successfulTransportLogPolicy.recordSuccessfulResolution(
             transport = outcome.transport,
             resolverId = dnsState.server.id,
-            isForeground = isUiForeground,
-            detailMessage = {
+            isForeground = isUiForeground
+        )
+        val successMessage = when (logDecision) {
+            BackgroundDnsLogPolicy.Decision.None -> null
+            BackgroundDnsLogPolicy.Decision.Detail -> {
                 when (outcome.transport) {
                     DnsTransport.ENCRYPTED_HTTPS ->
                         "🌐 [DoH 解析] [ID=${formatTxId(dnsPayload)}]: 透過 HTTPS 解析 $domain"
@@ -2353,8 +2365,9 @@ class DnsVpnService : VpnService() {
                         "⚠️ [DNS 明文] [ID=${formatTxId(dnsPayload)}]: UDP 回應遭截短，改用 TCP/53 解析 $domain"
                     DnsTransport.UNAVAILABLE -> error("Unavailable outcomes are not successful resolution logs")
                 }
-            },
-            summaryMessage = { summary ->
+            }
+            is BackgroundDnsLogPolicy.Decision.Summary -> {
+                val summary = logDecision.summary
                 val transport = when (summary.latestTransport) {
                     DnsTransport.ENCRYPTED_HTTPS -> "DoH 加密"
                     DnsTransport.PLAINTEXT_UDP -> "UDP/53 明文"
@@ -2363,7 +2376,8 @@ class DnsVpnService : VpnService() {
                 }
                 "📋 [DNS 傳輸摘要] 上次通知後合併了 ${summary.coalescedEventCount} 筆背景明文查詢或傳輸／解析器變更；本次解析器 #${summary.latestResolverId} 使用 $transport。"
             }
-        )
+        }
+        if (successMessage != null) addLogInternal(successMessage, writeDebugLog = true)
         return outcome.response?.takeIf { deadline.remainingMillis() > 0L && isCurrentDnsState(dnsState) }
     }
 

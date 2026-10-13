@@ -17,8 +17,7 @@ internal data class BackgroundDnsLogSummary(
  */
 internal class BackgroundDnsLogPolicy(
     intervalMillis: Long = DEFAULT_INTERVAL_MILLIS,
-    private val nanoTime: () -> Long = System::nanoTime,
-    private val sink: (String) -> Unit
+    private val nanoTime: () -> Long = System::nanoTime
 ) {
     private val intervalNanos: Long
     private val stateLock = Any()
@@ -37,19 +36,16 @@ internal class BackgroundDnsLogPolicy(
 
     /**
      * Records a successful DoH, UDP/53, or TCP/53 resolution. Unavailable outcomes are ignored.
-     * Message builders and the sink are called only for foreground detail, the first background
-     * plaintext outcome, or a due background summary.
+     * Returns a detail or summary decision only when a log should be emitted.
      */
-    fun logSuccessfulResolution(
+    fun recordSuccessfulResolution(
         transport: DnsTransport,
         resolverId: Int,
-        isForeground: Boolean,
-        detailMessage: () -> String,
-        summaryMessage: (BackgroundDnsLogSummary) -> String
-    ) {
-        if (transport == DnsTransport.UNAVAILABLE) return
+        isForeground: Boolean
+    ): Decision {
+        if (transport == DnsTransport.UNAVAILABLE) return Decision.None
 
-        val decision = synchronized(stateLock) {
+        return synchronized(stateLock) {
             val hadPreviousOutcome = hasLatestOutcome
             val previousTransport = latestTransport
             val previousResolverId = latestResolverId
@@ -102,15 +98,9 @@ internal class BackgroundDnsLogPolicy(
                 }
             }
         }
-
-        when (decision) {
-            Decision.Detail -> sink(detailMessage())
-            is Decision.Summary -> sink(summaryMessage(decision.summary))
-            Decision.None -> Unit
-        }
     }
 
-    private sealed interface Decision {
+    internal sealed interface Decision {
         data object Detail : Decision
         data class Summary(val summary: BackgroundDnsLogSummary) : Decision
         data object None : Decision
