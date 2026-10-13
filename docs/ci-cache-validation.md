@@ -19,10 +19,13 @@ v1.3.0 合併後的完整 CI 花費 20 分 47 秒。原始紀錄顯示 `setup-ja
 | 原設定，release merge | Gradle 快取未命中 | 20 分 47 秒 | [run 38428582377 attempt 1](https://github.com/XiangWang2000/dns-shield/actions/runs/38428582377/attempts/1) |
 | 原設定，同一 commit 重跑 | 精確命中原有快取 | 5 分 21 秒 | [run 38428582377 attempt 2](https://github.com/XiangWang2000/dns-shield/actions/runs/38428582377/attempts/2) |
 | 新設定首輪 | 新快取未命中 | 15 分 16 秒 | [run 38432808326](https://github.com/XiangWang2000/dns-shield/actions/runs/38432808326) |
+| 新設定，不同 commit | restore-key 命中上一 commit | 4 分 23 秒 | [run 38469081860](https://github.com/XiangWang2000/dns-shield/actions/runs/38469081860) |
 
 原設定暖快取六次 Gradle 分別為 1m53s、26s、26s、25s、29s、26s。`testDebugUnitTest FROM-CACHE` 表示重用原測試結果，不代表再次執行測試。
 
-新設定首輪只啟動一個 Gradle daemon；六組 Gradle 建置分別為 9m46s、1m9s、53s、46s、48s、56s，結束時紀錄為 `1 Daemon stopped`。整個 job 的冷快取觀察值減少 5 分 31 秒（約 26.5%）。成功後保存約 941 MB 的新快取；後續不同 commit 的還原效果須另行測量。
+新設定首輪只啟動一個 Gradle daemon；六組 Gradle 建置分別為 9m46s、1m9s、53s、46s、48s、56s，結束時紀錄為 `1 Daemon stopped`。整個 job 的冷快取觀察值減少 5 分 31 秒（約 26.5%）。成功後保存約 941 MB 的新快取；後續不同 commit 還原該快取成功，詳如下段。
+
+新設定暖快取六次 Gradle 為 1m55s、7s、7s、5s、5s、5s；只啟動及停止一個 daemon。整個 job 比原設定暖快取少 58 秒（約 18.1%），已包含快取還原與保存；`testDebugUnitTest FROM-CACHE` 與原設定暖快取相同。日誌確認新 commit 的精確鍵未命中後，從前一 commit 的 restore-key 還原，再保存新鍵。監看 API 一度 HTTP 502，後續直接查 job 與原始日誌確認該輪成功；沒有因此重跑 CI。
 
 ## 驗證範圍與限制
 
