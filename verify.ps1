@@ -1,8 +1,12 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$ReuseGradleDaemon
+)
 
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
+# CI reuses one JVM across the isolated builds; local verification stays one-shot.
+$GradleDaemonOption = if ($ReuseGradleDaemon) { "--daemon" } else { "--no-daemon" }
 $AndroidStudioJbr = "C:\Program Files\Android\Android Studio\jbr"
 
 if ((-not $env:JAVA_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME "bin\java.exe"))) -and
@@ -73,7 +77,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "==> Gradle build and tests"
-& .\gradlew.bat --no-daemon --console=plain `
+& .\gradlew.bat $GradleDaemonOption --console=plain `
     :app:assembleDebug `
     :app:assembleDebugAndroidTest `
     :app:lintDebug `
@@ -84,7 +88,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "==> Isolated D14 device-test APKs"
-& .\gradlew.bat --no-daemon --console=plain `
+& .\gradlew.bat $GradleDaemonOption --console=plain `
     -PandroidTestBuildType=d14DeviceTest `
     :app:assembleD14DeviceTest `
     :app:assembleD14DeviceTestAndroidTest
@@ -93,20 +97,20 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "==> Isolated D04 device-test APKs"
-& .\gradlew.bat --no-daemon --console=plain -PandroidTestBuildType=d04DeviceTest :app:assembleD04DeviceTest :app:assembleD04DeviceTestAndroidTest
+& .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d04DeviceTest :app:assembleD04DeviceTest :app:assembleD04DeviceTestAndroidTest
 if ($LASTEXITCODE -ne 0) {
     throw "D04 Gradle verification failed with exit code $LASTEXITCODE."
 }
 
 Write-Host "==> Isolated D03 IPv6 pass-through acceptance APKs"
-& .\gradlew.bat --no-daemon --console=plain -PandroidTestBuildType=d03test :app:assembleD03test :app:assembleD03testAndroidTest
+& .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d03test :app:assembleD03test :app:assembleD03testAndroidTest
 if ($LASTEXITCODE -ne 0) { throw "D03 APK build failed: $LASTEXITCODE" }
 
 Write-Host "==> Isolated D08 TLS/strict/resolver acceptance APKs (build only)"
-& .\gradlew.bat --no-daemon --console=plain -PandroidTestBuildType=d08test :app:assembleD08test :app:assembleD08testAndroidTest
+& .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d08test :app:assembleD08test :app:assembleD08testAndroidTest
 if ($LASTEXITCODE -ne 0) { throw "D08 APK build failed: $LASTEXITCODE" }
 
 Write-Host "==> Isolated D15 lifecycle acceptance APKs (build only)"
-& .\gradlew.bat --no-daemon --console=plain -PandroidTestBuildType=d15test :app:assembleD15test :app:assembleD15testAndroidTest
+& .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d15test :app:assembleD15test :app:assembleD15testAndroidTest
 if ($LASTEXITCODE -ne 0) { throw "D15 APK build failed: $LASTEXITCODE" }
 Write-Host "Verification passed."

@@ -51,17 +51,38 @@ jobs:
         shell: powershell
 
       - name: Set up JDK
+        id: java
         if: steps.scope.outputs.docs_only != 'true'
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           # Adoptium semver for Temurin 21.0.12.1+1 (patch 1).
           java-version: "21.0.12+101.0.LTS"
-          cache: gradle
+          cache-jdk: true
+
+      - name: Restore Gradle dependencies and build cache
+        if: steps.scope.outputs.docs_only != 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            !~/.gradle/caches/**/*.lock
+            !~/.gradle/caches/**/gc.properties
+          # Each commit can save fresh build outputs. Gradle checks task inputs
+          # when restoring a previous commit, including changed build scripts.
+          key: gradle-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}-${{ github.sha }}
+          restore-keys: |
+            gradle-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}-
 
       - name: Verify repository
         if: steps.scope.outputs.docs_only != 'true'
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1 -ReuseGradleDaemon
+        shell: powershell
+
+      - name: Stop CI Gradle daemons
+        if: always() && steps.java.outcome == 'success'
+        run: .\gradlew.bat --stop
         shell: powershell
 
       - name: Upload test and lint reports
