@@ -219,7 +219,7 @@ CI 保留必要檢查名稱「Windows verification」。只有 README、CHANGELO
 
 完整 CI 使用 `verify.ps1 -ReuseGradleDaemon`，讓六次 Gradle 呼叫重用同一 JVM；結束時（包含驗證失敗）停止 CI daemon。本機預設 `verify.ps1` 仍使用 `--no-daemon`。所有測試、lint、資產驗證與六組 App／androidTest APK 建置維持原範圍。
 
-JDK 由 setup-java 快取；Gradle dependencies、wrapper 與 build cache 由 actions/cache 單獨管理。快取按 Windows／CPU 架構／wrapper 設定／commit 分鍵，沒有相同 commit 時退回相同 wrapper 的最近快取，並由 Gradle 核對輸入決定重建項目。成功後保存新 commit 的輸出；快取未命中仍執行完整驗證。不快取專案 configuration cache、簽章設定或正式 APK，也不跨 PR／main 省略檢查。
+JDK 由 setup-java 快取；Gradle dependencies、wrapper 與 build cache 由 actions/cache 單獨管理。快取按 Windows／CPU 架構／wrapper 設定／commit 分鍵，沒有相同 commit 時退回相同 wrapper 的最近快取，並由 Gradle 核對輸入決定重建項目。成功後保存新 commit 的輸出；快取未命中仍執行完整驗證。不快取專案 configuration cache、簽章設定或正式 APK，也不跨 PR／main 省略檢查。實測基準與限制見 [CI 快取驗證](ci-cache-validation.md)。
 
 文件檢查驗證本地檔案連結、HTML 圖片、空連結、code fence 與控制字元，不連網檢查遠端網址或頁內錨點。歷史驗收報告的 captures/ 連結指向本機保留的 ignored 原始證據，會明確列為未檢查。本地可執行 python tools/ci.py verify-docs；路徑分流與壞連結回歸使用 python -m unittest discover tools/tests -p test_ci.py。
 
