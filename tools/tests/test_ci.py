@@ -17,6 +17,28 @@ class CiRoutingTest(unittest.TestCase):
                      "verify.ps1", "tools/ci.py", "docs/sample.bin", "README.md.kt"):
             self.assertFalse(ci.is_documentation(path), path)
 
+    def test_scope_keeps_core_checks_and_selects_affected_variants(self):
+        for path in ("app/src/main/java/com/example/Foo.kt", "app/src/main/res/values/strings.xml",
+                     "app/src/main/assets/active.bin", "app/src/test/java/FooTest.kt"):
+            self.assertEqual(ci.select_scope([path, "README.md"]), ("Core", []), path)
+        for directory, variant in ci.VARIANT_DIRS.items():
+            self.assertEqual(ci.select_scope([f"app/src/{directory}/example.kt"]),
+                             ("Selected", [variant]), directory)
+        self.assertEqual(ci.select_scope(["app/src/androidTestD08test/assets/cert.pem",
+                                         "app/src/d15test/AndroidManifest.xml"]),
+                         ("Selected", ["d08", "d15"]))
+
+    def test_shared_configuration_and_unknown_paths_fail_closed(self):
+        for path in ("app/build.gradle.kts", "gradle/libs.versions.toml", "gradle.properties",
+                     "app/src/main/AndroidManifest.xml", "app/src/main/cpp/Android.mk",
+                     "app/src/androidTest/java/Shared.kt", ".github/workflows/ci.yml",
+                     "verify.ps1", "tools/ci.py", "tools/ci_reuse.py", "unexpected/file"):
+            self.assertEqual(ci.select_scope([path, "app/src/d15test/Foo.kt"]),
+                             ("Full", []), path)
+        self.assertEqual(ci.select_scope(None), ("Full", []))
+        self.assertEqual(ci.select_scope([]), ("Full", []))
+        self.assertEqual(ci.select_scope(["docs/test.md"]), ("Docs", []))
+
     def test_git_history_merge_base_rename_and_unknown_history(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -47,6 +69,8 @@ class CiRoutingTest(unittest.TestCase):
             git("mv", "source.kt", "docs/source.md")
             git("commit", "-qm", "rename")
             self.assertFalse(ci.classify({"before": source, "after": git("rev-parse", "HEAD")}, root))
+            self.assertEqual(ci.select_scope(ci.changed_paths(
+                {"before": source, "after": git("rev-parse", "HEAD")}, root)), ("Full", []))
             # Net documentation-only changes are safe even if an intermediate commit had source.
             event["pull_request"]["head"]["sha"] = git("rev-parse", "HEAD")
             self.assertTrue(ci.classify(event, root))

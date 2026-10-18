@@ -1,10 +1,18 @@
 [CmdletBinding()]
 param(
-    [switch]$ReuseGradleDaemon
+    [switch]$ReuseGradleDaemon,
+    [ValidateSet("Full", "Core", "Selected")]
+    [string]$Scope = "Full",
+    [ValidateSet("d03", "d04", "d08", "d14", "d15")]
+    [string[]]$Variants = @()
 )
 
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
+if (($Scope -eq "Selected") -ne ($Variants.Count -gt 0)) {
+    throw "Selected scope requires -Variants; Full/Core must not specify variants."
+}
+Write-Host "Verification scope: $Scope; variants: $($Variants -join ',')"
 # CI reuses one JVM across the isolated builds; local verification stays one-shot.
 $GradleDaemonOption = if ($ReuseGradleDaemon) { "--daemon" } else { "--no-daemon" }
 $AndroidStudioJbr = "C:\Program Files\Android\Android Studio\jbr"
@@ -87,30 +95,41 @@ if ($LASTEXITCODE -ne 0) {
     throw "Gradle verification failed with exit code $LASTEXITCODE."
 }
 
-Write-Host "==> Isolated D14 device-test APKs"
-& .\gradlew.bat $GradleDaemonOption --console=plain `
-    -PandroidTestBuildType=d14DeviceTest `
-    :app:assembleD14DeviceTest `
-    :app:assembleD14DeviceTestAndroidTest
-if ($LASTEXITCODE -ne 0) {
-    throw "D14 Gradle verification failed with exit code $LASTEXITCODE."
+if ($Scope -eq "Full" -or $Variants -contains "d14") {
+    Write-Host "==> Isolated D14 device-test APKs"
+    & .\gradlew.bat $GradleDaemonOption --console=plain `
+        -PandroidTestBuildType=d14DeviceTest `
+        :app:assembleD14DeviceTest `
+        :app:assembleD14DeviceTestAndroidTest
+    if ($LASTEXITCODE -ne 0) {
+        throw "D14 Gradle verification failed with exit code $LASTEXITCODE."
+    }
 }
 
-Write-Host "==> Isolated D04 device-test APKs"
-& .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d04DeviceTest :app:assembleD04DeviceTest :app:assembleD04DeviceTestAndroidTest
-if ($LASTEXITCODE -ne 0) {
-    throw "D04 Gradle verification failed with exit code $LASTEXITCODE."
+if ($Scope -eq "Full" -or $Variants -contains "d04") {
+    Write-Host "==> Isolated D04 device-test APKs"
+    & .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d04DeviceTest :app:assembleD04DeviceTest :app:assembleD04DeviceTestAndroidTest
+    if ($LASTEXITCODE -ne 0) {
+        throw "D04 Gradle verification failed with exit code $LASTEXITCODE."
+    }
 }
 
-Write-Host "==> Isolated D03 IPv6 pass-through acceptance APKs"
-& .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d03test :app:assembleD03test :app:assembleD03testAndroidTest
-if ($LASTEXITCODE -ne 0) { throw "D03 APK build failed: $LASTEXITCODE" }
+if ($Scope -eq "Full" -or $Variants -contains "d03") {
+    Write-Host "==> Isolated D03 IPv6 pass-through acceptance APKs"
+    & .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d03test :app:assembleD03test :app:assembleD03testAndroidTest
+    if ($LASTEXITCODE -ne 0) { throw "D03 APK build failed: $LASTEXITCODE" }
+}
 
-Write-Host "==> Isolated D08 TLS/strict/resolver acceptance APKs (build only)"
-& .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d08test :app:assembleD08test :app:assembleD08testAndroidTest
-if ($LASTEXITCODE -ne 0) { throw "D08 APK build failed: $LASTEXITCODE" }
+if ($Scope -eq "Full" -or $Variants -contains "d08") {
+    Write-Host "==> Isolated D08 TLS/strict/resolver acceptance APKs (build only)"
+    & .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d08test :app:assembleD08test :app:assembleD08testAndroidTest
+    if ($LASTEXITCODE -ne 0) { throw "D08 APK build failed: $LASTEXITCODE" }
+}
 
-Write-Host "==> Isolated D15 lifecycle acceptance APKs (build only)"
-& .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d15test :app:assembleD15test :app:assembleD15testAndroidTest
-if ($LASTEXITCODE -ne 0) { throw "D15 APK build failed: $LASTEXITCODE" }
+if ($Scope -eq "Full" -or $Variants -contains "d15") {
+    Write-Host "==> Isolated D15 lifecycle acceptance APKs (build only)"
+    & .\gradlew.bat $GradleDaemonOption --console=plain -PandroidTestBuildType=d15test :app:assembleD15test :app:assembleD15testAndroidTest
+    if ($LASTEXITCODE -ne 0) { throw "D15 APK build failed: $LASTEXITCODE" }
+}
+
 Write-Host "Verification passed."

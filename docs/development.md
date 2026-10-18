@@ -119,7 +119,7 @@ Gradle daemon 的既定條件為 JDK 21；CI 先安裝符合條件的 JDK，避�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 
-驗證入口會執行 PowerShell 語法檢查、離線 Python 工具測試、production Public Suffix 與 active blocklist asset 驗證、Android lint、JVM 單元測試及 Kotlin 編譯，並建置 Debug 與 D03／D04／D08／D14／D15 隔離 App／androidTest APK。D07／D12 variants 需另行建置；CI 不會自動執行裝置測試。GitHub Actions 固定使用 Windows 2025、Python 3.13.15 與 Temurin 21.0.12.1+1 執行同一個 `verify.ps1`，並保存 JVM 測試與 lint 報告。
+驗證入口會執行 PowerShell 語法檢查、離線 Python 工具測試、production Public Suffix 與 active blocklist asset 驗證、Android lint、JVM 單元測試及 Kotlin 編譯，並建置 Debug 與 D03／D04／D08／D14／D15 隔離 App／androidTest APK。D07／D12 variants 需另行建置；CI 不會自動執行裝置測試。GitHub Actions 固定使用 Windows 2025、Python 3.13.15 與 Temurin 21.0.12.1+1，依下方 CI 分工選擇同一個 `verify.ps1` 的範圍，並保存 JVM 測試與 lint 報告。
 
 目前 `main` 已將 GitHub Actions 的 `Windows verification` 設為 required status check，並套用於 repository 管理員；分支不必先與 `main` 同步。CI 執行建置、資產驗證、lint 與 JVM／Python 測試；實機 instrumentation 與耗電量測須另外執行，不能由 CI 建置結果推定通過。
 
@@ -215,13 +215,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix-an
 
 ## CI 檢查範圍
 
-CI 保留必要檢查名稱「Windows verification」。只有 README、CHANGELOG、PRIVACY、THIRD_PARTY_NOTICES、AGENTS 的根目錄 Markdown，以及 docs/ 內的 Markdown 變更，才走文件檢查；任何程式、資產、工具或 CI 設定變更都執行完整 verify.ps1。PR 以 merge base 比較全部變更，push 以 before／after 比較；無法確認歷史時執行完整驗證。
+CI 保留必要檢查名稱「Windows verification」，依變更選擇範圍：
 
-完整 CI 使用 `verify.ps1 -ReuseGradleDaemon`，讓六次 Gradle 呼叫重用同一 JVM；結束時（包含驗證失敗）停止 CI daemon。本機預設 `verify.ps1` 仍使用 `--no-daemon`。所有測試、lint、資產驗證與六組 App／androidTest APK 建置維持原範圍。
+| 變更 | 遠端檢查 |
+| --- | --- |
+| 既有文件白名單（根目錄 README／CHANGELOG／PRIVACY／THIRD_PARTY_NOTICES／AGENTS 及 docs/ Markdown） | 文件與 CI 分流回歸 |
+| main/java、main/kotlin、main/res、main/assets 或 test 下的普通變更 | Core：PowerShell／Python／資產檢查、Debug App／androidTest 建置、lint 與 JVM 單元測試 |
+| D03／D04／D08／D14／D15 專屬來源、測試或資產 | Core 加上對應的隔離 App／androidTest 建置；混合變更取聯集 |
+| 共用 androidTest、主 Manifest、Gradle／依賴／原生程式／CI／驗證腳本或未知路徑 | Full：原有完整驗證 |
+| 無法讀取變更歷史，或從 Actions 手動執行 workflow_dispatch | Full |
 
-JDK 由 setup-java 快取；Gradle dependencies、wrapper 與 build cache 由 actions/cache 單獨管理。快取按 Windows／CPU 架構／wrapper 設定／commit 分鍵，沒有相同 commit 時退回相同 wrapper 的最近快取，並由 Gradle 核對輸入決定重建項目。成功後保存新 commit 的輸出；快取未命中仍執行完整驗證。不快取專案 configuration cache、簽章設定或正式 APK，也不跨 PR／main 省略檢查。實測基準與限制見 [CI 快取驗證](ci-cache-validation.md)。
+PR 以 merge base 比較全部變更，push 以 before／after 比較；改名同時檢查舊／新路徑。普通共用 Kotlin 變更不逐一編譯所有隔離測試來源，因此專屬測試的 API 相容性問題可能延至完整驗證才發現。本機 `verify.ps1` 預設仍為 Full，`release.ps1` 仍使用此預設；D07／D12 仍依既有約定另行建置，不包含在 Full 的五組隔離建置內。
 
-文件檢查驗證本地檔案連結、HTML 圖片、空連結、code fence 與控制字元，不連網檢查遠端網址或頁內錨點。歷史驗收報告的 captures/ 連結指向本機保留的 ignored 原始證據，會明確列為未檢查。本地可執行 python tools/ci.py verify-docs；路徑分流與壞連結回歸使用 python -m unittest discover tools/tests -p test_ci.py。
+可明確執行 `./verify.ps1 -Scope Core` 或 `./verify.ps1 -Scope Selected -Variants d08,d15`。CI 額外傳入 `-ReuseGradleDaemon` 重用 JVM，並於結束時（包含驗證失敗）停止 daemon；本機預設仍為 `--no-daemon`。
+
+合併後 push main 可沿用已通過的 PR 檢查，條件包含：對應的 PR 確實已合併至這個 commit、同一 PR head 的最新 CI run／attempt 已成功、驗證證明的 tree 與目前 tree 完全相同（含 CI 設定）、proof 屬於同一 run／attempt，以及 GitHub 上的測試 merge commit tree／父 commit 符合。來源只限 pull_request 執行，不沿用另一個 reuse-only push；程式樹、證明或 API 不符合／不可取得時，執行正常分流驗證。沿用時仍執行便宜的 CI 分流與文件回歸，摘要連至原始成功 run，不把沿用結果描述為重新執行測試。
+
+成功 PR 的 `verified-tree` artifact 保留 14 天，僅含 commit／tree／run 識別；它不取代本機實機驗收與發版簽章檢查。沿用結果的 main job 不更新 Gradle build cache；需要完整遠端驗證或更新 main 快取時，可手動執行 CI（Full）。
+
+JDK 由 setup-java 快取；Gradle dependencies、wrapper 與 build cache 由 actions/cache 單獨管理。快取按 Windows／CPU 架構／wrapper 設定／commit 分鍵，沒有相同 commit 時退回相同 wrapper 的最近快取，並由 Gradle 核對輸入決定重建項目。快取未命中仍執行所選範圍，不快取專案 configuration cache、簽章設定或正式 APK。先前全量 CI 的冷／暖快取量測見 [CI 快取驗證](ci-cache-validation.md)，不代表新 Core 範圍的冷快取耗時。
+
+文件檢查驗證本地檔案連結、HTML 圖片、空連結、code fence 與控制字元，不連網檢查遠端網址或頁內錨點。歷史驗收報告的 captures/ 連結指向本機保留的 ignored 原始證據，會明確列為未檢查。本地可執行 python tools/ci.py verify-docs；路徑分流、結果沿用與壞連結回歸使用 `python -m unittest discover tools/tests -p "test_ci*.py"`；PowerShell 範圍與失敗傳遞回歸使用 `python -m unittest discover tools/tests -p test_verify_scope.py`。
 
 ## 正式發行
 

@@ -19,24 +19,59 @@ def git(*args, root=ROOT):
     return subprocess.check_output(["git", *args], cwd=root, stderr=subprocess.PIPE)
 
 
-def classify(event, root=ROOT):
-    """Unknown history or an empty diff always selects the full gate."""
+def changed_paths(event, root=ROOT):
+    """Return all changed paths, including both sides of renames; None is unknown."""
     try:
         if "pull_request" in event:
             pr = event["pull_request"]
             base, head = pr["base"]["sha"], pr["head"]["sha"]
             if not SHA.fullmatch(base) or not SHA.fullmatch(head):
-                return False
+                return None
             base = git("merge-base", base, head, root=root).decode().strip()
         else:
             base, head = event["before"], event["after"]
             if not SHA.fullmatch(base) or not SHA.fullmatch(head) or set(base) == {"0"}:
-                return False
+                return None
         paths = git("diff", "--no-renames", "--name-only", "-z", base, head, "--", root=root)
         changed = [p.decode("utf-8") for p in paths.split(b"\0") if p]
-        return bool(changed) and all(is_documentation(p) for p in changed)
+        return changed or None
     except (KeyError, TypeError, subprocess.CalledProcessError, UnicodeError):
-        return False
+        return None
+
+
+VARIANT_DIRS = {
+    "androidTestD03test": "d03", "d03test": "d03",
+    "androidTestD04DeviceTest": "d04", "d04DeviceTest": "d04",
+    "androidTestD08test": "d08", "d08test": "d08",
+    "androidTestD14DeviceTest": "d14", "d14DeviceTest": "d14",
+    "androidTestD15test": "d15", "d15test": "d15",
+}
+CORE_PREFIXES = ("app/src/main/java/", "app/src/main/kotlin/", "app/src/main/res/",
+                 "app/src/main/assets/", "app/src/test/")
+
+
+def select_scope(paths):
+    """Only known ordinary source paths receive the smaller gate."""
+    if not paths:
+        return "Full", []
+    if all(is_documentation(p) for p in paths):
+        return "Docs", []
+    variants = set()
+    for path in paths:
+        if is_documentation(path) or path.startswith(CORE_PREFIXES):
+            continue
+        parts = path.split("/")
+        if len(parts) > 3 and parts[:2] == ["app", "src"] and parts[2] in VARIANT_DIRS:
+            variants.add(VARIANT_DIRS[parts[2]])
+        else:
+            # Shared androidTest, build/CI logic, native code and unknown paths
+            # retain the full gate. D07/D12 remain outside the historical gate.
+            return "Full", []
+    return ("Selected", sorted(variants)) if variants else ("Core", [])
+
+
+def classify(event, root=ROOT):
+    return select_scope(changed_paths(event, root))[0] == "Docs"
 
 
 def documentation_errors(text, document, tracked):
@@ -116,10 +151,11 @@ def main():
     args = parser.parse_args()
     if args.command == "classify":
         event = json.loads(args.event.read_text(encoding="utf-8"))
-        docs_only = classify(event)
+        scope, variants = select_scope(changed_paths(event))
+        docs_only = scope == "Docs"
         with args.output.open("a", encoding="utf-8") as output:
-            output.write(f"docs_only={str(docs_only).lower()}\n")
-        print("Documentation-only gate" if docs_only else "Full verification gate")
+            output.write(f"docs_only={str(docs_only).lower()}\nscope={scope}\nvariants={','.join(variants)}\n")
+        print(f"Verification scope: {scope}; variants: {variants}")
     else:
         verify_docs()
 
