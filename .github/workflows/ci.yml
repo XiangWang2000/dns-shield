@@ -2,12 +2,15 @@ name: CI
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches:
       - main
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -30,6 +33,13 @@ jobs:
         with:
           python-version: "3.13.15"
 
+      - name: Check verified PR tree
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/ci_reuse.py check --event "$env:GITHUB_EVENT_PATH" --output "$env:GITHUB_OUTPUT"
+        shell: powershell
+
       - name: Select verification scope
         id: scope
         run: python tools/ci.py classify --event "$env:GITHUB_EVENT_PATH" --output "$env:GITHUB_OUTPUT"
@@ -37,14 +47,16 @@ jobs:
 
       - name: Verify CI routing and documentation
         run: |
-          python -m unittest discover tools/tests -p test_ci.py
+          python -m unittest discover tools/tests -p "test_ci*.py"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover tools/tests -p test_verify_scope.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/ci.py verify-docs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         shell: powershell
 
       - name: Check out native submodules
-        if: steps.scope.outputs.docs_only != 'true'
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
         run: |
           git submodule update --init --recursive
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -52,7 +64,7 @@ jobs:
 
       - name: Set up JDK
         id: java
-        if: steps.scope.outputs.docs_only != 'true'
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
@@ -61,7 +73,7 @@ jobs:
           cache-jdk: true
 
       - name: Restore Gradle dependencies and build cache
-        if: steps.scope.outputs.docs_only != 'true'
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -76,8 +88,16 @@ jobs:
             gradle-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}-
 
       - name: Verify repository
-        if: steps.scope.outputs.docs_only != 'true'
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1 -ReuseGradleDaemon
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        env:
+          VERIFY_SCOPE: ${{ steps.scope.outputs.scope }}
+          VERIFY_VARIANTS: ${{ steps.scope.outputs.variants }}
+        run: |
+          $verification = @{ Scope = $env:VERIFY_SCOPE; ReuseGradleDaemon = $true }
+          if ($env:VERIFY_SCOPE -eq 'Selected') {
+            $verification.Variants = $env:VERIFY_VARIANTS -split ','
+          }
+          & .\verify.ps1 @verification
         shell: powershell
 
       - name: Stop CI Gradle daemons
@@ -86,7 +106,7 @@ jobs:
         shell: powershell
 
       - name: Upload test and lint reports
-        if: always() && steps.scope.outputs.docs_only != 'true'
+        if: always() && steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-reports-${{ github.run_id }}
@@ -96,3 +116,28 @@ jobs:
             app/build/reports/lint-results-debug.*
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Record verified PR tree
+        if: success() && github.event_name == 'pull_request' && steps.scope.outputs.docs_only != 'true'
+        run: |
+          New-Item -ItemType Directory -Path captures/ci-proof -Force | Out-Null
+          python tools/ci_reuse.py record --event "$env:GITHUB_EVENT_PATH" --output captures/ci-proof/proof.json
+        shell: powershell
+
+      - name: Upload verified PR tree
+        if: success() && github.event_name == 'pull_request' && steps.scope.outputs.docs_only != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-tree
+          path: captures/ci-proof/proof.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
+      - name: Report reused verification
+        if: steps.reuse.outputs.reuse == 'true'
+        env:
+          EVIDENCE_URL: ${{ steps.reuse.outputs.evidence_url }}
+        run: |
+          "Reused successful PR verification for the identical Git tree: $env:EVIDENCE_URL" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+        shell: powershell
