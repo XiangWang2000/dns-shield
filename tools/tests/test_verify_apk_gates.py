@@ -1,6 +1,7 @@
 """Exercise verify.ps1 with fake executables: variant routing and failure propagation."""
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -8,9 +9,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 VERIFY_TEXT = (ROOT / "verify.ps1").read_text(encoding="utf-8")
+POWERSHELL = shutil.which("powershell.exe" if os.name == "nt" else "pwsh")
 
 
-@unittest.skipUnless(os.name == "nt", "verify.ps1 requires Windows")
+@unittest.skipUnless(POWERSHELL, "PowerShell executable is not installed")
 class VerifyApkGatesTest(unittest.TestCase):
     def run_gate(self, failure=None):
         with tempfile.TemporaryDirectory() as directory:
@@ -24,27 +26,34 @@ class VerifyApkGatesTest(unittest.TestCase):
             assets.mkdir(parents=True)
             for name in ("active.bin", "public_suffix.bin"):
                 (assets / name).write_bytes(b"fixture")
-            (root / "gradlew.bat").write_text(
-                '@echo off\n'
-                'echo %*>>"%~dp0calls.txt"\n'
-                'if defined DNS_SHIELD_GATE_FAILURE (\n'
-                '  echo %* | findstr /L /C:"%DNS_SHIELD_GATE_FAILURE%" >nul\n'
-                '  if not errorlevel 1 exit /b 7\n'
-                ')\nexit /b 0\n', encoding="ascii")
+            java = root / "jdk/bin" / ("java.exe" if os.name == "nt" else "java")
+            java.parent.mkdir(parents=True, exist_ok=True)
+            java.touch()
+            if os.name == "nt":
+                (root / "gradlew.bat").write_bytes(
+                    b'@echo off\r\necho %*>>"%~dp0calls.txt"\r\n'
+                    b'if defined DNS_SHIELD_GATE_FAILURE echo %* | findstr /L /C:"%DNS_SHIELD_GATE_FAILURE%" >nul\r\n'
+                    b'if not errorlevel 1 if defined DNS_SHIELD_GATE_FAILURE exit /b 7\r\nexit /b 0\r\n')
+            else:
+                wrapper = root / "gradlew"
+                wrapper.write_text(
+                    '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$(dirname "$0")/calls.txt"\n'
+                    'if [ -n "${DNS_SHIELD_GATE_FAILURE:-}" ]; then\n'
+                    '  case "$*" in *"$DNS_SHIELD_GATE_FAILURE"*) exit 7 ;; esac\n'
+                    'fi\nexit 0\n', encoding="utf-8")
+                wrapper.chmod(0o755)
             environment = os.environ.copy()
             if failure:
                 environment["DNS_SHIELD_GATE_FAILURE"] = failure
             else:
                 environment.pop("DNS_SHIELD_GATE_FAILURE", None)
-            bundled_jbr = Path(r"C:\Program Files\Android\Android Studio\jbr")
-            if bundled_jbr.exists():
-                environment["JAVA_HOME"] = str(bundled_jbr)
+            environment["JAVA_HOME"] = str(root / "jdk")
             quoted = str(root / "verify.ps1").replace("'", "''")
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
+                [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
                  "function global:python { $global:LASTEXITCODE = 0 }; "
                  f"& '{quoted}'"],
-                capture_output=True, text=True, env=environment, timeout=30)
+                cwd=root, capture_output=True, text=True, errors="replace", env=environment, timeout=30)
             calls = (root / "calls.txt").read_text() if (root / "calls.txt").exists() else ""
             return result, calls
 
