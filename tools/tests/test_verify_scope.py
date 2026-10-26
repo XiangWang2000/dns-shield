@@ -74,13 +74,23 @@ class VerifyScopeTest(unittest.TestCase):
         self.assertIn("-PandroidTestBuildType=d15test", calls[2])
         self.assertIn(":app:assembleD15testAndroidTest", calls[2])
 
+    def test_core_and_isolated_partition_preserve_exact_full_builds(self):
+        full, full_calls = self.run_verifier()
+        core, core_calls = self.run_verifier("-Scope Core")
+        isolated, isolated_calls = self.run_verifier(
+            "-Scope Isolated -Variants d03,d04,d08,d14,d15")
+        for result in (full, core, isolated):
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(isolated_calls), 5)
+        self.assertEqual(full_calls, core_calls + isolated_calls)
+
     def test_failure_stops_before_remaining_builds(self):
         result, calls = self.run_verifier(fail=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len(calls), 1)
 
     def test_invalid_scope_selection_does_not_run_builds(self):
-        for options in ("-Scope Selected", "-Scope Core -Variants d08", "-Scope Unknown",
+        for options in ("-Scope Isolated", "-Scope Selected", "-Scope Core -Variants d08", "-Scope Unknown",
                         "-Scope Selected -Variants unknown"):
             with self.subTest(options=options):
                 result, calls = self.run_verifier(options)

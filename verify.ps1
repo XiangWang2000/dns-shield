@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$ReuseGradleDaemon,
-    [ValidateSet("Full", "Core", "Selected")]
+    [ValidateSet("Full", "Core", "Selected", "Isolated")]
     [string]$Scope = "Full",
     [ValidateSet("d03", "d04", "d08", "d14", "d15")]
     [string[]]$Variants = @()
@@ -9,8 +9,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
-if (($Scope -eq "Selected") -ne ($Variants.Count -gt 0)) {
-    throw "Selected scope requires -Variants; Full/Core must not specify variants."
+if (($Scope -in @("Selected", "Isolated")) -ne ($Variants.Count -gt 0)) {
+    throw "Selected/Isolated scopes require -Variants; Full/Core must not specify variants."
 }
 Write-Host "Verification scope: $Scope; variants: $($Variants -join ',')"
 # CI reuses one JVM across the isolated builds; local verification stays one-shot.
@@ -87,15 +87,17 @@ if ($LASTEXITCODE -ne 0) {
     throw "Packaged production active blocklist verification failed with exit code $LASTEXITCODE."
 }
 
-Write-Host "==> Gradle build and tests"
-& $GradleWrapper $GradleDaemonOption --console=plain `
-    :app:assembleDebug `
-    :app:assembleDebugAndroidTest `
-    :app:lintDebug `
-    :app:testDebugUnitTest `
-    :app:compileDebugKotlin
-if ($LASTEXITCODE -ne 0) {
-    throw "Gradle verification failed with exit code $LASTEXITCODE."
+if ($Scope -ne "Isolated") {
+    Write-Host "==> Gradle build and tests"
+    & $GradleWrapper $GradleDaemonOption --console=plain `
+        :app:assembleDebug `
+        :app:assembleDebugAndroidTest `
+        :app:lintDebug `
+        :app:testDebugUnitTest `
+        :app:compileDebugKotlin
+    if ($LASTEXITCODE -ne 0) {
+        throw "Gradle verification failed with exit code $LASTEXITCODE."
+    }
 }
 
 if ($Scope -eq "Full" -or $Variants -contains "d14") {

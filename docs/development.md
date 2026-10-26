@@ -215,7 +215,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\benchmark-public-suffix-an
 
 ## CI 檢查範圍
 
-CI 保留必要檢查名稱「Windows verification」作為彙總 gate；Android verification 與 Windows script checks 必須都成功，失敗、取消或略過任一 job 均不能通過。Windows job 執行工具／入口回歸，Android job 依變更選擇範圍：
+CI 保留必要檢查名稱「Windows verification」作為彙總 gate；Android 的 core／isolated 兩個分片與 Windows script checks 必須都成功，失敗、取消或略過任一 job 均不能通過。Windows job 執行工具／入口回歸，Android job 依變更選擇範圍；Full 由 Core 與 Isolated 五組建置在不同 runner 平行完成，Selected 的 isolated 分片只建置相關變體，普通 Core 修改不執行 isolated 建置：
 
 | 變更 | 遠端檢查 |
 | --- | --- |
@@ -227,7 +227,7 @@ CI 保留必要檢查名稱「Windows verification」作為彙總 gate；Android
 
 PR 以 merge base 比較全部變更，push 以 before／after 比較；改名同時檢查舊／新路徑。普通共用 Kotlin 變更不逐一編譯所有隔離測試來源，因此專屬測試的 API 相容性問題可能延至完整驗證才發現。本機 `verify.ps1` 預設仍為 Full，`release.ps1` 仍使用此預設；D07／D12 仍依既有約定另行建置，不包含在 Full 的五組隔離建置內。
 
-Linux 使用 `pwsh -File ./verify.ps1`；Windows 仍使用上述 PowerShell 指令。兩者共用檢查清單，腳本只依平台選擇 Java 與 Gradle wrapper。可明確執行 `./verify.ps1 -Scope Core` 或 `./verify.ps1 -Scope Selected -Variants d08,d15`。CI 額外傳入 `-ReuseGradleDaemon` 重用 JVM，並於結束時（包含驗證失敗）停止 daemon；本機預設仍為 `--no-daemon`。
+Linux 使用 `pwsh -File ./verify.ps1`；Windows 仍使用上述 PowerShell 指令。兩者共用檢查清單，腳本只依平台選擇 Java 與 Gradle wrapper。CI 專用 `-Scope Isolated -Variants ...` 僅執行指定隔離建置（仍檢查工具與資產），必須搭配 Core 才相當於完整範圍；本機預設 Full 仍依序完成六組。可明確執行 `./verify.ps1 -Scope Core` 或 `./verify.ps1 -Scope Selected -Variants d08,d15`。CI 額外傳入 `-ReuseGradleDaemon` 重用 JVM，並於結束時（包含驗證失敗）停止 daemon；本機預設仍為 `--no-daemon`。
 
 合併後 push main 可沿用已通過的 PR 檢查，條件包含：對應的 PR 確實已合併至這個 commit、同一 PR head 的最新 CI run／attempt 已成功、驗證證明的 tree 與目前 tree 完全相同（含 CI 設定）、proof 屬於同一 run／attempt，以及 GitHub 上的測試 merge commit tree／父 commit 符合。來源只限 pull_request 執行，不沿用另一個 reuse-only push；程式樹、證明或 API 不符合／不可取得時，執行正常分流驗證。沿用時仍執行便宜的 CI 分流與文件回歸，摘要連至原始成功 run，不把沿用結果描述為重新執行測試。
 
