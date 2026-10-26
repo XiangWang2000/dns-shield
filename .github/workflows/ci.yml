@@ -3,6 +3,11 @@ name: CI
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      cold_cache:
+        description: "Measure Full verification without restoring JDK or Gradle caches"
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -17,16 +22,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Windows verification
-    runs-on: windows-2025
-    timeout-minutes: 45
+  android:
+    name: Android verification (${{ matrix.partition }})
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [core, isolated]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      - name: Set isolated Gradle home
+        run: |
+          "GRADLE_USER_HOME=$(Join-Path $env:RUNNER_TEMP 'dns-shield-gradle')" | Add-Content -LiteralPath $env:GITHUB_ENV
+        shell: pwsh
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -38,12 +52,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python tools/ci_reuse.py check --event "$env:GITHUB_EVENT_PATH" --output "$env:GITHUB_OUTPUT"
-        shell: powershell
+        shell: pwsh
 
       - name: Select verification scope
         id: scope
         run: python tools/ci.py classify --event "$env:GITHUB_EVENT_PATH" --output "$env:GITHUB_OUTPUT"
-        shell: powershell
+        shell: pwsh
 
       - name: Verify CI routing and documentation
         run: |
@@ -53,63 +67,78 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/ci.py verify-docs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        shell: powershell
+        shell: pwsh
 
       - name: Check out native submodules
-        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true' && (matrix.partition == 'core' || steps.scope.outputs.scope == 'Full' || steps.scope.outputs.scope == 'Selected')
         run: |
           git submodule update --init --recursive
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        shell: powershell
+        shell: pwsh
 
       - name: Set up JDK
         id: java
-        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true' && (matrix.partition == 'core' || steps.scope.outputs.scope == 'Full' || steps.scope.outputs.scope == 'Selected')
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           # Adoptium semver for Temurin 21.0.12.1+1 (patch 1).
           java-version: "21.0.12+101.0.LTS"
-          cache-jdk: true
+          cache-jdk: ${{ !inputs.cold_cache }}
+
+      - name: Confirm empty Gradle home for cold measurement
+        if: inputs.cold_cache
+        run: |
+          if (Test-Path -LiteralPath $env:GRADLE_USER_HOME) {
+            throw "Cold measurement requires an empty Gradle user home."
+          }
+          "Cold cache: fresh checkout, empty GRADLE_USER_HOME, no JDK/Gradle cache restore." | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+        shell: pwsh
 
       - name: Restore Gradle dependencies and build cache
-        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true' && (matrix.partition == 'core' || steps.scope.outputs.scope == 'Full' || steps.scope.outputs.scope == 'Selected') && !inputs.cold_cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            !~/.gradle/caches/**/*.lock
-            !~/.gradle/caches/**/gc.properties
+            ${{ env.GRADLE_USER_HOME }}/caches
+            ${{ env.GRADLE_USER_HOME }}/wrapper
+            !${{ env.GRADLE_USER_HOME }}/caches/**/*.lock
+            !${{ env.GRADLE_USER_HOME }}/caches/**/gc.properties
           # Each commit can save fresh build outputs. Gradle checks task inputs
           # when restoring a previous commit, including changed build scripts.
-          key: gradle-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}-${{ github.sha }}
+          key: gradle-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}-${{ matrix.partition }}-${{ github.sha }}
           restore-keys: |
-            gradle-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}-
+            gradle-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}-${{ matrix.partition }}-
 
       - name: Verify repository
-        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true' && (matrix.partition == 'core' || steps.scope.outputs.scope == 'Full' || steps.scope.outputs.scope == 'Selected')
         env:
+          VERIFY_PARTITION: ${{ matrix.partition }}
           VERIFY_SCOPE: ${{ steps.scope.outputs.scope }}
           VERIFY_VARIANTS: ${{ steps.scope.outputs.variants }}
         run: |
-          $verification = @{ Scope = $env:VERIFY_SCOPE; ReuseGradleDaemon = $true }
-          if ($env:VERIFY_SCOPE -eq 'Selected') {
-            $verification.Variants = $env:VERIFY_VARIANTS -split ','
+          $verification = @{ Scope = 'Core'; ReuseGradleDaemon = $true }
+          if ($env:VERIFY_PARTITION -eq 'isolated') {
+            $verification.Scope = 'Isolated'
+            $verification.Variants = if ($env:VERIFY_SCOPE -eq 'Full') {
+              @('d03', 'd04', 'd08', 'd14', 'd15')
+            } else {
+              $env:VERIFY_VARIANTS -split ','
+            }
           }
           & .\verify.ps1 @verification
-        shell: powershell
+        shell: pwsh
 
       - name: Stop CI Gradle daemons
         if: always() && steps.java.outcome == 'success'
-        run: .\gradlew.bat --stop
-        shell: powershell
+        run: ./gradlew --stop
+        shell: pwsh
 
       - name: Upload test and lint reports
-        if: always() && steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        if: always() && steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true' && (matrix.partition == 'core' || steps.scope.outputs.scope == 'Full' || steps.scope.outputs.scope == 'Selected')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ci-reports-${{ github.run_id }}
+          name: ci-reports-${{ github.run_id }}-${{ matrix.partition }}
           path: |
             app/build/test-results/testDebugUnitTest/
             app/build/reports/tests/testDebugUnitTest/
@@ -118,14 +147,14 @@ jobs:
           retention-days: 14
 
       - name: Record verified PR tree
-        if: success() && github.event_name == 'pull_request' && steps.scope.outputs.docs_only != 'true'
+        if: success() && matrix.partition == 'core' && github.event_name == 'pull_request' && steps.scope.outputs.docs_only != 'true'
         run: |
           New-Item -ItemType Directory -Path captures/ci-proof -Force | Out-Null
           python tools/ci_reuse.py record --event "$env:GITHUB_EVENT_PATH" --output captures/ci-proof/proof.json
-        shell: powershell
+        shell: pwsh
 
       - name: Upload verified PR tree
-        if: success() && github.event_name == 'pull_request' && steps.scope.outputs.docs_only != 'true'
+        if: success() && matrix.partition == 'core' && github.event_name == 'pull_request' && steps.scope.outputs.docs_only != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-tree
@@ -140,4 +169,37 @@ jobs:
           EVIDENCE_URL: ${{ steps.reuse.outputs.evidence_url }}
         run: |
           "Reused successful PR verification for the identical Git tree: $env:EVIDENCE_URL" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+        shell: pwsh
+
+  windows:
+    name: Windows script checks
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.15"
+      - name: Verify Windows tooling and dispatcher
+        run: |
+          python -m unittest discover tools/tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/ci.py verify-docs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         shell: powershell
+
+  verify:
+    # Keep the existing branch-protection check name; it now gates BOTH jobs.
+    name: Windows verification
+    needs: [android, windows]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - name: Require Android and Windows verification
+        env:
+          ANDROID_RESULT: ${{ needs.android.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+        run: test "$ANDROID_RESULT" = success && test "$WINDOWS_RESULT" = success
