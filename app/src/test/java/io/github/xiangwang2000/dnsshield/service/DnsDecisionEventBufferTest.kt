@@ -50,6 +50,59 @@ class DnsDecisionEventBufferTest {
     }
 
     @Test
+    fun repeatedNormalizedDomainKeepsIdAndUpdatesLatestDecisionReasonTimeAndOrder() {
+        val f = Fixture()
+        try {
+            f.buffer.record("MiXeD.Example.", DnsDecisionReason.USER_RULE)
+            f.buffer.setForeground(true)
+            val original = f.snapshots.single().single()
+            assertEquals("mixed.example", original.domain)
+            assertEquals(DnsDecision.BLOCK, original.decision)
+            assertEquals(1L, original.recordCount)
+
+            f.buffer.record("older.example", DnsDecisionReason.USER_RULE)
+            f.flush()
+            f.buffer.record(
+                "mixed.example",
+                DnsDecisionReason.PROTECTION_LIST,
+                DnsDecision.ALLOW
+            )
+            f.flush()
+
+            val snapshot = f.snapshots.last()
+            val updated = snapshot.first()
+            assertEquals(listOf("mixed.example", "older.example"), snapshot.map { it.domain })
+            assertEquals(original.id, updated.id)
+            assertEquals(2L, updated.recordCount)
+            assertEquals(1_002L, updated.occurredAtMillis)
+            assertEquals(DnsDecision.ALLOW, updated.decision)
+            assertEquals(DnsDecisionReason.PROTECTION_LIST, updated.reason)
+        } finally { f.close() }
+    }
+
+    @Test
+    fun capacityCountsDistinctDomainsAndEvictsLeastRecentlyRecordedDomain() {
+        val f = Fixture()
+        try {
+            repeat(100) { f.buffer.record("domain-$it.example", DnsDecisionReason.USER_RULE) }
+            f.buffer.record("DOMAIN-0.EXAMPLE.", DnsDecisionReason.PROTECTION_LIST, DnsDecision.ALLOW)
+            f.buffer.setForeground(true)
+            assertEquals(100, f.snapshots.last().size)
+            assertEquals("domain-0.example", f.snapshots.last().first().domain)
+            assertEquals(2L, f.snapshots.last().first().recordCount)
+
+            f.buffer.record("domain-100.example", DnsDecisionReason.USER_RULE)
+            f.flush()
+            val snapshot = f.snapshots.last()
+            assertEquals(100, snapshot.size)
+            assertEquals("domain-100.example", snapshot.first().domain)
+            assertTrue("domain-0.example" in snapshot.map { it.domain })
+            assertTrue("domain-1.example" !in snapshot.map { it.domain })
+            assertEquals(snapshot.size, snapshot.map { it.domain }.toSet().size)
+        } finally { f.close() }
+    }
+
+    @Test
     fun foregroundBurstPublishesLastEventInOneBatchThenStopsScheduling() {
         val f = Fixture()
         try {
@@ -178,7 +231,9 @@ class DnsDecisionEventBufferTest {
             assertEquals("final.example", f.snapshots.last().single().domain)
             f.snapshots.forEach { snapshot ->
                 assertTrue(snapshot.size <= 100)
-                assertTrue(snapshot.zipWithNext().all { (a, b) -> a.id > b.id })
+                assertEquals(snapshot.size, snapshot.map { it.domain }.toSet().size)
+                assertEquals(snapshot.size, snapshot.map { it.id }.toSet().size)
+                assertTrue(snapshot.zipWithNext().all { (a, b) -> a.occurredAtMillis >= b.occurredAtMillis })
             }
         } finally { pool.shutdownNow(); f.close() }
     }

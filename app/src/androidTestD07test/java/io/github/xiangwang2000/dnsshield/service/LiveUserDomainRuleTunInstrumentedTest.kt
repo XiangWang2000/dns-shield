@@ -110,22 +110,33 @@ class LiveUserDomainRuleTunInstrumentedTest {
                 DnsVpnService.activeDnsFlow.value == "${resolverName} (127.0.0.1)"
             }
 
+            DnsVpnService.clearLogs()
+            DnsVpnService.setUiForeground(true)
             val query = dnsQuery(domain)
             assertEquals(3, awaitRcode(query, 3))
+            val firstBlock = awaitDecision(domain, DnsDecision.BLOCK)
 
             dao.replaceUserDomainRule(UserDomainRuleEntity(domain = domain, action = "ALLOW", includeSubdomains = false))
             context.startService(reloadIntent(context))
             assertEquals(0, awaitRcode(query, 0))
             assertEquals("Allowed query should reach the local fake upstream once", 1, upstreamQueries.get())
+            val allowed = awaitDecision(domain, DnsDecision.ALLOW, firstBlock.recordCount + 1)
+            assertEquals(firstBlock.id, allowed.id)
             assertEquals(0, awaitRcode(query, 0))
             assertEquals("Repeated allowed query should use its DNS cache entry", 1, upstreamQueries.get())
+            val cachedAllowed = awaitDecision(domain, DnsDecision.ALLOW, allowed.recordCount + 1)
+            assertEquals(firstBlock.id, cachedAllowed.id)
 
             dao.replaceUserDomainRule(UserDomainRuleEntity(domain = domain, action = "BLOCK", includeSubdomains = false))
             context.startService(reloadIntent(context))
             assertEquals("A cached positive answer must not survive the BLOCK rule", 3, awaitRcode(query, 3))
+            val blockedAgain = awaitDecision(domain, DnsDecision.BLOCK, cachedAllowed.recordCount + 1)
+            assertEquals(firstBlock.id, blockedAgain.id)
             assertEquals(1, upstreamQueries.get())
             assertNull("Fake upstream failed", upstreamFailure.get())
         } finally {
+            DnsVpnService.setUiForeground(false)
+            DnsVpnService.clearLogs()
             try {
                 if (serviceStarted) {
                     context.startService(
@@ -146,6 +157,16 @@ class LiveUserDomainRuleTunInstrumentedTest {
                 }
             }
         }
+    }
+
+    private fun awaitDecision(domain: String, decision: DnsDecision, minimumCount: Long = 1L): DnsDecisionEvent {
+        awaitState("Expected a merged $decision event for $domain") {
+            DnsVpnService.liveDecisionEventsFlow.value.singleOrNull { it.domain == domain }
+                ?.let { it.decision == decision && it.recordCount >= minimumCount } == true
+        }
+        val event = DnsVpnService.liveDecisionEventsFlow.value.single { it.domain == domain }
+        assertEquals(DnsDecisionReason.USER_RULE, event.reason)
+        return event
     }
 
     private fun reloadIntent(context: android.content.Context) =

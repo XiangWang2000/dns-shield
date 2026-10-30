@@ -1,7 +1,8 @@
 package io.github.xiangwang2000.dnsshield.service
 
-import java.util.ArrayDeque
+import io.github.xiangwang2000.dnsshield.blocking.DomainNameNormalizer
 import java.util.Collections
+import java.util.LinkedHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -17,7 +18,7 @@ internal class DnsDecisionEventBuffer(
     private val awaitBatch: suspend () -> Unit = { delay(300L) }
 ) {
     private val lock = Any()
-    private val events = ArrayDeque<DnsDecisionEvent>()
+    private val events = LinkedHashMap<String, DnsDecisionEvent>(capacity, 0.75f, true)
     private var nextId = 0L
     private var foreground = false
     private var dirty = false
@@ -26,9 +27,32 @@ internal class DnsDecisionEventBuffer(
 
     init { require(capacity > 0) }
 
-    fun record(domain: String, reason: DnsDecisionReason) = synchronized(lock) {
-        if (events.size == capacity) events.removeLast()
-        events.addFirst(DnsDecisionEvent(++nextId, domain, DnsDecision.BLOCK, reason, currentTimeMillis()))
+    fun record(
+        domain: String,
+        reason: DnsDecisionReason,
+        decision: DnsDecision = DnsDecision.BLOCK
+    ) = synchronized(lock) {
+        val normalizedDomain = DomainNameNormalizer.normalize(domain) ?: return@synchronized
+        val occurredAtMillis = currentTimeMillis()
+        val previous = events[normalizedDomain]
+        val event = previous?.copy(
+            decision = decision,
+            reason = reason,
+            occurredAtMillis = occurredAtMillis,
+            recordCount = previous.recordCount + 1
+        ) ?: DnsDecisionEvent(
+            ++nextId,
+            normalizedDomain,
+            decision,
+            reason,
+            occurredAtMillis
+        )
+        events[normalizedDomain] = event
+        if (events.size > capacity) {
+            val oldest = events.entries.iterator()
+            oldest.next()
+            oldest.remove()
+        }
         dirty = true
         if (foreground && batchJob == null) scheduleBatch()
     }
@@ -74,6 +98,8 @@ internal class DnsDecisionEventBuffer(
 
     private fun publishSnapshot() {
         // The same lock serializes clear(), visibility changes and publication.
-        publish(Collections.unmodifiableList(ArrayList(events)))
+        val snapshot = ArrayList(events.values)
+        Collections.reverse(snapshot)
+        publish(Collections.unmodifiableList(snapshot))
     }
 }

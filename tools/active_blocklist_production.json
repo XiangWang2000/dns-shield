@@ -1,13 +1,13 @@
 {
-  "artifact_sha256": "87737598676f344cafd32c5deb8c0225e07963b5e318ef8c9f099b912487bdbe",
-  "artifact_size": 823800,
-  "entry_count": 102972,
-  "parsed_domains": 102972,
+  "artifact_sha256": "14f1b7c3200836d2f914698a1b3a0424f01025b1b883481f5888ea1e329767f2",
+  "artifact_size": 817952,
+  "entry_count": 102241,
+  "parsed_domains": 102241,
   "schema_version": 1,
   "source_name": "badmojr/1Hosts Lite",
-  "source_revision": "273a6bcdcc3585bc47f1ebb6823db05ec5b7b409",
-  "source_date": "2026-08-23",
-  "source_sha256": "a3e143b2fcddd38fa5a9095548d176391b1cc791135b4248b3d1c9ebaa253634",
-  "source_size": 2055757,
-  "unique_domains": 102972
+  "source_revision": "7a4588e87bcf7e86e0b8169d391b8422bd3c5d36",
+  "source_date": "2026-09-03",
+  "source_sha256": "6d6e4a087e501696b2996b888fd220590335b6bfc2ee375046abe74b95b45d9f",
+  "source_size": 2041076,
+  "unique_domains": 102241
 }

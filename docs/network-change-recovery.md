@@ -1,50 +1,39 @@
-# 網路變更復原的能力邊界
+# 底層網路狀態與恢復
 
-DNS Shield 以兩種被動 callback 監看網路：`INTERNET + NOT_VPN` 候選網路，以及 App 的預設網路。API 31 以上另用 `registerBestMatchingNetworkCallback` 取得最佳非 VPN 網路的 identity。這些 callback 不會要求系統喚醒或維持額外網路。
+DNS Shield 被動觀察 Android 網路 callback，不使用 `requestNetwork` 要求或維持額外網路。候選網路可用，不等於系統已選它作為 VPN 底層路徑。
 
-## API 24–27
+## 現行行為
 
-`registerDefaultNetworkCallback` 追蹤 App 的預設網路；官方文件指出它可能是 VPN 這類虛擬網路。[Android 7.1.2 AOSP 的 `Vpn.updateCapabilities`](https://android.googlesource.com/platform/frameworks/base/+/adbf1d0/services/core/java/com/android/server/connectivity/Vpn.java) 會從明確設定的 `underlyingNetworks` 複製 transport。未指定底層網路時，VPN capabilities 只標示 `TRANSPORT_VPN`。DNS Shield 沒有呼叫 `setUnderlyingNetworks`，因此不能依賴該 callback 得知實際 Wi-Fi 或行動網路。
+- `UnderlyingNetworkStateReducer` 區分候選網路與選用路徑。已知選用路徑未變時，其他候選網路的變動不會觸發 DNS 狀態失效。
+- 選用路徑或能力改變時，以 network generation 保護快取、等待中的查詢與 DoH 狀態；尚未提交的舊回應不得沿用新狀態。
+- 無法唯一辨識底層路徑時回報 `UNKNOWN`，不把「尚未確認」當作已離線或已連線。實際候選網路改變仍保守處理 DNS 狀態失效。
+- callback 註冊 token 與 generation 限制舊 callback／debounce 工作；延後工作讀取最新 snapshot。
+- 網路變化保留使用者的解析器與加密模式設定。VPN 生命週期與底層網路狀態分開；網路恢復後繼續處理 DNS。
 
-`getNetworkInfo(TYPE_VPN)` 也不是替代訊號：Android 7.1.2 的 [ConnectivityService](https://android.googlesource.com/platform/frameworks/base/+/android-7.1.2_r36/services/core/java/com/android/server/ConnectivityService.java) 只有在 VPN 明確提供 underlying network 時，才嘗試回傳其中一個網路的 `NetworkInfo`；未指定時回傳的是 VPN 網路狀態。這個舊 API 也不提供可供 callback 關聯的 `Network` identity。
+## 畫面狀態
 
-因此，API 24–27 可以觀察各候選網路的連線狀態，但當 Wi-Fi 與行動網路都持續在線時，沒有找到受支援的被動公開 API 可判斷系統把 VPN socket 的預設路徑切到哪一個。兩個候選 transport 相同時，較新版本以 transport 對應 identity 也同樣有歧義。`requestNetwork` 不是合適的替代方式，因為它會要求網路滿足條件，可能喚醒或維持該網路。
+服務透過唯讀 `underlyingNetworkConnectivityFlow` 發布 reducer 狀態，ViewModel 將它接入畫面。防護為 `RUNNING` 時使用下列標籤；啟動、停止或關閉狀態仍以 VPN 生命週期為準。
 
-## 驗收狀態
+| 網路狀態 | 畫面標籤 |
+| --- | --- |
+| `UNKNOWN` | 確認網路中 |
+| `OFFLINE` | 等待網路 |
+| `CONNECTING` | 確認網路連線中 |
+| `CAPTIVE_PORTAL` | 網路需要登入 |
+| `ONLINE` | DNS 防護中 |
 
-Issue #42 維持 **In Progress**，直到實機驗收記錄 Wi-Fi／行動網路切換、飛航模式與 captive portal 的結果，並確認 API 24–27 的已知限制可接受。`verify.ps1` 不會執行這些實機測試。
+較舊 Android 的 VPN callback 可能只提供 transport，無法唯一關聯底層 `Network`；多個相同 transport 的候選網路也會造成歧義。因此關閉 Wi-Fi 不一定能由服務證明 `OFFLINE`，也可能是 `UNKNOWN`。
 
-## 2026-09-29 D06／D11 整合與 Android 10 Wi-Fi 實測
+## 驗證方式與界線
 
-既有 D09 工作樹已整合 D06 主線。保留 network generation 對快取、DoH 退避、舊查詢和明文 fallback 的防護；UDP／TCP 回應沿用 D11 的鎖內狀態檢查及不可變提交、鎖外 TUN 寫入。本地封鎖 NXDOMAIN 也走同一狀態提交器，避免政策或網路變更後傳出尚未提交的舊封鎖回應。完整 `verify.ps1` 通過：29 Python、234 JVM／45 suites（0 failures／errors）、assets、lint 與 APK 建置。
+日常建置／回歸使用根目錄的 `verify.ps1`，各 scope 見[開發指南](development.md)。它不會切換實機網路。
 
-ASUS_Z01RD（Android 10，USB）在僅有 IPv4 Wi-Fi 的環境執行 `D09WifiRecoveryDeviceTest` 1/1：關閉 Wi-Fi 後服務記錄「目前沒有可用網路」，重新啟用後記錄 validated 非 VPN 網路已就緒；觀測恢復耗時 2374 ms、期間失敗 DNS 查詢 0 筆，隨後 `example.com` 經真實 TUN 查詢成功。測試結束確認 Wi-Fi 已恢復啟用、VPN 已停止。原始輸出位於本工作樹 ignored `captures/d09-wifi-recovery-device.txt` 與 `captures/d09-wifi-recovery-logcat.txt`。
+`D09WifiRecoveryDeviceTest` 的 Wi-Fi 測試先等待初始 callback，確認沒有其他非 VPN 底層網路，再驗證：
 
-整合版另有 `.d04test` 診斷 UI／TCP/TUN 5/5、`.d08test` TLS strict／fallback 與 UDP→TCP 5/5；初次執行時查詢落在 VPN 啟動後約 500 ms 的初始網路 callback debounce 視窗，可能合法回 SERVFAIL，測試已待初始網路狀態穩定再驗證穩態行為。這不代表 Wi-Fi↔行動網路、captive portal、飛航模式或 API 24–27 實機矩陣已完成；裝置目前沒有行動數據或其他測試網路，Issue #42 與 PR #59 保持 In Progress／Draft。
+1. 已為 `ONLINE` 的防護在關閉 Wi-Fi 後產生新的 unavailable 紀錄，服務與 ViewModel 都離開 `ONLINE`，VPN 維持 `RUNNING`。
+2. Wi-Fi 恢復後回到 `ONLINE`，並經實際 TUN 收到符合查詢的成功 DNS 回應。
+3. 先離線啟動防護，再開 Wi-Fi 時，同樣能恢復 DNS。
 
-## Android 10 repeated Wi-Fi and airplane recovery (2026-10-02)
+這些案例不代表已完成所有 Android／廠牌、行動數據交接、真實 captive portal、IPv6-only／NAT64 或長時間耗電驗證。畫面注入狀態的測試，也不等同於實際特殊網路測試。
 
-Candidate `88f075c` plus the new isolated harness passed `D09WifiRecoveryDeviceTest#repeatedWifiAndAirplaneRecoveryRestoreDns` 1/1 in 18.742 seconds on ASUS_Z01RD / API 29. Three real Wi-Fi off/on cycles and one airplane-plus-Wi-Fi-off → airplane-off-plus-Wi-Fi-on cycle each observed a new recovery log/generation and a valid TUN DNS response with its own transaction ID. The final recovery used generation 22 and took 2473 ms, with zero failed DNS queries during that recovery. This checks actual Wi-Fi recovery, not cellular handoff or per-response proof of generation fencing.
-
-The first harness version passed all three Wi-Fi cycles but timed out after enabling airplane mode because this handset legitimately kept Wi-Fi connected. The final version explicitly disables Wi-Fi while in airplane mode and enables it after leaving airplane mode. Preserve the initial output and logcat as a test-precondition failure, not a product failure or passing airplane test. Both versions restore original airplane/Wi-Fi settings in finally; device readback was airplane=0, Wi-Fi=1.
-
-Raw ignored evidence: `captures/d09-android10-20261001-repeat-flight{,-final}.txt` and corresponding `-logcat.txt`; final `verify.ps1`: `captures/d09-repeat-flight-final-verify.log`. The existing single-outage test remains available. Integrated TLS strict/fallback and UDP→upstream TCP device regression also passed 5/5 in 107.605 seconds (`captures/d09-android10-20261001-strict-tcp.txt`). No production package was replaced.
-
-The 2026-10-04 issue policy supersedes historical full-matrix completion gates: special networks/platform matrices are deferred in #73. D09 still needs #68 candidate-versus-effective-underlay correction, callback regressions, and common-version integration #72. Neither these short radio tests nor the deferred policy closes those code requirements.
-
-## R05 effective route and candidate metadata (2026-10-05)
-
-The reducer now separates candidate availability from the selected non-VPN route. Known-selected nonselected candidate changes do not advance DNS generation, clear answer cache, cancel leaders, or reset DoH clients. Selected-route capability/identity changes fence DNS state. When the effective selection cannot be established, actual candidate changes conservatively fence state and report UNKNOWN; this does not claim a proven route change or offline state. A metadata-only notification cannot cancel a pending route debounce; the route job reads the latest snapshot and releases pending state only for its live callback token/generation. Existing blocked NXDOMAIN/policy-identity and ALLOW fences are retained.
-
-Focused reducer/callback/debounce tests: 16/16. Full verify passed before and after the device harness update (`captures/r05-effective-route-final-verify.log`, `captures/r05-unknown-harness-final-verify.log`). Existing allNetworks deprecation remains; no new warnings were observed.
-
-Android 10 ASUS_Z01RD / API 29 / serial JCAZB7604377HFP: repeatedWifiAndAirplaneRecoveryRestoreDns passed 1/1 in 19.031 seconds, using isolated .d04test app SHA256 306000F3F961CAFDEFB46C4ED88D83FED6052A8780996B756438EBEADA73683A and final test APK A46EF6F4724815889C53EBCF2B77F9F465DDECECE6D4908AD13A9F48CB426728. Three actual Wi-Fi off/on cycles and airplane-plus-Wi-Fi-off / airplane-off-plus-Wi-Fi-on each required new recovery generation and valid TUN DNS. Recovery generations were 7/12/17/22, durations 2620/2309/2312/2429 ms; background DNS failures during these outages were 24/0/4/0, so this is not a zero-loss claim. Wi-Fi=1 and airplane=0 restored.
-
-The first R05 device run timed out waiting for the old OFFLINE log, while the intended unknown-underlay policy reported UNKNOWN after ConnectivityManager confirmed Wi-Fi was unavailable. Preserve `captures/r05-android10-repeat-flight.txt` and logcat as negative evidence. The final harness accepts a fresh OFFLINE or UNKNOWN status only after external Wi-Fi unavailability, retaining generation and DNS response assertions. Final evidence: `captures/r05-android10-repeat-flight-unknown-final.txt` and corresponding logcat. Build invocation without -PandroidTestBuildType initially lacked the instrumentation task; the documented variant invocation passed (`r05-device-build-with-variant.log`).
-
-R05 remains subject to #72 common-version strict/TCP/policy/device acceptance. Unavailable cellular/captive-portal environments remain #73; neither skipped environment nor this Wi-Fi slice is reported as those tests passing.
-
-
-## 2026-10-06–07 真實 Wi-Fi／行動數據雙向驗收
-
-與 main `1a91800` 相同產品 source 已在 ASUS_AI2302／Android15完成三輪持續 VPN 的雙向切換、fresh DoH A／AAAA與實際連線；同PID／TUN不重啟。gated有效舊回應及 strict前後clientreset／零明文各兩方向通過。strict案例不宣稱TLS請求在整個換網期間持續pending。完整範圍、命令、hash、負面前提與清理見 [R10實機驗收](r10-cellular-handoff-validation.md)。本段取代先前「cellular未驗收」狀態；#42維持限定核心Done，#73其餘四項仍延期。
+歷次環境、量測、失敗原因與當時待驗項目保存在[網路恢復歷史紀錄](archive/network-change-recovery.md)；整體驗收證據由[文件索引](README.md)連入。

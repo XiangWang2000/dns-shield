@@ -17,10 +17,11 @@ class VerifyScopeTest(unittest.TestCase):
             root = Path(directory)
             shutil.copyfile(ROOT / "verify.ps1", root / "verify.ps1")
             # Syntax-only inputs and assets; python is stubbed to prevent recursion.
-            for path in ("prepare-active-blocklist-production.ps1", "install-active-blocklist-asset.ps1",
-                         "benchmark-production-blocklist-android.ps1", "prepare-public-suffix-production.ps1",
-                         "install-public-suffix-asset.ps1", "benchmark-runtime-domain-policy-android.ps1",
-                         "tools/d14-device-test.ps1", "tools/d04-device-test.ps1", "release.ps1",
+            for path in ("tools/prepare-active-blocklist-production.ps1", "tools/install-active-blocklist-asset.ps1",
+                         "tools/benchmark-production-blocklist-android.ps1", "tools/benchmark-public-suffix-android.ps1",
+                         "tools/benchmark-public-suffix.ps1", "tools/prepare-public-suffix-production.ps1",
+                         "tools/install-public-suffix-asset.ps1", "tools/benchmark-runtime-domain-policy-android.ps1",
+                         "tools/d14-device-test.ps1", "tools/d04-device-test.ps1", "tools/release.ps1", "tools/setup-release-signing.ps1",
                          "app/src/main/assets/public_suffix.bin", "app/src/main/assets/active.bin",
                          "jdk/bin/java.exe" if os.name == "nt" else "jdk/bin/java"):
                 target = root / path

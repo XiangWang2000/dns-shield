@@ -3,70 +3,72 @@ package io.github.xiangwang2000.dnsshield
 import android.app.Activity
 import android.net.VpnService
 import android.os.Bundle
-import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
-import androidx.compose.animation.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
+import io.github.xiangwang2000.dnsshield.blocking.DomainRuleAction
+import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverStatus
+import io.github.xiangwang2000.dnsshield.blocking.RuleBlocklistSource
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.DnsServer
-import io.github.xiangwang2000.dnsshield.service.DnsDiagnosticsSnapshot
 import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
+import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
+import io.github.xiangwang2000.dnsshield.service.UnderlyingNetworkConnectivity
+import io.github.xiangwang2000.dnsshield.service.DnsDiagnosticsSnapshot
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
 import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
-import io.github.xiangwang2000.dnsshield.service.DnsDecision
-import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
-import io.github.xiangwang2000.dnsshield.service.DnsDecisionReason
-import io.github.xiangwang2000.dnsshield.blocking.DomainRuleAction
-import io.github.xiangwang2000.dnsshield.blocking.DomainNameNormalizer
+import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
+import io.github.xiangwang2000.dnsshield.service.isIpv4Literal
+import io.github.xiangwang2000.dnsshield.ui.DomainRulesTab
+import io.github.xiangwang2000.dnsshield.ui.ExemptAppsTab
+import io.github.xiangwang2000.dnsshield.ui.LogsTab
 import io.github.xiangwang2000.dnsshield.ui.theme.*
-import io.github.xiangwang2000.dnsshield.viewmodel.AppInfo
 import io.github.xiangwang2000.dnsshield.viewmodel.DomainRuleUndoToken
 import io.github.xiangwang2000.dnsshield.viewmodel.DnsShieldUiState
 import io.github.xiangwang2000.dnsshield.viewmodel.DnsVpnViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -82,7 +84,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
         setContent {
             MyApplicationTheme {
                 Scaffold(
@@ -128,7 +133,7 @@ fun DnsShieldDashboard(
                 // Permission granted, safely trigger VPN toggle action
                 viewModel.toggleVpn(context)
             } else {
-                Toast.makeText(context, "需要 VPN 權限才能啟動安全 DNS 防護", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "同意 Android 的 VPN 連線要求後，才能開啟 DNS 防護。", Toast.LENGTH_SHORT).show()
             }
         }
     )
@@ -150,7 +155,7 @@ fun DnsShieldDashboard(
                     }
                 } catch (e: Exception) {
                     android.util.Log.e("MainActivity", "Failed to prepare/launch VPN service", e)
-                    Toast.makeText(context, "系統 VPN 核心不可用：${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "無法開啟 VPN，請稍後重試。${e.localizedMessage.orEmpty()}", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -181,11 +186,13 @@ fun DnsShieldDashboard(
         onClearLogs = { viewModel.clearVpnLogs() },
         onRestartVpn = { viewModel.restartVpn(context) },
         onLoadAppsIfNeeded = { viewModel.refreshInstalledAppsIfNeeded() },
+        onRetryLoadApps = { viewModel.refreshInstalledApps() },
         onDomainRuleSearchChange = viewModel::setDomainRuleSearchQuery,
         onSaveDomainRule = viewModel::saveDomainRule,
         onDeleteDomainRule = viewModel::deleteDomainRule,
         onAllowBlockedDomain = viewModel::allowBlockedDomain,
         onUndoDomainRule = viewModel::undoDomainRule,
+        onDismissResolverNotice = viewModel::dismissResolverNotice,
         modifier = modifier
     )
 }
@@ -195,7 +202,7 @@ fun DnsShieldScreen(
     uiState: DnsShieldUiState,
     onToggleVpn: () -> Unit,
     onSelectDns: (Int) -> Unit,
-    onAddCustomDns: (String, String, String?, Boolean, String?, String?, String?, String?) -> Unit,
+    onAddCustomDns: suspend (String, String, String?, Boolean, String?, String?, String?, String?) -> String?,
     onDeleteDns: (DnsServer) -> Unit,
     onSetPlaintextFallback: (DnsServer, Boolean) -> Unit,
     onSearchChange: (String) -> Unit,
@@ -210,157 +217,134 @@ fun DnsShieldScreen(
     onDeleteDomainRule: suspend (UserDomainRuleEntity) -> Unit,
     onAllowBlockedDomain: suspend (String) -> DomainRuleUndoToken,
     onUndoDomainRule: suspend (DomainRuleUndoToken) -> Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onDismissResolverNotice: () -> Unit = {},
+    onRetryLoadApps: () -> Unit = {}
 ) {
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 控制中心, 1: 排除名單, 2: 網域規則, 3: 運作日誌
-    var showAddDnsDialog by remember { mutableStateOf(false) }
-
-    Box(
-        modifier = modifier
-            .fillMaxSize()
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var showAddDnsDialog by rememberSaveable { mutableStateOf(false) }
+    BoxWithConstraints(
+        modifier = modifier.fillMaxSize().imePadding()
             .background(MaterialTheme.colorScheme.background)
+            .semantics { testTagsAsResourceId = true }
     ) {
-        Column(
-            modifier = Modifier.fillMaxSize()
-        ) {
-            // App Header (Ultra Compact Screen Space Optimization)
-            AppHeader(isRunning = uiState.isRunning)
-
-            // Animated Power / Status Banner
-            ProtectionStatusCard(
-                lifecycleState = uiState.vpnLifecycleState,
-                queryCount = uiState.queryCount,
-                blockedAds = uiState.blockedAds,
-                savedBytesText = formatBytes(uiState.savedBytes),
-                activeDns = uiState.activeDns,
-                onToggleVpn = onToggleVpn
-            )
-
-            // Navigation Tabs
-            DashboardTabs(
-                selectedTab = selectedTab,
-                onTabSelected = { selectedTab = it }
-            )
-
-            // Tab Content Switcher
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                when (selectedTab) {
-                    0 -> {
-                        ControlCenterTab(
-                            dnsServers = uiState.dnsServers,
-                            activeDnsServer = uiState.activeDnsServer,
-                            diagnostics = uiState.diagnostics,
-                            dnsTransportStatus = uiState.dnsTransportStatus,
-                            rulePolicyStatus = uiState.rulePolicyStatus,
+        val compactHeight = maxHeight < 480.dp
+        val useRail = maxWidth >= 600.dp || (compactHeight && maxWidth >= 480.dp)
+        Row(Modifier.fillMaxSize()) {
+            if (useRail) DashboardTabs(selectedTab, { selectedTab = it }, useRail = true, compactHeight = compactHeight)
+            Column(Modifier.weight(1f)) {
+                AppHeader(uiState.vpnLifecycleState, uiState.networkConnectivity)
+                Box(Modifier.weight(1f).widthIn(max = 840.dp).fillMaxWidth().align(Alignment.CenterHorizontally)) {
+                    when (selectedTab) {
+                        0 -> ControlCenterTab(
+                            uiState = uiState,
+                            onToggleVpn = onToggleVpn,
+                            onShowLogs = { selectedTab = 3 },
                             onSelectDns = onSelectDns,
                             onAddDnsClicked = { showAddDnsDialog = true },
                             onDeleteDns = onDeleteDns,
-                            onSetPlaintextFallback = onSetPlaintextFallback
+                            onSetPlaintextFallback = onSetPlaintextFallback,
+                            onDismissResolverNotice = onDismissResolverNotice
                         )
-                    }
-                    1 -> {
-                        LaunchedEffect(Unit) {
-                            onLoadAppsIfNeeded()
+                        1 -> {
+                            LaunchedEffect(Unit) { onLoadAppsIfNeeded() }
+                            ExemptAppsTab(
+                                appSearchQuery = uiState.appSearchQuery,
+                                onSearchChange = onSearchChange,
+                                filteredApps = uiState.filteredApps,
+                                isLoading = uiState.isLoadingApps,
+                                appLoadError = uiState.appLoadError,
+                                onRetryLoadApps = onRetryLoadApps,
+                                onToggleBypass = onToggleBypass,
+                                infoCardVisible = uiState.infoCardVisible,
+                                onInfoCardVisibleChange = { visible ->
+                                    if (visible) onInfoCardRestore() else onInfoCardDismiss()
+                                }
+                            )
                         }
-                        ExemptAppsTab(
-                            appSearchQuery = uiState.appSearchQuery,
-                            onSearchChange = onSearchChange,
-                            filteredApps = uiState.filteredApps,
-                            isLoading = uiState.isLoadingApps,
-                            onToggleBypass = onToggleBypass,
-                            infoCardVisible = uiState.infoCardVisible,
-                            onInfoCardVisibleChange = { visible ->
-                                if (visible) onInfoCardRestore() else onInfoCardDismiss()
-                            }
-                        )
-                    }
-                    2 -> {
-                        DomainRulesTab(
+                        2 -> DomainRulesTab(
                             rules = uiState.userDomainRules,
                             searchQuery = uiState.domainRuleSearchQuery,
                             onSearchChange = onDomainRuleSearchChange,
                             onSaveRule = onSaveDomainRule,
                             onDeleteRule = onDeleteDomainRule
                         )
-                    }
-                    3 -> {
-                        LogsTab(
+                        3 -> LogsTab(
                             logs = uiState.logs,
                             blockedEvents = uiState.blockedEvents,
+                            userDomainRules = uiState.userDomainRules,
                             onClearLogs = onClearLogs,
                             onAllowBlockedDomain = onAllowBlockedDomain,
                             onUndoDomainRule = onUndoDomainRule
                         )
                     }
                 }
+                // Reserve real space so pending changes cannot cover list items.
+                ApplyRestartBanner(
+                    visible = uiState.vpnSettingsModified,
+                    onRestart = onRestartVpn,
+                    enabled = uiState.vpnLifecycleState == VpnLifecycleState.RUNNING,
+                    modifier = Modifier.widthIn(max = 840.dp).align(Alignment.CenterHorizontally)
+                )
+                if (!useRail) DashboardTabs(selectedTab, { selectedTab = it })
             }
         }
-
-        // Floating Apply-Restart Banner
-        ApplyRestartBanner(
-            visible = uiState.vpnSettingsModified,
-            onRestart = onRestartVpn,
-            modifier = Modifier.align(Alignment.BottomCenter)
-        )
-
-        // Modal Custom Upstream DNS Config Dialogue
-        if (showAddDnsDialog) {
-            AddDnsDialog(
-                onDismiss = { showAddDnsDialog = false },
-                onConfirm = { name, pri, sec, allowPlaintext, primaryDoh, primaryBootstrap, secondaryDoh, secondaryBootstrap ->
-                    onAddCustomDns(
-                        name,
-                        pri,
-                        sec,
-                        allowPlaintext,
-                        primaryDoh,
-                        primaryBootstrap,
-                        secondaryDoh,
-                        secondaryBootstrap
-                    )
-                    showAddDnsDialog = false
-                }
-            )
-        }
+    }
+    if (showAddDnsDialog) {
+        AddDnsDialog(onDismiss = { showAddDnsDialog = false }, onConfirm = onAddCustomDns)
     }
 }
 
+private fun protectionStatusLabel(
+    state: VpnLifecycleState,
+    networkConnectivity: UnderlyingNetworkConnectivity
+): String = when (state) {
+    VpnLifecycleState.STOPPED -> "防護已關閉"
+    VpnLifecycleState.STARTING -> "正在啟動防護…"
+    VpnLifecycleState.RUNNING -> when (networkConnectivity) {
+        UnderlyingNetworkConnectivity.OFFLINE -> "等待網路"
+        UnderlyingNetworkConnectivity.UNKNOWN -> "確認網路中"
+        UnderlyingNetworkConnectivity.CONNECTING -> "確認網路連線中"
+        UnderlyingNetworkConnectivity.CAPTIVE_PORTAL -> "網路需要登入"
+        UnderlyingNetworkConnectivity.ONLINE -> "DNS 防護中"
+    }
+    VpnLifecycleState.STOPPING -> "正在停止防護…"
+    VpnLifecycleState.FAILED -> "防護發生錯誤"
+}
+
 @Composable
-fun AppHeader(isRunning: Boolean) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
+private fun protectionStatusColor(
+    state: VpnLifecycleState,
+    networkConnectivity: UnderlyingNetworkConnectivity
+): Color = when (state) {
+    VpnLifecycleState.RUNNING -> if (networkConnectivity == UnderlyingNetworkConnectivity.ONLINE) {
+        MaterialTheme.colorScheme.primary
+    } else MaterialTheme.colorScheme.tertiary
+    VpnLifecycleState.FAILED -> MaterialTheme.colorScheme.error
+    VpnLifecycleState.STARTING, VpnLifecycleState.STOPPING -> MaterialTheme.colorScheme.secondary
+    VpnLifecycleState.STOPPED -> MaterialTheme.colorScheme.onSurfaceVariant
+}
+
+@Composable
+fun AppHeader(
+    lifecycleState: VpnLifecycleState,
+    networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN
+) {
+    Row(
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = Icons.Default.Shield,
-                contentDescription = "App Logo",
-                tint = if (isRunning) CyberEmerald else CyberCrimson,
-                modifier = Modifier.size(22.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Column {
-                Text(
-                    text = "DNS Shield",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = ColorTextPrimary
-                )
-                Text(
-                    text = "本機 DNS 層級安全與廣告阻擋 (僅 IPv4 UDP)",
-                    fontSize = 10.sp,
-                    color = ColorTextSecondary
-                )
-            }
-        }
+        Icon(Icons.Default.Shield, contentDescription = null, tint = protectionStatusColor(lifecycleState, networkConnectivity))
+        Text("DNS Shield", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            protectionStatusLabel(lifecycleState, networkConnectivity),
+            modifier = Modifier.testTag("protection_header_status").semantics { liveRegion = LiveRegionMode.Polite },
+            style = MaterialTheme.typography.labelMedium,
+            color = protectionStatusColor(lifecycleState, networkConnectivity)
+        )
     }
 }
 
@@ -369,157 +353,86 @@ fun ProtectionStatusCard(
     lifecycleState: VpnLifecycleState,
     queryCount: Long,
     blockedAds: Long,
-    savedBytesText: String,
-    activeDns: String,
-    onToggleVpn: () -> Unit
+    onToggleVpn: () -> Unit,
+    onShowLogs: () -> Unit,
+    networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN
 ) {
-    val isRunning = lifecycleState.isRunning
-    val statusLabel = when (lifecycleState) {
-        VpnLifecycleState.STOPPED -> "防護已關閉"
-        VpnLifecycleState.STARTING -> "正在啟動防護…"
-        VpnLifecycleState.RUNNING -> "防護中"
-        VpnLifecycleState.STOPPING -> "正在停止防護…"
-        VpnLifecycleState.FAILED -> "防護異常，點按可重試"
-    }
     val actionLabel = when (lifecycleState) {
-        VpnLifecycleState.STOPPED -> "啟動防護"
+        VpnLifecycleState.STOPPED -> "開啟防護"
         VpnLifecycleState.STARTING -> "取消啟動"
         VpnLifecycleState.RUNNING -> "關閉防護"
-        VpnLifecycleState.STOPPING -> "正在停止防護"
-        VpnLifecycleState.FAILED -> "重新啟動防護"
+        VpnLifecycleState.STOPPING -> "正在停止…"
+        VpnLifecycleState.FAILED -> "重試開啟防護"
     }
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(
-                Brush.horizontalGradient(
-                    colors = if (isRunning) {
-                        listOf(CyberEmerald.copy(alpha = 0.10f), DarkSurface)
-                    } else {
-                        listOf(CyberCrimson.copy(alpha = 0.08f), DarkSurface)
-                    }
-                )
-            )
-            .border(
-                width = 1.dp,
-                color = if (isRunning) CyberEmerald.copy(alpha = 0.20f) else ColorBorder,
-                shape = RoundedCornerShape(12.dp)
-            )
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(20.dp),
+        modifier = Modifier.fillMaxWidth().testTag("protection_status_card")
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // Left Action Column: Power Button
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.width(84.dp)
-            ) {
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(64.dp)
-                        .clip(CircleShape)
-                        .background(
-                            Brush.radialGradient(
-                                colors = if (isRunning) {
-                                    listOf(CyberEmerald.copy(alpha = 0.22f), Color.Transparent)
-                                } else {
-                                    listOf(CyberCrimson.copy(alpha = 0.18f), Color.Transparent)
-                                }
-                            )
-                        )
-                        .clickable(
-                            enabled = lifecycleState != VpnLifecycleState.STOPPING,
-                            onClickLabel = actionLabel
-                        ) {
-                            onToggleVpn()
-                        }
-                        .testTag("power_button")
-                ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .size(46.dp)
-                            .clip(CircleShape)
-                            .background(if (isRunning) CyberEmerald else CyberCrimson)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PowerSettingsNew,
-                            contentDescription = "Power Switch Icon",
-                            tint = ColorWhite,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(3.dp))
-
-                Text(
-                    text = statusLabel,
-                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (isRunning) CyberEmerald else ColorTextSecondary
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Icon(
+                    if (lifecycleState == VpnLifecycleState.FAILED) Icons.Default.ErrorOutline else Icons.Default.Shield,
+                    contentDescription = null, tint = protectionStatusColor(lifecycleState, networkConnectivity), modifier = Modifier.size(24.dp)
                 )
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        protectionStatusLabel(lifecycleState, networkConnectivity),
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.testTag("protection_status_label").semantics { heading() }
+                    )
+                    Text(
+                        when (lifecycleState) {
+                            VpnLifecycleState.RUNNING -> when (networkConnectivity) {
+                                UnderlyingNetworkConnectivity.OFFLINE -> "防護已啟用，等待網路連線。連線恢復後會自動繼續處理 DNS 查詢。"
+                                UnderlyingNetworkConnectivity.UNKNOWN -> "防護已啟用，正在確認目前使用的網路。"
+                                UnderlyingNetworkConnectivity.CONNECTING -> "防護已啟用，正在確認網路是否可連線。"
+                                UnderlyingNetworkConnectivity.CAPTIVE_PORTAL -> "防護已啟用，請先完成 Wi-Fi 或網路的登入。"
+                                UnderlyingNetworkConnectivity.ONLINE -> "正在處理經由本機 VPN 的系統 DNS 查詢。"
+                            }
+                            VpnLifecycleState.STARTING -> "正在建立本機 VPN 連線。"
+                            VpnLifecycleState.STOPPING -> "請稍候，正在結束 VPN 連線。"
+                            VpnLifecycleState.FAILED -> "請重試，或查看運作記錄中的錯誤原因。"
+                            VpnLifecycleState.STOPPED -> "開啟後套用 DNS 設定與網域規則。"
+                        },
+                        modifier = Modifier.testTag("protection_status_description"),
+                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
-
-            // Right Status Grid
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+            Button(
+                onClick = onToggleVpn,
+                enabled = lifecycleState != VpnLifecycleState.STOPPING,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("power_button"),
+                colors = if (lifecycleState == VpnLifecycleState.RUNNING) {
+                    ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = MaterialTheme.colorScheme.onSurface
+                    )
+                } else ButtonDefaults.buttonColors()
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    StatCard(
-                        title = "DNS 請求",
-                        value = "$queryCount 次",
-                        icon = Icons.AutoMirrored.Filled.AltRoute,
-                        iconTint = CyberSky,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("stat_query_count")
-                    )
-                    StatCard(
-                        title = "當前 DNS",
-                        value = activeDns,
-                        icon = Icons.Default.Dns,
-                        iconTint = CyberEmeraldGlow,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("stat_active_dns")
-                    )
+                if (lifecycleState == VpnLifecycleState.STOPPING) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Icon(Icons.Default.PowerSettingsNew, contentDescription = null, modifier = Modifier.size(20.dp))
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    StatCard(
-                        title = "DNS 廣告攔截",
-                        value = "$blockedAds 次",
-                        icon = Icons.Default.Shield,
-                        iconTint = CyberEmerald,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("stat_blocked_ads")
-                    )
-                    StatCard(
-                        title = "預估節省流量",
-                        value = savedBytesText,
-                        icon = Icons.Default.OfflineBolt,
-                        iconTint = CyberAmber,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("stat_saved_traffic")
-                    )
-                }
+                Spacer(Modifier.width(8.dp))
+                Text(actionLabel)
             }
+            if (lifecycleState == VpnLifecycleState.FAILED) {
+                TextButton(onClick = onShowLogs, modifier = Modifier.fillMaxWidth()) { Text("查看運作記錄") }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                StatCard("DNS 請求", queryCount.toString(), Modifier.weight(1f).testTag("stat_query_count"))
+                StatCard("封鎖請求", blockedAds.toString(), Modifier.weight(1f).testTag("stat_blocked_ads"))
+            }
+            Text(
+                "累計次數，App 程序結束後重設。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("statistics_scope")
+            )
         }
     }
 }
@@ -527,1361 +440,475 @@ fun ProtectionStatusCard(
 @Composable
 fun DashboardTabs(
     selectedTab: Int,
-    onTabSelected: (Int) -> Unit
+    onTabSelected: (Int) -> Unit,
+    useRail: Boolean = false,
+    compactHeight: Boolean = false
 ) {
-    SecondaryTabRow(
-        selectedTabIndex = selectedTab,
-        containerColor = MaterialTheme.colorScheme.surface,
-        contentColor = CyberEmerald,
-        indicator = {
-            TabRowDefaults.SecondaryIndicator(
-                modifier = Modifier.tabIndicatorOffset(selectedTab),
-                color = CyberEmerald
-            )
-        },
-        divider = { HorizontalDivider(color = ColorBorder) }
-    ) {
-        Tab(
-            selected = selectedTab == 0,
-            onClick = { onTabSelected(0) },
-            text = { Text("控制中心", fontSize = 14.sp) },
-            icon = { Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(20.dp)) },
-            selectedContentColor = CyberEmerald,
-            unselectedContentColor = ColorTextSecondary,
-            modifier = Modifier.testTag("tab_control")
-        )
-        Tab(
-            selected = selectedTab == 1,
-            onClick = { onTabSelected(1) },
-            text = { Text("排除名單", fontSize = 14.sp) },
-            icon = { Icon(Icons.Default.AppBlocking, contentDescription = null, modifier = Modifier.size(20.dp)) },
-            selectedContentColor = CyberEmerald,
-            unselectedContentColor = ColorTextSecondary,
-            modifier = Modifier.testTag("tab_exempt")
-        )
-        Tab(
-            selected = selectedTab == 2,
-            onClick = { onTabSelected(2) },
-            text = { Text("網域規則", fontSize = 14.sp) },
-            icon = { Icon(Icons.Default.Dns, contentDescription = null, modifier = Modifier.size(20.dp)) },
-            selectedContentColor = CyberEmerald,
-            unselectedContentColor = ColorTextSecondary,
-            modifier = Modifier.testTag("tab_domain_rules")
-        )
-        Tab(
-            selected = selectedTab == 3,
-            onClick = { onTabSelected(3) },
-            text = { Text("運作日誌", fontSize = 14.sp) },
-            icon = { Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(20.dp)) },
-            selectedContentColor = CyberEmerald,
-            unselectedContentColor = ColorTextSecondary,
-            modifier = Modifier.testTag("tab_logs")
-        )
-    }
-}
-
-@Composable
-fun ApplyRestartBanner(
-    visible: Boolean,
-    onRestart: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    AnimatedVisibility(
-        visible = visible,
-        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-        modifier = modifier.padding(16.dp)
-    ) {
-        Card(
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = CyberAmber,
-                contentColor = Color.Black
-            ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("apply_restart_banner")
+    val labels = listOf("防護", "排除 App", "網域規則", "運作記錄")
+    val icons = listOf(Icons.Default.Shield, Icons.Default.AppBlocking, Icons.Default.Dns, Icons.Default.History)
+    val tags = listOf("tab_control", "tab_exempt", "tab_domain_rules", "tab_logs")
+    val navigationLabels = if (LocalDensity.current.fontScale >= 1.6f) {
+        listOf("防護", "排除\nApp", "網域\n規則", "運作\n記錄")
+    } else labels
+    if (useRail) {
+        NavigationRail(
+            modifier = Modifier.fillMaxHeight().verticalScroll(rememberScrollState()),
+            containerColor = MaterialTheme.colorScheme.surface,
+            windowInsets = WindowInsets(0)
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(32.dp)
-                        .background(Color.Black.copy(alpha = 0.15f), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Sync,
-                        contentDescription = "Sync Icon",
-                        tint = Color.Black,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "排除設定已變更",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.Black
-                    )
-                    Text(
-                        text = "請重啟 VPN 服務以套用新名單。",
-                        fontSize = 11.sp,
-                        color = Color.Black.copy(alpha = 0.85f)
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(
-                    onClick = onRestart,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.Black,
-                        contentColor = CyberAmber
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                    modifier = Modifier
-                        .height(34.dp)
-                        .testTag("apply_restart_button")
-                ) {
-                    Text("立即重啟", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
+            Spacer(Modifier.height(12.dp))
+            labels.forEachIndexed { index, label ->
+                NavigationRailItem(
+                    selected = selectedTab == index, onClick = { onTabSelected(index) },
+                    icon = { Icon(icons[index], contentDescription = if (compactHeight) label else null) },
+                    label = if (compactHeight) null else { { Text(label, style = MaterialTheme.typography.labelMedium) } },
+                    modifier = Modifier.testTag(tags[index])
+                )
+            }
+        }
+    } else {
+        NavigationBar(containerColor = MaterialTheme.colorScheme.surface, windowInsets = WindowInsets(0)) {
+            labels.forEachIndexed { index, label ->
+                NavigationBarItem(
+                    selected = selectedTab == index, onClick = { onTabSelected(index) },
+                    icon = { Icon(icons[index], contentDescription = null) },
+                    label = { Text(navigationLabels[index], style = MaterialTheme.typography.labelMedium, textAlign = TextAlign.Center) },
+                    modifier = Modifier.testTag(tags[index])
+                )
             }
         }
     }
 }
 
 @Composable
-fun StatCard(
-    title: String,
-    value: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    iconTint: Color,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = DarkSurface
-        ),
-        modifier = modifier
-            .border(1.dp, ColorBorder, RoundedCornerShape(8.dp))
+fun ApplyRestartBanner(visible: Boolean, onRestart: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
+    if (!visible) return
+    Surface(
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+        modifier = modifier.fillMaxWidth().testTag("apply_restart_banner")
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = iconTint,
-                    modifier = Modifier.size(13.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = title,
-                    fontSize = 10.sp,
-                    color = ColorTextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+            Text("排除名單已儲存，重啟防護後生效。", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            TextButton(onClick = onRestart, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp).testTag("apply_restart_button")) {
+                Text("重啟套用", color = MaterialTheme.colorScheme.onTertiaryContainer)
             }
-            Spacer(modifier = Modifier.height(3.dp))
-            Text(
-                text = value,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                color = ColorTextPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
         }
+    }
+}
+
+@Composable
+fun StatCard(title: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier.semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     }
 }
 
 @Composable
 fun ControlCenterTab(
-    dnsServers: List<DnsServer>,
-    activeDnsServer: DnsServer?,
-    diagnostics: DnsDiagnosticsSnapshot,
-    dnsTransportStatus: String,
-    rulePolicyStatus: RulePolicyStatus,
+    uiState: DnsShieldUiState,
+    onToggleVpn: () -> Unit,
+    onShowLogs: () -> Unit,
     onSelectDns: (Int) -> Unit,
     onAddDnsClicked: () -> Unit,
     onDeleteDns: (DnsServer) -> Unit,
-    onSetPlaintextFallback: (DnsServer, Boolean) -> Unit
+    onSetPlaintextFallback: (DnsServer, Boolean) -> Unit,
+    onDismissResolverNotice: () -> Unit
 ) {
+    var deleteCandidate by remember { mutableStateOf<DnsServer?>(null) }
     LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-            .testTag("control_center_list"),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        modifier = Modifier.fillMaxSize().testTag("control_center_list"),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "選擇 Upstream 安全 DNS",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = ColorTextPrimary
-                )
-                Button(
-                    onClick = onAddDnsClicked,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = CyberEmerald
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    modifier = Modifier
-                        .height(32.dp)
-                        .testTag("add_dns_button")
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("新增 DNS", fontSize = 12.sp, color = ColorWhite)
-                }
-            }
+            ProtectionStatusCard(
+                uiState.vpnLifecycleState, uiState.queryCount, uiState.blockedAds,
+                onToggleVpn, onShowLogs, uiState.networkConnectivity
+            )
         }
-
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("dns_transport_status")
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    Text("最近一次 DNS 傳輸", fontSize = 11.sp, color = ColorTextSecondary)
-                    Text(
-                        dnsTransportStatus,
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = when {
-                            dnsTransportStatus.contains("明文") -> CyberAmber
-                            dnsTransportStatus.contains("SERVFAIL") || dnsTransportStatus.contains("不可用") -> CyberCrimson
-                            else -> CyberEmerald
-                        }
-                    )
-                    Text(
-                        "DoH 使用 HTTPS 傳輸；DNS Shield 不在本機驗證 DNSSEC。",
-                        fontSize = 10.sp,
-                        color = ColorTextSecondary
-                    )
-                }
-            }
-        }
-
-        item {
-            RuleStatusCard(rulePolicyStatus)
-        }
-
-        items(dnsServers, key = { it.id }) { server ->
-            val isActive = server.id == activeDnsServer?.id
-            Card(
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isActive) CyberEmerald.copy(alpha = 0.08f) else DarkSurface
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(
-                        width = 1.dp,
-                        color = if (isActive) CyberEmerald else ColorBorder,
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                    .clickable { onSelectDns(server.id) }
-                    .testTag("dns_server_card_${server.id}")
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(
-                        selected = isActive,
-                        onClick = { onSelectDns(server.id) },
-                        colors = RadioButtonDefaults.colors(
-                            selectedColor = CyberEmerald,
-                            unselectedColor = ColorTextSecondary
-                        )
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column(
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = server.name,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = ColorTextPrimary
-                            )
-                            if (server.isCustom) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .background(CyberSky.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text("自訂", fontSize = 10.sp, color = CyberSky, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
+        uiState.resolverNotice?.let { notice ->
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("DNS 設定提醒", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onErrorContainer)
                         Text(
-                            text = "主要 IP: ${server.primaryIp}",
-                            fontSize = 12.sp,
-                            color = ColorTextSecondary
+                            notice, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag("resolver_notice")
                         )
-                        server.secondaryIp?.let {
-                            Text(
-                                text = "次要 IP: $it",
-                                fontSize = 12.sp,
-                                color = ColorTextSecondary
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    if (server.allowPlaintextFallback) {
-                                        "加密優先 · 允許 UDP/53 降級"
-                                    } else {
-                                        "僅加密 · DoH 失敗時回覆 SERVFAIL"
-                                    },
-                                    fontSize = 11.sp,
-                                    color = if (server.allowPlaintextFallback) CyberAmber else CyberEmerald
-                                )
-                                if (server.allowPlaintextFallback) {
-                                    Text(
-                                        "既有設定升級後保留此舊版行為",
-                                        fontSize = 10.sp,
-                                        color = ColorTextSecondary
-                                    )
-                                }
-                            }
-                            Switch(
-                                checked = server.allowPlaintextFallback,
-                                onCheckedChange = { onSetPlaintextFallback(server, it) },
-                                modifier = Modifier.testTag("dns_plaintext_fallback_${server.id}")
-                            )
-                        }
+                        TextButton(onClick = onDismissResolverNotice) { Text("知道了", color = MaterialTheme.colorScheme.onErrorContainer) }
                     }
+                }
+            }
+        }
+        if (uiState.rulePolicyStatus.let {
+            it.degradationReason != null || it.reloadError != null || it.publicSuffixStatus is PublicSuffixResolverStatus.Rejected
+        }) item { RulePolicyWarning(uiState.rulePolicyStatus) }
+        item {
+            Column(Modifier.padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("DNS 解析器", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f).semantics { heading() })
+                    FilledTonalButton(onClick = onAddDnsClicked, modifier = Modifier.heightIn(min = 48.dp).testTag("add_dns_button")) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("新增")
+                    }
+                }
+                Text(
+                    if (uiState.activeDnsServer == null) "正在載入 DNS 設定…" else "已選 DNS：${uiState.activeDnsServer.name}",
+                    style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("stat_active_dns"),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (uiState.vpnLifecycleState == VpnLifecycleState.RUNNING) {
+                    Text(
+                        if (uiState.activeDns.isBlank() || uiState.activeDns == "None") "防護服務尚未回報套用的 DNS。"
+                        else "服務已套用：${uiState.activeDns}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("service_applied_dns")
+                    )
+                }
+            }
+        }
+        if (uiState.vpnLifecycleState == VpnLifecycleState.RUNNING) item {
+            Column(Modifier.fillMaxWidth().testTag("dns_transport_status"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    "最近一次上游查詢的傳輸方式",
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    uiState.dnsTransportStatus, style = MaterialTheme.typography.bodyMedium,
+                    color = when {
+                        uiState.dnsTransportStatus.contains("SERVFAIL") || uiState.dnsTransportStatus.contains("不可用") -> MaterialTheme.colorScheme.error
+                        uiState.dnsTransportStatus.contains("明文") -> MaterialTheme.colorScheme.tertiary
+                        else -> MaterialTheme.colorScheme.onSurface
+                    }
+                )
+            }
+        }
+        items(uiState.dnsServers, key = { it.id }) { server ->
+            DnsServerCard(
+                server, isActive = server.id == uiState.activeDnsServer?.id, onSelect = { onSelectDns(server.id) },
+                onSetPlaintextFallback = { onSetPlaintextFallback(server, it) }, onDelete = { deleteCandidate = server }
+            )
+        }
+        item { RuleStatusCard(uiState.rulePolicyStatus) }
+        item { DnsDiagnosticsCard(uiState.diagnostics) }
+        item {
+            DisclosureCard("防護範圍與限制", "防護經由本機 VPN 的系統 DNS 查詢。") {
+                Text("僅攔截送往本機 VPN DNS 的 IPv4 UDP／TCP 53 查詢。App 直接指定其他 DNS 位址、使用自帶的 DoH／DoT，或透過 IPv6 DNS 查詢時，都不會被攔截。一般網路流量仍走原本網路。", style = MaterialTheme.typography.bodyMedium)
+                Text("DoH 使用 HTTPS 加密；未加密備援使用 UDP/53，回應過大時可能改用 TCP/53。DNS Shield 不在本機驗證 DNSSEC，也無法只封鎖同一網域中的廣告內容。", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+    deleteCandidate?.let { server ->
+        AlertDialog(
+            onDismissRequest = { deleteCandidate = null },
+            title = { Text("刪除 DNS 設定？") },
+            text = { Text("將刪除「${server.name}」。若這是目前選用的 DNS，系統會改用另一組設定。") },
+            confirmButton = { TextButton(onClick = { deleteCandidate = null; onDeleteDns(server) }) { Text("刪除", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { deleteCandidate = null }) { Text("保留") } }
+        )
+    }
+}
 
-                    if (server.isCustom) {
-                        IconButton(
-                            onClick = { onDeleteDns(server) },
-                            modifier = Modifier.testTag("delete_dns_${server.id}")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.DeleteOutline,
-                                contentDescription = "Delete DNS Config",
-                                tint = CyberCrimson
-                            )
+@Composable
+private fun DnsServerCard(
+    server: DnsServer, isActive: Boolean, onSelect: () -> Unit,
+    onSetPlaintextFallback: (Boolean) -> Unit, onDelete: () -> Unit
+) {
+    OutlinedCard(
+        border = androidx.compose.foundation.BorderStroke(
+            if (isActive) 2.dp else 1.dp,
+            if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+        ),
+        colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth().testTag("dns_server_card_${server.id}")
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.weight(1f).selectable(selected = isActive, role = Role.RadioButton, onClick = onSelect)
+                    .padding(12.dp).testTag("select_dns_${server.id}"),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                RadioButton(selected = isActive, onClick = null)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(server.name, style = MaterialTheme.typography.titleSmall)
+                    Text(buildString { append(server.primaryIp); server.secondaryIp?.let { append(" · "); append(it) } },
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (isActive || server.isCustom) {
+                        Text(if (isActive) "已選用" else "自訂 DNS",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            if (server.isCustom) {
+                IconButton(onClick = onDelete, modifier = Modifier.testTag("delete_dns_${server.id}")) {
+                    Icon(Icons.Default.DeleteOutline, contentDescription = "刪除 ${server.name} 的 DNS 設定")
+                }
+            }
+        }
+        if (isActive) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(
+                Modifier.fillMaxWidth().toggleable(value = server.allowPlaintextFallback, role = Role.Switch, onValueChange = onSetPlaintextFallback)
+                    .padding(16.dp).testTag("dns_plaintext_fallback_${server.id}"),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("允許未加密備援", style = MaterialTheme.typography.titleSmall)
+                    Text(if (server.allowPlaintextFallback) "DoH 失敗時改用未加密 DNS。"
+                        else "僅使用加密 DNS；DoH 失敗時會回報解析錯誤。",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = server.allowPlaintextFallback, onCheckedChange = null)
+            }
+            var showEndpoints by rememberSaveable(server.id) { mutableStateOf(false) }
+            TextButton(
+                onClick = { showEndpoints = !showEndpoints },
+                modifier = Modifier.padding(horizontal = 8.dp).testTag("dns_endpoint_details_" + server.id).semantics { stateDescription = if (showEndpoints) "已展開" else "已收合" }
+            ) { Text(if (showEndpoints) "收合連線設定" else "查看連線設定") }
+            if (showEndpoints) {
+                val endpoints = listOfNotNull(
+                    DohEndpointConfiguration.endpoint(server.primaryDohUrl, server.primaryDohBootstrapIps, server.primaryIp)?.let { "主要" to it },
+                    DohEndpointConfiguration.endpoint(
+                        server.secondaryDohUrl, server.secondaryDohBootstrapIps, server.secondaryIp.orEmpty()
+                    )?.let { "備援" to it }
+                )
+                val distinctEndpoints = endpoints.distinctBy { (_, endpoint) -> endpoint.url to endpoint.bootstrapAddresses }
+                val sharesEndpoint = endpoints.size > 1 && distinctEndpoints.size == 1
+                Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (distinctEndpoints.isEmpty()) {
+                        Text(
+                            if (server.allowPlaintextFallback) "未設定 DoH，這組 DNS 會使用未加密傳輸。"
+                            else "未設定可用的 DoH，僅加密模式下查詢會失敗。",
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                    if (sharesEndpoint) {
+                        Text("主要與備援共用同一個 DoH 服務。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    distinctEndpoints.forEach { (label, endpoint) ->
+                        val endpointLabel = if (sharesEndpoint) "DoH" else "$label DoH"
+                        Text("$endpointLabel：${endpoint.url}", style = MaterialTheme.typography.bodySmall)
+                        if (endpoint.bootstrapAddresses.isNotEmpty()) {
+                            Text("連線位址：${endpoint.bootstrapAddresses.joinToString("、")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
             }
         }
+    }
+}
 
-        item {
-            DnsDiagnosticsCard(diagnostics)
+@Composable
+private fun DisclosureCard(title: String, summary: String, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Row(
+            modifier.fillMaxWidth().clickable(role = Role.Button) { expanded = !expanded }
+                .semantics { stateDescription = if (expanded) "已展開" else "已收合" }.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
+                Text(summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = null)
+        }
+        if (expanded) {
+            Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
         }
     }
 }
 
 @Composable
 private fun DnsDiagnosticsCard(diagnostics: DnsDiagnosticsSnapshot) {
-    Card(
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, ColorBorder, RoundedCornerShape(12.dp))
-            .testTag("dns_diagnostics_card")
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Text("DNS 診斷", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ColorTextPrimary)
-            Text(
-                "收到 ${diagnostics.received}｜解析 ${diagnostics.resolved}｜攔截 ${diagnostics.blocked}",
-                fontSize = 12.sp,
-                color = ColorTextPrimary
-            )
-            Text(
-                "失敗 ${diagnostics.failed}（超載 ${diagnostics.overloaded}）｜拒絕 ${diagnostics.rejected}",
-                fontSize = 12.sp,
-                color = ColorTextSecondary
-            )
-            Text(
-                "快取命中 ${diagnostics.cacheHits}｜合併同查詢 ${diagnostics.coalesced}",
-                fontSize = 12.sp,
-                color = ColorTextSecondary
-            )
-            Text(
-                "上游呼叫：DoH 已排入 OkHttp ${diagnostics.dohCallsQueued}｜UDP 已送出 ${diagnostics.udpAttempts}｜TCP DNS ${diagnostics.tcpAttempts}",
-                fontSize = 12.sp,
-                color = ColorTextSecondary
-            )
-            Text(
-                "UDP 備援路徑 ${diagnostics.fallbackAttempts}｜次要 DNS 重試 ${diagnostics.udpRetryAttempts}",
-                fontSize = 12.sp,
-                color = ColorTextSecondary
-            )
-            Text(
-                "待處理 ${diagnostics.pending}（最高 ${diagnostics.peakPending}）",
-                fontSize = 12.sp,
-                color = ColorTextSecondary
-            )
-            val latency = diagnostics.latency
-            Text(
-                text = if (latency.sampleCount == 0) {
-                    "延遲：尚無資料"
-                } else {
-                    "最近 ${latency.sampleCount} 筆延遲：P50 ${latency.p50Millis} ms｜P95 ${latency.p95Millis} ms"
-                },
-                fontSize = 12.sp,
-                color = ColorTextSecondary
-            )
-        }
+    DisclosureCard("連線診斷", "累積查詢失敗 ${diagnostics.failed} · 待處理 ${diagnostics.pending}", Modifier.testTag("dns_diagnostics_card")) {
+        val lines = listOf(
+            "收到 ${diagnostics.received} · 解析 ${diagnostics.resolved} · 攔截 ${diagnostics.blocked}",
+            "累積查詢失敗 ${diagnostics.failed}（超載 ${diagnostics.overloaded}）· 拒絕 ${diagnostics.rejected}",
+            "快取命中 ${diagnostics.cacheHits} · 合併重複查詢 ${diagnostics.coalesced}",
+            "上游傳輸：DoH 已排程 ${diagnostics.dohCallsQueued} · UDP 已送出 ${diagnostics.udpAttempts} · TCP ${diagnostics.tcpAttempts}",
+            "UDP 備援 ${diagnostics.fallbackAttempts} · 次要 DNS 重試 ${diagnostics.udpRetryAttempts}",
+            "待處理 ${diagnostics.pending} · 最高 ${diagnostics.peakPending}",
+            if (diagnostics.latency.sampleCount == 0) "查詢延遲：尚無資料"
+            else "最近 ${diagnostics.latency.sampleCount} 筆延遲：P50 ${diagnostics.latency.p50Millis} ms · P95 ${diagnostics.latency.p95Millis} ms"
+        )
+        lines.forEach { Text(it, style = MaterialTheme.typography.bodyMedium) }
+        Text("失敗數為累積查詢失敗，不代表目前仍無法連線。統計保存在記憶體，App 程序結束後會重設。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
 private fun RuleStatusCard(status: RulePolicyStatus) {
-    Card(
+    val summary = when (status.source) {
+        RuleBlocklistSource.NOT_LOADED -> "開啟防護後載入名單"
+        RuleBlocklistSource.BUILT_IN -> "使用內建備用規則"
+        RuleBlocklistSource.APK_BUNDLED -> listOfNotNull(
+            status.sourceName.ifBlank { "App 隨附名單" },
+            status.entryCount?.let { "$it 筆規則" },
+            status.sourceDate?.takeIf { it.isNotBlank() }?.let { "來源 $it" } ?: "來源日期未知"
+        ).joinToString(" · ")
+        RuleBlocklistSource.PRIVATE_OVERRIDE -> "使用裝置上的自訂名單"
+    }
+    DisclosureCard("防護名單", summary, Modifier.testTag("rule_status_card")) {
+        DomainPolicyDiagnostics.details(status).forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+        val sourceNote = when (status.source) {
+            RuleBlocklistSource.APK_BUNDLED -> "名單隨 App 更新，不會在背景下載。"
+            RuleBlocklistSource.PRIVATE_OVERRIDE -> "目前使用裝置上的自訂名單。"
+            RuleBlocklistSource.BUILT_IN -> "目前使用 App 內建的備用規則。"
+            RuleBlocklistSource.NOT_LOADED -> null
+        }
+        sourceNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("rule_source_note")) }
+    }
+}
+
+@Composable
+private fun RulePolicyWarning(status: RulePolicyStatus) {
+    Surface(
+        color = MaterialTheme.colorScheme.tertiaryContainer,
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, ColorBorder, RoundedCornerShape(12.dp))
-            .testTag("rule_status_card")
+        modifier = Modifier.fillMaxWidth().testTag("rule_policy_warning").semantics { liveRegion = LiveRegionMode.Polite }
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp)
-        ) {
-            Text(
-                text = "攔截規則狀態",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = ColorTextPrimary
-            )
-            DomainPolicyDiagnostics.details(status).forEach { line ->
-                Text(
-                    text = line,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp,
-                    color = if (line.startsWith("降級原因：") || line.contains("載入失敗")) {
-                        CyberAmber
-                    } else {
-                        ColorTextSecondary
-                    }
-                )
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("防護名單需要注意", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            status.degradationReason?.let {
+                Text("完整名單無法載入，目前使用備用規則。原因：$it", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            }
+            status.reloadError?.let {
+                Text("規則重新載入失敗，繼續使用目前規則。請重啟防護後再試。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            }
+            if (status.publicSuffixStatus is PublicSuffixResolverStatus.Rejected) {
+                Text("公共後綴資料無法載入，目前只比對完整網域。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onTertiaryContainer)
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ExemptAppsTab(
-    appSearchQuery: String,
-    onSearchChange: (String) -> Unit,
-    filteredApps: List<AppInfo>,
-    isLoading: Boolean,
-    onToggleBypass: (String, String, Boolean) -> Unit,
-    infoCardVisible: Boolean,
-    onInfoCardVisibleChange: (Boolean) -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-    ) {
-
-        // Dismissible Explanatory Tip using smooth visibility transition
-        AnimatedVisibility(
-            visible = infoCardVisible,
-            enter = fadeIn() + expandVertically(),
-            exit = fadeOut() + shrinkVertically()
-        ) {
-            Card(
-                shape = RoundedCornerShape(8.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = CyberSky.copy(alpha = 0.08f)
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 6.dp)
-                    .border(1.dp, CyberSky.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
-            ) {
-                Row(
-                    modifier = Modifier.padding(start = 12.dp, top = 6.dp, end = 4.dp, bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Info,
-                        contentDescription = null,
-                        tint = CyberSky,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "勾選加入「排除名單」的應用程式，其所有流量與 DNS 解析將繞過 VPN，不受防護解析或廣告攔截影響。\n排除後，該 App 將完全不受 DNS Shield 管理。",
-                        fontSize = 11.sp,
-                        color = ColorTextPrimary,
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(
-                        onClick = { onInfoCardVisibleChange(false) },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "關閉提示",
-                            tint = ColorTextSecondary,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                }
-            }
-        }
-
-        // Search text field
-        TextField(
-            value = appSearchQuery,
-            onValueChange = onSearchChange,
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("app_search_input"),
-            placeholder = { Text("搜尋已安裝的 App...", color = ColorTextSecondary, fontSize = 13.sp) },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = ColorTextSecondary, modifier = Modifier.size(18.dp)) },
-            trailingIcon = {
-                if (appSearchQuery.isNotEmpty()) {
-                    IconButton(onClick = { onSearchChange("") }) {
-                        Icon(Icons.Default.Close, contentDescription = "清除搜尋", tint = ColorTextSecondary, modifier = Modifier.size(18.dp))
-                    }
-                } else if (!infoCardVisible) {
-                    // Restore info card button! Perfect UX discovery loop
-                    IconButton(onClick = { onInfoCardVisibleChange(true) }) {
-                        Icon(Icons.Default.Info, contentDescription = "顯示說明", tint = CyberSky, modifier = Modifier.size(18.dp))
-                    }
-                }
-            },
-            singleLine = true,
-            colors = TextFieldDefaults.colors(
-                focusedContainerColor = DarkSurface,
-                unfocusedContainerColor = DarkSurface,
-                focusedIndicatorColor = CyberEmerald,
-                unfocusedIndicatorColor = Color.Transparent,
-                disabledIndicatorColor = Color.Transparent,
-                focusedTextColor = ColorTextPrimary,
-                unfocusedTextColor = ColorTextPrimary
-            ),
-            shape = RoundedCornerShape(10.dp)
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        if (isLoading) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(color = CyberEmerald)
-            }
-        } else if (filteredApps.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.FilterListOff,
-                        contentDescription = null,
-                        modifier = Modifier.size(48.dp),
-                        tint = ColorTextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "找不到符合的應用程式",
-                        fontSize = 14.sp,
-                        color = ColorTextSecondary
-                    )
-                }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .testTag("app_exempt_list"),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(filteredApps, key = { it.packageName }) { app ->
-                    Card(
-                        shape = RoundedCornerShape(10.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = DarkSurface
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(1.dp, ColorBorder, RoundedCornerShape(10.dp))
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // App Icon using optimized async loader
-                            AppIconAsync(
-                                packageName = app.packageName,
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                            )
-
-                            Spacer(modifier = Modifier.width(12.dp))
-
-                            Column(
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(
-                                    text = app.appName,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = ColorTextPrimary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = app.packageName,
-                                    fontSize = 11.sp,
-                                    color = ColorTextSecondary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-
-                            Checkbox(
-                                checked = app.isBypassed,
-                                onCheckedChange = { checked ->
-                                    onToggleBypass(app.packageName, app.appName, checked)
-                                },
-                                colors = CheckboxDefaults.colors(
-                                    checkedColor = CyberEmerald,
-                                    uncheckedColor = ColorTextSecondary,
-                                    checkmarkColor = ColorWhite
-                                ),
-                                modifier = Modifier.testTag("checkbox_${app.packageName}")
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// Optimized async app icon loader backed by AppIconCache to reduce repeated PackageManager lookups
-@Composable
-fun AppIconAsync(packageName: String, modifier: Modifier = Modifier) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var iconDrawable by remember(packageName) {
-        mutableStateOf(io.github.xiangwang2000.dnsshield.viewmodel.AppIconCache.get(packageName))
-    }
-
-    if (iconDrawable == null) {
-        LaunchedEffect(packageName) {
-            val drawable = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                runCatching {
-                    context.packageManager.getApplicationIcon(packageName)
-                }.getOrNull()
-            }
-            if (drawable != null) {
-                io.github.xiangwang2000.dnsshield.viewmodel.AppIconCache.put(packageName, drawable)
-                iconDrawable = drawable
-            }
-        }
-    }
-
-    val currentDrawable = iconDrawable
-    if (currentDrawable != null) {
-        AndroidView(
-            factory = {
-                ImageView(it).apply {
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                }
-            },
-            update = { imageView ->
-                imageView.setImageDrawable(currentDrawable)
-            },
-            modifier = modifier
-        )
-    } else {
-        Box(
-            modifier = modifier.background(ColorBorder, RoundedCornerShape(8.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(Icons.Default.Android, contentDescription = null, tint = ColorTextSecondary)
-        }
-    }
-}
-
-@Composable
-fun DomainRulesTab(
-    rules: List<UserDomainRuleEntity>,
-    searchQuery: String,
-    onSearchChange: (String) -> Unit,
-    onSaveRule: suspend (String, DomainRuleAction, Boolean) -> String?,
-    onDeleteRule: suspend (UserDomainRuleEntity) -> Unit
-) {
-    var showAddDialog by rememberSaveable { mutableStateOf(false) }
-    var domainInput by rememberSaveable { mutableStateOf("") }
-    var selectedAction by remember { mutableStateOf(DomainRuleAction.ALLOW) }
-    var includeSubdomains by rememberSaveable { mutableStateOf(false) }
-    var validationError by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-    val filteredRules = remember(rules, searchQuery) {
-        if (searchQuery.isBlank()) {
-            rules
-        } else {
-            val searchTerms = listOfNotNull(
-                searchQuery.trim().takeIf { it.isNotEmpty() },
-                DomainNameNormalizer.normalize(searchQuery)
-            ).distinct()
-            rules.filter { rule ->
-                searchTerms.any { term -> rule.domain.contains(term, ignoreCase = true) }
-            }
-        }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 10.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("網域規則", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = ColorTextPrimary)
-                Text("使用者規則優先於防護名單；較精確的規則優先。", fontSize = 12.sp, color = ColorTextSecondary)
-            }
-            Button(onClick = {
-                validationError = null
-                showAddDialog = true
-            }) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(Modifier.width(4.dp))
-                Text("新增")
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = onSearchChange,
-            modifier = Modifier.fillMaxWidth().testTag("domain_rules_search"),
-            singleLine = true,
-            label = { Text("搜尋網域") },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) }
-        )
-        Spacer(Modifier.height(8.dp))
-
-        if (filteredRules.isEmpty()) {
-            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Text(
-                    if (searchQuery.isBlank()) "尚未建立網域規則" else "找不到符合的網域規則",
-                    color = ColorTextSecondary
-                )
-            }
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(filteredRules, key = { "${it.domain}:${it.includeSubdomains}" }) { rule ->
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(rule.domain, color = ColorTextPrimary, fontWeight = FontWeight.Medium)
-                                val actionLabel = if (rule.action.equals("ALLOW", ignoreCase = true)) "允許" else "封鎖"
-                                val scopeLabel = if (rule.includeSubdomains) "包含子網域" else "僅此網域"
-                                Text("$actionLabel · $scopeLabel", color = ColorTextSecondary, fontSize = 12.sp)
-                            }
-                            IconButton(
-                                onClick = { scope.launch { onDeleteRule(rule) } },
-                                modifier = Modifier.testTag("delete_domain_rule_${rule.id}")
-                            ) {
-                                Icon(Icons.Default.DeleteOutline, contentDescription = "刪除 ${rule.domain}", tint = ColorTextSecondary)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (showAddDialog) {
-        AlertDialog(
-            onDismissRequest = { showAddDialog = false },
-            title = { Text("新增網域規則") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = domainInput,
-                        onValueChange = { domainInput = it; validationError = null },
-                        modifier = Modifier.fillMaxWidth().testTag("domain_rule_input"),
-                        label = { Text("網域名稱") },
-                        placeholder = { Text("example.com") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = { selectedAction = DomainRuleAction.ALLOW },
-                            colors = if (selectedAction == DomainRuleAction.ALLOW) {
-                                ButtonDefaults.outlinedButtonColors(contentColor = CyberEmerald)
-                            } else ButtonDefaults.outlinedButtonColors()
-                        ) { Text("允許") }
-                        OutlinedButton(
-                            onClick = { selectedAction = DomainRuleAction.BLOCK },
-                            colors = if (selectedAction == DomainRuleAction.BLOCK) {
-                                ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                            } else ButtonDefaults.outlinedButtonColors()
-                        ) { Text("封鎖") }
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("包含子網域", color = ColorTextPrimary)
-                            Text("套用至此網域及其子網域", color = ColorTextSecondary, fontSize = 12.sp)
-                        }
-                        Switch(
-                            checked = includeSubdomains,
-                            onCheckedChange = { includeSubdomains = it },
-                            modifier = Modifier.testTag("domain_rule_include_subdomains")
-                        )
-                    }
-                    if (validationError != null) {
-                        Text(validationError!!, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    scope.launch {
-                        validationError = try {
-                            onSaveRule(domainInput, selectedAction, includeSubdomains)
-                        } catch (exception: Exception) {
-                            "儲存失敗：${exception.localizedMessage ?: "請稍後再試"}"
-                        }
-                        if (validationError == null) {
-                            showAddDialog = false
-                            domainInput = ""
-                        }
-                    }
-                }, modifier = Modifier.testTag("save_domain_rule_button")) {
-                    Text("儲存")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddDialog = false }) { Text("取消") }
-            }
-        )
-    }
-}
-
-@Composable
-fun LogsTab(
-    logs: List<String>,
-    blockedEvents: List<DnsDecisionEvent>,
-    onClearLogs: () -> Unit,
-    onAllowBlockedDomain: suspend (String) -> DomainRuleUndoToken,
-    onUndoDomainRule: suspend (DomainRuleUndoToken) -> Boolean
-) {
-    val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
-    Box(modifier = Modifier.fillMaxSize()) {
-      Column(
-          modifier = Modifier
-              .fillMaxSize()
-              .padding(horizontal = 12.dp, vertical = 8.dp)
-      ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "即時封包解析日誌",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = ColorTextPrimary
-            )
-            IconButton(
-                onClick = onClearLogs,
-                modifier = Modifier.testTag("clear_logs_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.DeleteSweep,
-                    contentDescription = "Clear logs",
-                    tint = ColorTextSecondary
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        if (blockedEvents.isNotEmpty()) {
-            Text("近期攔截事件", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ColorTextPrimary)
-            LazyColumn(
-                modifier = Modifier.fillMaxWidth().weight(0.45f).testTag("blocked_events"),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                items(blockedEvents, key = { it.id }) { event ->
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(event.domain, color = ColorTextPrimary, fontWeight = FontWeight.Medium)
-                                val decisionLabel = if (event.decision == DnsDecision.BLOCK) "已封鎖" else "已允許"
-                                val reasonLabel = when (event.reason) {
-                                    DnsDecisionReason.USER_RULE -> "使用者規則"
-                                    DnsDecisionReason.PROTECTION_LIST -> "防護名單"
-                                }
-                                val time = java.text.SimpleDateFormat("HH:mm:ss", androidx.compose.ui.platform.LocalConfiguration.current.locales[0])
-                                    .format(java.util.Date(event.occurredAtMillis))
-                                Text("$decisionLabel · $reasonLabel · $time", color = ColorTextSecondary, fontSize = 11.sp)
-                            }
-                            if (event.decision == DnsDecision.BLOCK) {
-                                TextButton(onClick = {
-                                    scope.launch {
-                                        try {
-                                            val token = onAllowBlockedDomain(event.domain)
-                                            val result = snackbarHostState.showSnackbar(
-                                                message = "已精確允許 ${event.domain}",
-                                                actionLabel = "復原",
-                                                withDismissAction = true
-                                            )
-                                            if (result == SnackbarResult.ActionPerformed) {
-                                                val restored = onUndoDomainRule(token)
-                                                snackbarHostState.showSnackbar(
-                                                    if (restored) "已復原規則變更" else "規則已再度變更，無法復原"
-                                                )
-                                            }
-                                        } catch (exception: Exception) {
-                                            snackbarHostState.showSnackbar(
-                                                "允許失敗：${exception.localizedMessage ?: "請稍後再試"}"
-                                            )
-                                        }
-                                    }
-                                }, modifier = Modifier.testTag("allow_blocked_${event.id}")) {
-                                    Text("一鍵允許")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(if (blockedEvents.isEmpty()) 1f else 0.55f)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color(0xFF020617)) // Deep black console
-                .border(1.dp, ColorBorder, RoundedCornerShape(12.dp))
-                .padding(12.dp)
-        ) {
-            if (logs.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Default.Code,
-                            contentDescription = null,
-                            modifier = Modifier.size(36.dp),
-                            tint = ColorBorder
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "尚無封包傳輸日誌 (請啟動 VPN)",
-                            fontSize = 12.sp,
-                            color = ColorTextSecondary,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("logs_console")
-                ) {
-                    items(logs) { log ->
-                        Text(
-                            text = log,
-                            color = getLogColor(log),
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.padding(vertical = 2.dp)
-                        )
-                    }
-                }
-            }
-        }
-      }
-      SnackbarHost(
-          hostState = snackbarHostState,
-          modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)
-      )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddDnsDialog(
     onDismiss: () -> Unit,
-    onConfirm: (
-        name: String,
-        primaryIp: String,
-        secondaryIp: String?,
-        allowPlaintextFallback: Boolean,
-        primaryDohUrl: String?,
-        primaryBootstrapIps: String?,
-        secondaryDohUrl: String?,
-        secondaryBootstrapIps: String?
-    ) -> Unit
+    onConfirm: suspend (String, String, String?, Boolean, String?, String?, String?, String?) -> String?
 ) {
-    var name by remember { mutableStateOf("") }
-    var primaryIp by remember { mutableStateOf("") }
-    var secondaryIp by remember { mutableStateOf("") }
-    var allowPlaintextFallback by remember { mutableStateOf(true) }
-    var primaryDohUrl by remember { mutableStateOf("") }
-    var primaryBootstrapIps by remember { mutableStateOf("") }
-    var secondaryDohUrl by remember { mutableStateOf("") }
-    var secondaryBootstrapIps by remember { mutableStateOf("") }
-
-    var nameError by remember { mutableStateOf(false) }
-    var primaryError by remember { mutableStateOf(false) }
-    var secondaryError by remember { mutableStateOf(false) }
-    var dohError by remember { mutableStateOf<String?>(null) }
-
-    fun validateIp(ip: String): Boolean {
-        val ipv4Regex = """^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$""".toRegex()
-        return ip.trim().matches(ipv4Regex)
-    }
-
+    var name by rememberSaveable { mutableStateOf("") }
+    var primaryIp by rememberSaveable { mutableStateOf("") }
+    var secondaryIp by rememberSaveable { mutableStateOf("") }
+    var allowPlaintextFallback by rememberSaveable { mutableStateOf(true) }
+    var primaryDohUrl by rememberSaveable { mutableStateOf("") }
+    var primaryBootstrapIps by rememberSaveable { mutableStateOf("") }
+    var secondaryDohUrl by rememberSaveable { mutableStateOf("") }
+    var secondaryBootstrapIps by rememberSaveable { mutableStateOf("") }
+    var attempted by rememberSaveable { mutableStateOf(false) }
+    var saveError by remember { mutableStateOf<String?>(null) }
+    var isSaving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val formScrollState = rememberScrollState()
+    val nameError = if (attempted && name.isBlank()) "請輸入伺服器名稱。" else null
+    val primaryError = if (attempted && !isIpv4Literal(primaryIp.trim())) "請輸入有效的 IPv4 位址。" else null
+    val secondaryError = if (attempted && secondaryIp.isNotBlank() && !isIpv4Literal(secondaryIp.trim())) "請輸入有效的 IPv4 位址。" else null
+    val primaryDohError = if (attempted) DohEndpointConfiguration.validationError(primaryDohUrl, primaryBootstrapIps, !allowPlaintextFallback) else null
+    val secondaryDohError = if (attempted) DohEndpointConfiguration.validationError(secondaryDohUrl, secondaryBootstrapIps, !allowPlaintextFallback) else null
     AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("新增自訂安全 DNS Server", color = ColorTextPrimary) },
+        modifier = Modifier.imePadding().semantics { testTagsAsResourceId = true },
+        properties = DialogProperties(decorFitsSystemWindows = false),
+        onDismissRequest = { if (!isSaving) onDismiss() },
+        title = { Text("新增 DNS 解析器") },
         text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 470.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = {
-                        name = it
-                        nameError = false
-                    },
-                    label = { Text("伺服器名稱") },
-                    placeholder = { Text("例如: AdGuard Family") },
-                    singleLine = true,
-                    isError = nameError,
-                    supportingText = {
-                        if (nameError) {
-                            Text("伺服器名稱不可為空")
-                        }
-                    },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = CyberEmerald,
-                        focusedLabelColor = CyberEmerald,
-                        unfocusedTextColor = ColorTextPrimary,
-                        focusedTextColor = ColorTextPrimary,
-                        errorBorderColor = CyberCrimson
-                    ),
-                    modifier = Modifier.testTag("dialog_dns_name_input")
-                )
-
-                OutlinedTextField(
-                    value = primaryIp,
-                    onValueChange = {
-                        primaryIp = it
-                        primaryError = false
-                    },
-                    label = { Text("主要 DNS IP (必填)") },
-                    placeholder = { Text("8.8.8.8") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true,
-                    isError = primaryError,
-                    supportingText = {
-                        if (primaryError) {
-                            Text("請輸入有效的 IPv4 位址")
-                        }
-                    },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = CyberEmerald,
-                        focusedLabelColor = CyberEmerald,
-                        unfocusedTextColor = ColorTextPrimary,
-                        focusedTextColor = ColorTextPrimary,
-                        errorBorderColor = CyberCrimson
-                    ),
-                    modifier = Modifier.testTag("dialog_dns_primary_input")
-                )
-
-                OutlinedTextField(
-                    value = secondaryIp,
-                    onValueChange = {
-                        secondaryIp = it
-                        secondaryError = false
-                    },
-                    label = { Text("次要 DNS IP (選填)") },
-                    placeholder = { Text("8.8.4.4") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true,
-                    isError = secondaryError,
-                    supportingText = {
-                        if (secondaryError) {
-                            Text("請輸入有效的 IPv4 位址")
-                        }
-                    },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = CyberEmerald,
-                        focusedLabelColor = CyberEmerald,
-                        unfocusedTextColor = ColorTextPrimary,
-                        focusedTextColor = ColorTextPrimary,
-                        errorBorderColor = CyberCrimson
-                    )
-                )
-
-                OutlinedTextField(
-                    value = primaryDohUrl,
-                    onValueChange = {
-                        primaryDohUrl = it
-                        dohError = null
-                    },
-                    label = { Text("主要 DoH URL (選填，必須 HTTPS)") },
-                    placeholder = { Text("https://resolver.example/dns-query") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = CyberEmerald,
-                        focusedLabelColor = CyberEmerald,
-                        unfocusedTextColor = ColorTextPrimary,
-                        focusedTextColor = ColorTextPrimary,
-                        errorBorderColor = CyberCrimson
-                    )
-                )
-
-                OutlinedTextField(
-                    value = primaryBootstrapIps,
-                    onValueChange = {
-                        primaryBootstrapIps = it
-                        dohError = null
-                    },
-                    label = { Text("主要 Bootstrap IPv4 (逗號分隔)") },
-                    placeholder = { Text("203.0.113.53, 203.0.113.54") },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = CyberEmerald,
-                        focusedLabelColor = CyberEmerald,
-                        unfocusedTextColor = ColorTextPrimary,
-                        focusedTextColor = ColorTextPrimary,
-                        errorBorderColor = CyberCrimson
-                    )
-                )
-
-                OutlinedTextField(
-                    value = secondaryDohUrl,
-                    onValueChange = {
-                        secondaryDohUrl = it
-                        dohError = null
-                    },
-                    label = { Text("備援 DoH URL (選填，必須 HTTPS)") },
-                    placeholder = { Text("https://backup.example/dns-query") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = CyberEmerald,
-                        focusedLabelColor = CyberEmerald,
-                        unfocusedTextColor = ColorTextPrimary,
-                        focusedTextColor = ColorTextPrimary,
-                        errorBorderColor = CyberCrimson
-                    )
-                )
-
-                OutlinedTextField(
-                    value = secondaryBootstrapIps,
-                    onValueChange = {
-                        secondaryBootstrapIps = it
-                        dohError = null
-                    },
-                    label = { Text("備援 Bootstrap IPv4 (逗號分隔)") },
-                    placeholder = { Text("203.0.113.55") },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = CyberEmerald,
-                        focusedLabelColor = CyberEmerald,
-                        unfocusedTextColor = ColorTextPrimary,
-                        focusedTextColor = ColorTextPrimary,
-                        errorBorderColor = CyberCrimson
-                    )
-                )
-
+            Column(Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(formScrollState), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                saveError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag("dialog_dns_save_error"))
+                }
+                DnsFormField(name, { name = it; saveError = null }, "伺服器名稱", "例如：家用 DNS", nameError, isSaving, "dialog_dns_name_input")
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    Modifier.fillMaxWidth().toggleable(value = allowPlaintextFallback, enabled = !isSaving, role = Role.Switch) { allowPlaintextFallback = it; saveError = null },
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            if (allowPlaintextFallback) "加密優先，允許 UDP/53 明文降級"
-                            else "僅加密，DoH 不可用時回覆 SERVFAIL",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = ColorTextPrimary
-                        )
-                        Text(
-                            "僅加密模式的自訂 DoH 主機名稱必須填 Bootstrap IPv4。",
-                            fontSize = 11.sp,
-                            color = ColorTextSecondary
-                        )
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("允許未加密備援", style = MaterialTheme.typography.titleSmall)
+                        Text(if (allowPlaintextFallback) "DoH 失敗時可改用未加密 DNS。" else "僅使用加密 DNS；DoH 失敗時會回報解析錯誤。",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Switch(
-                        checked = allowPlaintextFallback,
-                        onCheckedChange = { allowPlaintextFallback = it },
-                        modifier = Modifier.testTag("dialog_plaintext_fallback_switch")
-                    )
+                    Switch(checked = allowPlaintextFallback, onCheckedChange = null, enabled = !isSaving, modifier = Modifier.testTag("dialog_plaintext_fallback_switch"))
                 }
-                dohError?.let {
-                    Text(it, fontSize = 12.sp, color = CyberCrimson)
-                }
+                DnsFormField(primaryIp, { primaryIp = it; saveError = null }, "主要 DNS IPv4", "8.8.8.8", primaryError, isSaving, "dialog_dns_primary_input", KeyboardType.Decimal)
+                DnsFormField(secondaryIp, { secondaryIp = it; saveError = null }, "備援 DNS IPv4（選填）", "8.8.4.4", secondaryError, isSaving, "dialog_dns_secondary_input", KeyboardType.Decimal)
+                Text("DoH 加密連線", style = MaterialTheme.typography.titleSmall)
+                Text("Google、Cloudflare、AdGuard、Quad9 的常用 IPv4 位址會自動對應 DoH。其他解析器請填 HTTPS 網址。未設定 DoH 時，只能使用未加密 DNS。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                DnsFormField(primaryDohUrl, { primaryDohUrl = it; saveError = null }, "主要 DoH 網址（選填）", "https://resolver.example/dns-query", primaryDohError, isSaving, "dialog_dns_doh_input", KeyboardType.Uri)
+                DnsFormField(primaryBootstrapIps, { primaryBootstrapIps = it; saveError = null }, "主要 DoH 連線 IPv4（選填）", "203.0.113.53, 203.0.113.54", null, isSaving, "dialog_dns_bootstrap_input")
+                Text("連線 IPv4（Bootstrap）用來找到 DoH 伺服器；多個位址請用逗號分隔。僅加密模式下，自訂 DoH 主機名稱必須填寫。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                DnsFormField(secondaryDohUrl, { secondaryDohUrl = it; saveError = null }, "備援 DoH 網址（選填）", "https://backup.example/dns-query", secondaryDohError, isSaving, "dialog_dns_secondary_doh_input", KeyboardType.Uri)
+                DnsFormField(secondaryBootstrapIps, { secondaryBootstrapIps = it; saveError = null }, "備援 DoH 連線 IPv4（選填）", "203.0.113.55", null, isSaving, "dialog_dns_secondary_bootstrap_input")
             }
         },
         confirmButton = {
-            Button(
+            TextButton(
+                enabled = !isSaving, modifier = Modifier.heightIn(min = 48.dp).testTag("dialog_confirm_button"),
                 onClick = {
-                    val trimmedName = name.trim()
-                    val trimmedPrimary = primaryIp.trim()
-                    val trimmedSecondary = secondaryIp.trim()
-
-                    val isNameValid = trimmedName.isNotEmpty()
-                    val isPrimaryValid = validateIp(trimmedPrimary)
-                    val isSecondaryValid = trimmedSecondary.isEmpty() || validateIp(trimmedSecondary)
-                    dohError = DohEndpointConfiguration.validationError(
-                        primaryDohUrl,
-                        primaryBootstrapIps,
-                        strict = !allowPlaintextFallback
-                    ) ?: DohEndpointConfiguration.validationError(
-                        secondaryDohUrl,
-                        secondaryBootstrapIps,
-                        strict = !allowPlaintextFallback
-                    ) ?: if (!allowPlaintextFallback &&
-                        !DohEndpointConfiguration.hasUsableEncryptedEndpoint(
-                            trimmedPrimary,
-                            trimmedSecondary.takeIf(String::isNotEmpty),
-                            primaryDohUrl.trim().takeIf(String::isNotEmpty),
-                            primaryBootstrapIps.trim(),
-                            secondaryDohUrl.trim().takeIf(String::isNotEmpty),
-                            secondaryBootstrapIps.trim()
-                        )
+                    if (isSaving) return@TextButton
+                    attempted = true
+                    if (name.isBlank() || !isIpv4Literal(primaryIp.trim()) ||
+                        (secondaryIp.isNotBlank() && !isIpv4Literal(secondaryIp.trim())) ||
+                        DohEndpointConfiguration.validationError(primaryDohUrl, primaryBootstrapIps, !allowPlaintextFallback) != null ||
+                        DohEndpointConfiguration.validationError(secondaryDohUrl, secondaryBootstrapIps, !allowPlaintextFallback) != null
                     ) {
-                        DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR
-                    } else {
-                        null
+                        saveError = "請檢查標示的欄位，再試一次。"
+                        scope.launch { formScrollState.scrollTo(0) }
+                        return@TextButton
                     }
-
-                    nameError = !isNameValid
-                    primaryError = !isPrimaryValid
-                    secondaryError = !isSecondaryValid
-
-                    if (isNameValid && isPrimaryValid && isSecondaryValid && dohError == null) {
-                        onConfirm(
-                            trimmedName,
-                            trimmedPrimary,
-                            trimmedSecondary.takeIf { it.isNotEmpty() },
-                            allowPlaintextFallback,
-                            primaryDohUrl.trim().takeIf(String::isNotEmpty),
-                            primaryBootstrapIps.trim().takeIf(String::isNotEmpty),
-                            secondaryDohUrl.trim().takeIf(String::isNotEmpty),
-                            secondaryBootstrapIps.trim().takeIf(String::isNotEmpty)
-                        )
+                    if (!allowPlaintextFallback && !DohEndpointConfiguration.hasUsableEncryptedEndpoint(
+                        primaryIp.trim(), secondaryIp.trim().takeIf(String::isNotEmpty),
+                        primaryDohUrl.trim().takeIf(String::isNotEmpty), primaryBootstrapIps.trim(),
+                        secondaryDohUrl.trim().takeIf(String::isNotEmpty), secondaryBootstrapIps.trim()
+                    )) {
+                        saveError = "僅加密模式需要可用的 DoH 網址與連線位址，請檢查設定。"
+                        scope.launch { formScrollState.scrollTo(0) }
+                        return@TextButton
                     }
-                },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = CyberEmerald
-                ),
-                modifier = Modifier.testTag("dialog_confirm_button")
-            ) {
-                Text("新增", color = ColorWhite)
-            }
+                    isSaving = true
+                    saveError = null
+                    scope.launch {
+                        try {
+                            saveError = onConfirm(name.trim(), primaryIp.trim(), secondaryIp.trim().takeIf(String::isNotEmpty),
+                                allowPlaintextFallback, primaryDohUrl.trim().takeIf(String::isNotEmpty),
+                                primaryBootstrapIps.trim().takeIf(String::isNotEmpty),
+                                secondaryDohUrl.trim().takeIf(String::isNotEmpty), secondaryBootstrapIps.trim().takeIf(String::isNotEmpty))
+                            if (saveError == null) onDismiss() else formScrollState.scrollTo(0)
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (exception: Exception) {
+                            saveError = "無法儲存 DNS 設定，請稍後再試。"
+                            formScrollState.scrollTo(0)
+                        }
+                        finally { isSaving = false }
+                    }
+                }
+            ) { Text(if (isSaving) "儲存中…" else "新增") }
         },
         dismissButton = {
-            TextButton(
-                onClick = onDismiss,
-                modifier = Modifier.testTag("dialog_cancel_button")
-            ) {
-                Text("取消", color = ColorTextSecondary)
-            }
-        },
-        containerColor = DarkSurface
+            TextButton(onClick = onDismiss, enabled = !isSaving, modifier = Modifier.heightIn(min = 48.dp).testTag("dialog_cancel_button")) { Text("取消") }
+        }
     )
 }
 
-// Helper functions for formatting bytes and selecting log colors
-fun formatBytes(bytes: Long): String {
-    return when {
-        bytes < 1024L -> "$bytes B"
-        bytes < 1024L * 1024L ->
-            String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
-        else ->
-            String.format(java.util.Locale.US, "%.2f MB", bytes / (1024.0 * 1024.0))
-    }
-}
-
-fun getLogColor(log: String): Color {
-    return when {
-        log.contains("🛡️") || log.contains("攔截") -> CyberAmber
-        log.contains("✓") || log.contains("成功") -> CyberEmeraldGlow
-        log.contains("✗") || log.contains("Err") || log.contains("失敗") -> CyberCrimson
-        else -> ColorTextPrimary
-    }
+@Composable
+private fun DnsFormField(
+    value: String, onValueChange: (String) -> Unit, label: String, placeholder: String,
+    error: String?, isSaving: Boolean, tag: String, keyboardType: KeyboardType = KeyboardType.Text
+) {
+    OutlinedTextField(
+        value = value, onValueChange = onValueChange, label = { Text(label) }, placeholder = { Text(placeholder) },
+        enabled = !isSaving, isError = error != null, supportingText = error?.let { { Text(it) } },
+        singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        modifier = Modifier.fillMaxWidth().testTag(tag)
+    )
 }

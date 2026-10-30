@@ -1,6 +1,6 @@
 package io.github.xiangwang2000.dnsshield.service
 
-internal enum class UnderlyingNetworkConnectivity {
+enum class UnderlyingNetworkConnectivity {
     OFFLINE,
     CONNECTING,
     CAPTIVE_PORTAL,

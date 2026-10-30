@@ -26,7 +26,7 @@ sealed class PublicSuffixResolverStatus {
  * for this owner instance because an APK asset cannot repair itself during the same process
  * lifecycle; caching that failure prevents repeated asset I/O, hashing, and parsing on hot paths.
  *
- * This owner is deliberately not wired into DNS blocking yet.
+ * Policy assembly uses this resolver for compiled-blocklist parent matching; rejection keeps exact matching.
  */
 class PublicSuffixResolverOwner internal constructor(
     private val loadResolver: () -> CompiledPublicSuffixList

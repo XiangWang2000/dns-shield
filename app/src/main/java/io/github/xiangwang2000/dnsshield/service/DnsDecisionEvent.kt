@@ -15,5 +15,6 @@ data class DnsDecisionEvent(
     val domain: String,
     val decision: DnsDecision,
     val reason: DnsDecisionReason,
-    val occurredAtMillis: Long
+    val occurredAtMillis: Long,
+    val recordCount: Long = 1L
 )
