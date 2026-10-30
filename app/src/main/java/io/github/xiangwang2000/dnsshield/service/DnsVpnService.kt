@@ -42,6 +42,7 @@ import io.github.xiangwang2000.dnsshield.data.DnsServer
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.nio.channels.Channels
@@ -84,11 +85,7 @@ class DnsVpnService : VpnService() {
                 action = ACTION_STOP
             }
 
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            } else {
-                PendingIntent.FLAG_UPDATE_CURRENT
-            }
+            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
 
             val stopPendingIntent = PendingIntent.getService(context, 1, stopIntent, flags)
 
@@ -136,6 +133,9 @@ class DnsVpnService : VpnService() {
 
         // Publish one lifecycle state for the UI and service notification.
         val lifecycleStateFlow = MutableStateFlow(VpnLifecycleState.STOPPED)
+        private val _underlyingNetworkConnectivityFlow =
+            MutableStateFlow(UnderlyingNetworkConnectivity.UNKNOWN)
+        val underlyingNetworkConnectivityFlow = _underlyingNetworkConnectivityFlow.asStateFlow()
         internal val diagnosticsFlow = MutableStateFlow(DnsDiagnosticsSnapshot())
         val activeDnsFlow = MutableStateFlow("None")
         val dnsTransportStatusFlow = MutableStateFlow("尚無上游查詢")
@@ -207,7 +207,7 @@ class DnsVpnService : VpnService() {
             check(BuildConfig.APPLICATION_ID.endsWith(".d08test")) {
                 "The D08 blocked-event hook is unavailable in production variants"
             }
-            recordBlockedDomain(domain, reason)
+            recordDomainDecision(domain, reason)
         }
 
         val liveDecisionEventsFlow = MutableStateFlow<List<DnsDecisionEvent>>(emptyList())
@@ -506,12 +506,12 @@ class DnsVpnService : VpnService() {
             scheduleStatsFlush()
         }
 
-        private fun recordBlockedDomain(
+        private fun recordDomainDecision(
             domain: String,
-            reason: DnsDecisionReason
+            reason: DnsDecisionReason,
+            decision: DnsDecision = DnsDecision.BLOCK
         ) {
-            val normalized = DomainNameNormalizer.normalize(domain) ?: return
-            decisionEvents.record(normalized, reason)
+            decisionEvents.record(domain, reason, decision)
         }
 
         private fun scheduleLogFlush() {
@@ -944,8 +944,6 @@ class DnsVpnService : VpnService() {
 
         val registration = synchronized(networkCallbackLock) {
             if (networkCallbackRegistration != null) return
-            underlyingNetworkReducer.clear()
-            networkRecoveryTracker.clear()
             val token = ++networkCallbackToken
             val underlyingCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onCapabilitiesChanged(
@@ -1050,7 +1048,13 @@ class DnsVpnService : VpnService() {
             }
         }
 
-        val initialState = underlyingNetworkReducer.snapshot()
+        val initialState = synchronized(underlyingNetworkEventLock) {
+            underlyingNetworkReducer.clear()
+            networkRecoveryTracker.clear()
+            underlyingNetworkReducer.snapshot().also { state ->
+                _underlyingNetworkConnectivityFlow.value = state.connectivity
+            }
+        }
         if (BuildConfig.D14_DEVICE_TEST) d14UnderlyingNetworkSnapshot.set(initialState)
         scheduleNetworkStatusUpdate(
             token = registration.token,
@@ -1132,6 +1136,7 @@ class DnsVpnService : VpnService() {
             ) return
 
             transition = update(underlyingNetworkReducer) ?: return
+            _underlyingNetworkConnectivityFlow.value = transition.current.connectivity
             if (BuildConfig.D14_DEVICE_TEST) {
                 d14UnderlyingNetworkSnapshot.set(transition.current)
                 d14NetworkChangeCount.incrementAndGet()
@@ -1190,7 +1195,11 @@ class DnsVpnService : VpnService() {
                     resetOkHttpClientForUnderlyingNetworkChange()
                 }
 
-                val latestState = underlyingNetworkReducer.snapshot()
+                val latestState = synchronized(underlyingNetworkEventLock) {
+                    underlyingNetworkReducer.snapshot().also { state ->
+                        _underlyingNetworkConnectivityFlow.value = state.connectivity
+                    }
+                }
                 val recoveryMeasurement = if (
                     latestState.connectivity == UnderlyingNetworkConnectivity.ONLINE
                 ) completeNetworkRecoveryMeasurement() else null
@@ -1271,6 +1280,7 @@ class DnsVpnService : VpnService() {
         }
         synchronized(underlyingNetworkEventLock) {
             underlyingNetworkReducer.clear()
+            _underlyingNetworkConnectivityFlow.value = UnderlyingNetworkConnectivity.UNKNOWN
             networkRecoveryTracker.clear()
         }
         synchronized(dnsStateLock) {
@@ -1960,6 +1970,7 @@ class DnsVpnService : VpnService() {
         request: DnsDiagnosticMetrics.Request,
         responseWriter: DnsResponseWriter
     ): Boolean {
+        val domain = dnsPacket.query.question.domainName ?: "Unknown"
         val cachedResponse = try {
             getCache(queryKey)
         } catch (exception: Exception) {
@@ -1976,14 +1987,13 @@ class DnsVpnService : VpnService() {
             }
             recordCacheHit(request)
             completeDnsRequest(request, DnsClientTerminalOutcome.RESOLVED)
-            val domain = dnsPacket.query.question.domainName ?: "Unknown"
+            recordUserAllowedDomain(domain, dnsState)
             addDnsQueryLog {
                 "⚡ [快取解析] [ID=${formatTxId(dnsPacket.payload)}]: $domain (記憶體命中, ${cachedResponse.size} bytes)"
             }
             return true
         }
 
-        val domain = dnsPacket.query.question.domainName ?: "Unknown"
         val isBlocked = try {
             isAdOrTracker(domain, dnsState.policyAssembly)
         } catch (exception: Exception) {
@@ -1998,6 +2008,7 @@ class DnsVpnService : VpnService() {
                 completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
                 return true
             }
+            recordUserAllowedDomain(domain, dnsState)
             return false
         }
 
@@ -2012,9 +2023,15 @@ class DnsVpnService : VpnService() {
         val reason = if (
             dnsState.policyAssembly.userRuleMatcher.decisionFor(domain) == DomainRuleAction.BLOCK
         ) DnsDecisionReason.USER_RULE else DnsDecisionReason.PROTECTION_LIST
-        recordBlockedDomain(domain, reason)
+        recordDomainDecision(domain, reason)
         addDnsQueryLog { "🛡️ [真正攔截] $domain -> NXDOMAIN" }
         return true
+    }
+
+    private fun recordUserAllowedDomain(domain: String, dnsState: DnsStateSnapshot) {
+        if (dnsState.policyAssembly.userRuleMatcher.decisionFor(domain) == DomainRuleAction.ALLOW) {
+            recordDomainDecision(domain, DnsDecisionReason.USER_RULE, DnsDecision.ALLOW)
+        }
     }
 
     private fun sendResolvedResponseIfCurrent(

@@ -35,8 +35,8 @@ The Kotlin reader validates magic, format version, hash algorithm, entry count, 
 ```powershell
 python -m unittest discover tools/tests
 python tools/build_blocklist.py --input tools/tests/fixtures/blocklist.txt --output build/test-blocklist.bin
-powershell -NoProfile -ExecutionPolicy Bypass -File .\prepare-active-blocklist-production.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install-active-blocklist-asset.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\prepare-active-blocklist-production.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-active-blocklist-asset.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 

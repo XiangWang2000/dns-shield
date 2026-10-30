@@ -51,13 +51,13 @@ internal data class ProductionBlocklistArtifactContract(
 
 internal object ProductionBlocklistArtifact {
     val contract = ProductionBlocklistArtifactContract(
-        artifactSize = 823_800,
+        artifactSize = 817_952,
         artifactSha256 =
-            "87737598676f344cafd32c5deb8c0225e07963b5e318ef8c9f099b912487bdbe",
-        entryCount = 102_972,
+            "14f1b7c3200836d2f914698a1b3a0424f01025b1b883481f5888ea1e329767f2",
+        entryCount = 102_241,
         sourceName = "badmojr/1Hosts Lite",
-        sourceRevision = "273a6bcdcc3585bc47f1ebb6823db05ec5b7b409",
-        sourceDate = "2026-08-23"
+        sourceRevision = "7a4588e87bcf7e86e0b8169d391b8422bd3c5d36",
+        sourceDate = "2026-09-03"
     )
 
     fun verify(

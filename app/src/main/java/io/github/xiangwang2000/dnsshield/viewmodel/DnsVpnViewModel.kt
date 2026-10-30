@@ -7,6 +7,7 @@ import android.graphics.drawable.Drawable
 import android.util.Log
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.xiangwang2000.dnsshield.blocking.DomainNameNormalizer
@@ -26,7 +27,9 @@ import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
 import io.github.xiangwang2000.dnsshield.service.ResolverCommandRuntime
 import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
 import io.github.xiangwang2000.dnsshield.service.VpnToggleAction
+import io.github.xiangwang2000.dnsshield.service.UnderlyingNetworkConnectivity
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.*
@@ -56,7 +59,10 @@ data class DnsShieldUiState(
     val isLoadingApps: Boolean = false,
     val vpnSettingsModified: Boolean = false,
     val infoCardVisible: Boolean = true,
-    val rulePolicyStatus: RulePolicyStatus = RulePolicyStatus()
+    val rulePolicyStatus: RulePolicyStatus = RulePolicyStatus(),
+    val resolverNotice: String? = null,
+    val networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN,
+    val appLoadError: String? = null
 ) {
     val queryCount: Long get() = diagnostics.received
     val blockedAds: Long get() = diagnostics.blocked
@@ -73,7 +79,8 @@ data class VpnStatusAndDnsState(
     val activeDns: String,
     val dnsTransportStatus: String,
     val dnsServers: List<DnsServer>,
-    val activeDnsServer: DnsServer?
+    val activeDnsServer: DnsServer?,
+    val networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN
 ) {
     val isRunning: Boolean get() = lifecycleState.isRunning
 }
@@ -81,7 +88,8 @@ data class VpnStatusAndDnsState(
 data class AppListState(
     val searchQuery: String,
     val filteredApps: List<AppInfo>,
-    val isLoadingApps: Boolean
+    val isLoadingApps: Boolean,
+    val appLoadError: String?
 )
 
 data class DomainRulesAndEventsState(
@@ -139,6 +147,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private val _vpnLifecycleState = MutableStateFlow(DnsVpnService.lifecycleStateFlow.value)
+    private val _networkConnectivity =
+        MutableStateFlow(DnsVpnService.underlyingNetworkConnectivityFlow.value)
     val vpnLifecycleState = _vpnLifecycleState.asStateFlow()
 
     private val _diagnostics = MutableStateFlow(DnsVpnService.diagnosticsFlow.value)
@@ -160,6 +170,9 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         initialValue = emptyList()
     )
     private val _rulePolicyStatus = MutableStateFlow(DnsVpnService.rulePolicyStatusFlow.value)
+    private val _resolverNotice = MutableStateFlow<String?>(null)
+    private val resolverNoticeLock = Any()
+    private var latestResolverNoticeCommand = 0L
 
     val vpnSettingsModified = MutableStateFlow(false)
 
@@ -169,20 +182,57 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         DnsVpnService.addLog(message)
     }
 
-    private suspend fun showResolverCommandMessage(message: String, duration: Int = Toast.LENGTH_LONG) {
-        addLog(message)
-        withContext(Dispatchers.Main) {
-            Toast.makeText(getApplication(), message, duration).show()
+    private fun beginResolverCommandNotice(): Long = synchronized(resolverNoticeLock) {
+        ++latestResolverNoticeCommand
+    }
+
+    private fun publishResolverNotice(commandId: Long, message: String?) {
+        synchronized(resolverNoticeLock) {
+            if (commandId == latestResolverNoticeCommand) {
+                _resolverNotice.value = message
+            }
         }
+    }
+
+    fun dismissResolverNotice() {
+        synchronized(resolverNoticeLock) {
+            ++latestResolverNoticeCommand
+            _resolverNotice.value = null
+        }
+    }
+
+    private suspend fun showResolverCommandToast(
+        commandId: Long,
+        message: String,
+        duration: Int = Toast.LENGTH_LONG
+    ) {
+        publishResolverNotice(commandId, message)
+        withContext(Dispatchers.Main) {
+            synchronized(resolverNoticeLock) {
+                if (commandId == latestResolverNoticeCommand) {
+                    Toast.makeText(getApplication(), message, duration).show()
+                }
+            }
+        }
+    }
+
+    private suspend fun showResolverCommandMessage(
+        message: String,
+        commandId: Long,
+        duration: Int = Toast.LENGTH_LONG
+    ) {
+        addLog(message)
+        showResolverCommandToast(commandId, message, duration)
     }
 
     private suspend fun reportResolverCommandFailure(
         operation: String,
         exception: Exception,
-        message: String
+        message: String,
+        commandId: Long
     ) {
         Log.e("DnsVpnViewModel", operation, exception)
-        showResolverCommandMessage(message)
+        showResolverCommandMessage(message, commandId)
     }
 
     // DNS Servers list
@@ -205,6 +255,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _isLoadingApps = MutableStateFlow(false)
     val isLoadingApps = _isLoadingApps.asStateFlow()
+    private val _appLoadError = MutableStateFlow<String?>(null)
 
     // Raw list of installed apps
     private val _installedApps = MutableStateFlow<List<AppInfo>>(emptyList())
@@ -225,6 +276,18 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         initialValue = emptyList()
     )
 
+    internal var installedAppsLoader: suspend () -> List<AppInfo> = {
+        withContext(Dispatchers.IO) {
+            val apps = getInstalledLauncherApps()
+            val currentBypassed = dnsDao.getBypassedAppsList()
+            val bypassedSet = currentBypassed.map { it.packageName }.toSet()
+
+            apps.map { app ->
+                app.copy(isBypassed = app.packageName in bypassedSet)
+            }.sortedBy { it.appName.lowercase() }
+        }
+    }
+
     private val vpnMetricsStateFlow: Flow<VpnMetricsState> = combine(
         _diagnostics,
         _liveLogs
@@ -240,14 +303,17 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         activeDnsServer
     ) { lifecycleState, activeDns, transportStatus, servers, activeServer ->
         VpnStatusAndDnsState(lifecycleState, activeDns, transportStatus, servers, activeServer)
+    }.combine(_networkConnectivity) { status, networkConnectivity ->
+        status.copy(networkConnectivity = networkConnectivity)
     }
 
     private val appListStateFlow: Flow<AppListState> = combine(
         _searchQuery,
         filteredApps,
-        _isLoadingApps
-    ) { query, apps, loading ->
-        AppListState(query, apps, loading)
+        _isLoadingApps,
+        _appLoadError
+    ) { query, apps, loading, error ->
+        AppListState(query, apps, loading, error)
     }
 
     private val domainRulesAndEventsStateFlow: Flow<DomainRulesAndEventsState> = combine(
@@ -278,9 +344,11 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             blockedEvents = ruleState.blockedEvents,
             dnsServers = statusDns.dnsServers,
             activeDnsServer = statusDns.activeDnsServer,
+            networkConnectivity = statusDns.networkConnectivity,
             appSearchQuery = appList.searchQuery,
             filteredApps = appList.filteredApps,
             isLoadingApps = appList.isLoadingApps,
+            appLoadError = appList.appLoadError,
             vpnSettingsModified = settingsModified,
             infoCardVisible = ruleState.infoCardVisible
         )
@@ -288,9 +356,13 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     val uiState: StateFlow<DnsShieldUiState> = combine(
         baseUiState,
-        _rulePolicyStatus
-    ) { state, rulePolicyStatus ->
-        state.copy(rulePolicyStatus = rulePolicyStatus)
+        _rulePolicyStatus,
+        _resolverNotice
+    ) { state, rulePolicyStatus, resolverNotice ->
+        state.copy(
+            rulePolicyStatus = rulePolicyStatus,
+            resolverNotice = resolverNotice
+        )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
@@ -311,14 +383,17 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             isLoadingApps = _isLoadingApps.value,
             vpnSettingsModified = vpnSettingsModified.value,
             infoCardVisible = _infoCardVisible.value,
-            rulePolicyStatus = _rulePolicyStatus.value
+            rulePolicyStatus = _rulePolicyStatus.value,
+            resolverNotice = _resolverNotice.value,
+            networkConnectivity = _networkConnectivity.value,
+            appLoadError = _appLoadError.value
         )
     )
 
     fun setInfoCardVisible(visible: Boolean) {
         _infoCardVisible.value = visible
         viewModelScope.launch(Dispatchers.IO) {
-            sharedPrefs.edit().putBoolean("info_card_visible", visible).apply()
+            sharedPrefs.edit { putBoolean("info_card_visible", visible) }
         }
     }
 
@@ -376,9 +451,12 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             dnsDao.deleteUserDomainRule(rule.domain, rule.includeSubdomains)
             addLog("[網域規則] 已刪除 ${rule.domain}。")
             requestDomainPolicyReloadIfRunning()
+        } catch (exception: CancellationException) {
+            throw exception
         } catch (exception: Exception) {
             Log.e("DnsVpnViewModel", "Failed to delete user domain rule", exception)
             addLog("[網域規則] 刪除 ${rule.domain} 失敗：${exception.localizedMessage ?: "資料庫錯誤"}")
+            throw exception
         }
     }
 
@@ -446,6 +524,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     init {
         // Direct, high-speed StateFlow collections across the same process using clean helper method
         collectServiceFlow(DnsVpnService.lifecycleStateFlow, _vpnLifecycleState)
+        collectServiceFlow(DnsVpnService.underlyingNetworkConnectivityFlow, _networkConnectivity)
         collectServiceFlow(DnsVpnService.diagnosticsFlow, _diagnostics)
         collectServiceFlow(DnsVpnService.activeDnsFlow, _activeDns)
         collectServiceFlow(DnsVpnService.dnsTransportStatusFlow, _dnsTransportStatus)
@@ -466,27 +545,27 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun refreshInstalledAppsIfNeeded() {
-        if (hasLoadedApps) return
-        hasLoadedApps = true
+        if (hasLoadedApps || _isLoadingApps.value) return
         refreshInstalledApps()
     }
 
     fun refreshInstalledApps() {
+        if (!_isLoadingApps.compareAndSet(false, true)) return
+        _appLoadError.value = null
+
         viewModelScope.launch {
-            _isLoadingApps.value = true
-
-            val mapped = withContext(Dispatchers.IO) {
-                val apps = getInstalledLauncherApps()
-                val currentBypassed = dnsDao.getBypassedAppsList()
-                val bypassedSet = currentBypassed.map { it.packageName }.toSet()
-
-                apps.map { app ->
-                    app.copy(isBypassed = app.packageName in bypassedSet)
-                }.sortedBy { it.appName.lowercase() }
+            try {
+                _installedApps.value = installedAppsLoader()
+                hasLoadedApps = true
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                hasLoadedApps = false
+                Log.e("DnsVpnViewModel", "Failed to load installed apps", exception)
+                _appLoadError.value = "無法載入 App 清單，請再試一次。"
+            } finally {
+                _isLoadingApps.value = false
             }
-
-            _installedApps.value = mapped
-            _isLoadingApps.value = false
         }
     }
 
@@ -545,6 +624,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectDnsServer(serverId: Int) {
+        val resolverNoticeCommand = beginResolverCommandNotice()
         val persisted = AtomicBoolean(false)
         val operations = resolverCommandOperations
         val submission = resolverCommandCoordinator.submit { revision ->
@@ -565,10 +645,18 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                 is ResolverCommandResult.Completed -> {
                     when (result.value) {
                         ResolverCommandApplyStatus.NOT_SAVED ->
-                            showResolverCommandMessage("找不到這組 DNS，請重新選擇。")
-                        ResolverCommandApplyStatus.SAVED_UNSYNCED ->
+                            showResolverCommandMessage(
+                                "找不到這組 DNS，請重新選擇。",
+                                resolverNoticeCommand
+                            )
+                        ResolverCommandApplyStatus.SAVED_UNSYNCED -> {
                             addLog(ResolverCommandFailureMessages.SELECT_SAVED_UNSYNCED)
-                        ResolverCommandApplyStatus.APPLIED -> Unit
+                            publishResolverNotice(
+                                resolverNoticeCommand,
+                                ResolverCommandFailureMessages.SELECT_SAVED_UNSYNCED
+                            )
+                        }
+                        ResolverCommandApplyStatus.APPLIED -> publishResolverNotice(resolverNoticeCommand, null)
                     }
                 }
                 is ResolverCommandResult.Failed -> {
@@ -579,7 +667,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                             ResolverCommandFailureMessages.SELECT_SAVED_UNSYNCED
                         } else {
                             ResolverCommandFailureMessages.SELECT_NOT_SAVED
-                        }
+                        },
+                        resolverNoticeCommand
                     )
                 }
             }
@@ -595,9 +684,11 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setPlaintextFallback(server: DnsServer, allow: Boolean) {
+        val resolverNoticeCommand = beginResolverCommandNotice()
         if (!allow && !DohEndpointConfiguration.hasUsableEncryptedEndpoint(server)) {
             val message = DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR
             addLog("無法啟用僅加密模式：$message")
+            publishResolverNotice(resolverNoticeCommand, message)
             Toast.makeText(getApplication(), message, Toast.LENGTH_LONG).show()
             return
         }
@@ -650,18 +741,26 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             when (val result = awaitResolverCommandResult(submission.result, persisted)) {
                 is ResolverCommandResult.Completed -> {
                     when (result.value) {
-                        ResolverCommandApplyStatus.APPLIED ->
+                        ResolverCommandApplyStatus.APPLIED -> {
+                            publishResolverNotice(resolverNoticeCommand, null)
                             addLog(
                                 if (allow) "DNS 傳輸政策已設為加密優先，可在 DoH 失敗時降級 UDP/53"
                                 else "DNS 傳輸政策已設為僅加密；DoH 無法使用時將回覆 SERVFAIL"
                             )
+                        }
                         ResolverCommandApplyStatus.NOT_SAVED ->
                             showResolverCommandMessage(
                                 if (allow) ResolverCommandFailureMessages.FALLBACK_ALLOW_NOT_SAVED
-                                else ResolverCommandFailureMessages.FALLBACK_STRICT_NOT_SAVED
+                                else ResolverCommandFailureMessages.FALLBACK_STRICT_NOT_SAVED,
+                                resolverNoticeCommand
                             )
-                        ResolverCommandApplyStatus.SAVED_UNSYNCED ->
+                        ResolverCommandApplyStatus.SAVED_UNSYNCED -> {
                             addLog(ResolverCommandFailureMessages.FALLBACK_SAVED_UNSYNCED)
+                            publishResolverNotice(
+                                resolverNoticeCommand,
+                                ResolverCommandFailureMessages.FALLBACK_SAVED_UNSYNCED
+                            )
+                        }
                     }
                 }
                 is ResolverCommandResult.Failed -> {
@@ -674,13 +773,14 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                         } else {
                             if (allow) ResolverCommandFailureMessages.FALLBACK_ALLOW_NOT_SAVED
                             else ResolverCommandFailureMessages.FALLBACK_STRICT_NOT_SAVED
-                        }
+                        },
+                        resolverNoticeCommand
                     )
                 }
             }
         }
     }
-    fun addCustomDnsServer(
+    suspend fun addCustomDnsServer(
         name: String,
         primaryIp: String,
         secondaryIp: String?,
@@ -689,8 +789,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         primaryDohBootstrapIps: String? = null,
         secondaryDohUrl: String? = null,
         secondaryDohBootstrapIps: String? = null
-    ) {
-        viewModelScope.launch(Dispatchers.IO) {
+    ): String? {
+        return withContext(Dispatchers.IO) {
             val trimmedName = name.trim()
             val trimmedPrimary = primaryIp.trim()
             val trimmedSec = secondaryIp?.trim()?.let { if (it.isBlank()) null else it }
@@ -700,10 +800,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             val trimmedSecondaryBootstrap = secondaryDohBootstrapIps?.trim().orEmpty()
 
             if (trimmedName.isEmpty() || trimmedPrimary.isEmpty()) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(getApplication(), "名稱與主要 IP 不可空白", Toast.LENGTH_SHORT).show()
-                }
-                return@launch
+                return@withContext "名稱與主要 IP 不可空白"
             }
 
             val dohError = sequenceOf(
@@ -719,10 +816,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                 )
             ).filterNotNull().firstOrNull()
             if (dohError != null) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(getApplication(), dohError, Toast.LENGTH_LONG).show()
-                }
-                return@launch
+                return@withContext dohError
             }
             if (!allowPlaintextFallback && !DohEndpointConfiguration.hasUsableEncryptedEndpoint(
                     trimmedPrimary,
@@ -733,34 +827,18 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                     trimmedSecondaryBootstrap
                 )
             ) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(
-                        getApplication(),
-                        DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR,
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-                return@launch
+                return@withContext DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR
             }
 
             val currentServers = dnsServers.value
             if (currentServers.any { it.name.equals(trimmedName, ignoreCase = true) }) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(getApplication(), "DNS 伺服器名稱「$trimmedName」已存在", Toast.LENGTH_SHORT).show()
-                }
-                return@launch
+                return@withContext "DNS 伺服器名稱「$trimmedName」已存在"
             }
             if (currentServers.any { it.primaryIp == trimmedPrimary && it.secondaryIp == trimmedSec }) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(getApplication(), "相同的主要與次要 IP 組合已存在於其他伺服器中", Toast.LENGTH_SHORT).show()
-                }
-                return@launch
+                return@withContext "相同的主要與次要 IP 組合已存在於其他伺服器中"
             }
             if (currentServers.any { it.primaryIp == trimmedPrimary }) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(getApplication(), "DNS 主要 IP「$trimmedPrimary」已存在", Toast.LENGTH_SHORT).show()
-                }
-                return@launch
+                return@withContext "DNS 主要 IP「$trimmedPrimary」已存在"
             }
 
             val newDns = DnsServer(
@@ -781,15 +859,21 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                     ?.takeIf { it.isNotEmpty() }
                     ?.joinToString(",")
             )
-            dnsDao.insertDnsServer(newDns)
-            addLog("新增自訂 DNS：${newDns.name} (${newDns.primaryIp})")
-            withContext(Dispatchers.Main) {
-                Toast.makeText(getApplication(), "已成功新增 DNS：${trimmedName}", Toast.LENGTH_SHORT).show()
+            try {
+                dnsDao.insertDnsServer(newDns)
+                addLog("新增自訂 DNS：${newDns.name} (${newDns.primaryIp})")
+                null
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                Log.e("DnsVpnViewModel", "Failed to add custom DNS server", exception)
+                "新增 DNS 伺服器失敗，請稍後再試。"
             }
         }
     }
 
     fun deleteDnsServer(server: DnsServer) {
+        val resolverNoticeCommand = beginResolverCommandNotice()
         val persisted = AtomicBoolean(false)
         val operations = resolverCommandOperations
         val submission = resolverCommandCoordinator.submit { revision ->
@@ -811,14 +895,23 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                     when (result.value) {
                         ResolverCommandApplyStatus.NOT_SAVED -> {
                             addLog("無法刪除 DNS：至少需要保留一組 DNS Server")
-                            withContext(Dispatchers.Main) {
-                                Toast.makeText(getApplication(), "不可刪除！至少需要保留一組 DNS 伺服器", Toast.LENGTH_SHORT).show()
-                            }
+                            showResolverCommandToast(
+                                resolverNoticeCommand,
+                                "不可刪除！至少需要保留一組 DNS 伺服器",
+                                Toast.LENGTH_SHORT
+                            )
                         }
-                        ResolverCommandApplyStatus.SAVED_UNSYNCED ->
+                        ResolverCommandApplyStatus.SAVED_UNSYNCED -> {
                             addLog(ResolverCommandFailureMessages.DELETE_SAVED_UNSYNCED)
-                        ResolverCommandApplyStatus.APPLIED ->
+                            publishResolverNotice(
+                                resolverNoticeCommand,
+                                ResolverCommandFailureMessages.DELETE_SAVED_UNSYNCED
+                            )
+                        }
+                        ResolverCommandApplyStatus.APPLIED -> {
+                            publishResolverNotice(resolverNoticeCommand, null)
                             addLog("刪除 DNS 設定：" + server.name)
+                        }
                     }
                 }
                 is ResolverCommandResult.Failed -> {
@@ -829,7 +922,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                             ResolverCommandFailureMessages.DELETE_SAVED_UNSYNCED
                         } else {
                             ResolverCommandFailureMessages.DELETE_NOT_SAVED
-                        }
+                        },
+                        resolverNoticeCommand
                     )
                 }
             }

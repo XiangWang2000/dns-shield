@@ -5,10 +5,11 @@
 DNS Shield packages a deterministic hashed representation of the 1Hosts Lite DNS blocklist.
 
 - Project: `badmojr/1Hosts`
-- Source revision: `273a6bcdcc3585bc47f1ebb6823db05ec5b7b409`
+- Source revision: `7a4588e87bcf7e86e0b8169d391b8422bd3c5d36`
+- Source date: `2026-09-03`
 - Source file: `Lite/domains.wildcards`
-- Source URL: <https://raw.githubusercontent.com/badmojr/1Hosts/273a6bcdcc3585bc47f1ebb6823db05ec5b7b409/Lite/domains.wildcards>
-- Source SHA-256: `a3e143b2fcddd38fa5a9095548d176391b1cc791135b4248b3d1c9ebaa253634`
+- Source URL: <https://raw.githubusercontent.com/badmojr/1Hosts/7a4588e87bcf7e86e0b8169d391b8422bd3c5d36/Lite/domains.wildcards>
+- Source SHA-256: `6d6e4a087e501696b2996b888fd220590335b6bfc2ee375046abe74b95b45d9f`
 - License: Mozilla Public License 2.0
 - License text: [third_party/licenses/1Hosts-MPL-2.0.txt](third_party/licenses/1Hosts-MPL-2.0.txt)
 

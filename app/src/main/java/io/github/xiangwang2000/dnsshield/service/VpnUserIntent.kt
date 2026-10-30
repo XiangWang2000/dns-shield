@@ -1,5 +1,6 @@
 package io.github.xiangwang2000.dnsshield.service
 
+import android.annotation.SuppressLint
 import android.content.SharedPreferences
 import android.util.Log
 import java.util.IdentityHashMap
@@ -164,10 +165,12 @@ private object VpnUserIntentPersistence {
 internal class VpnUserIntentStore(
     private val preferences: SharedPreferences,
     private val writeState: suspend (VpnUserIntentState) -> Boolean = { state ->
-        preferences.edit()
-            .putBoolean(VPN_DESIRED_ENABLED_KEY, state.desiredEnabled)
-            .putBoolean(VPN_EXPLICIT_CHOICE_KEY, state.hasExplicitChoice)
-            .commit()
+        // KTX edit(commit = true) returns Unit; this writer must propagate commit failures.
+        @SuppressLint("UseKtx")
+        val editor = preferences.edit()
+        editor.putBoolean(VPN_DESIRED_ENABLED_KEY, state.desiredEnabled)
+        editor.putBoolean(VPN_EXPLICIT_CHOICE_KEY, state.hasExplicitChoice)
+        editor.commit()
     }
 ) {
     private val coordinator = VpnUserIntentPersistence.coordinator(preferences, readPreferences())

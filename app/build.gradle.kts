@@ -67,8 +67,8 @@ android {
     ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }
     externalNativeBuild { ndkBuild { arguments += "NDK_APPLICATION_MK=${projectDir}/src/main/cpp/Application.mk" } }
     targetSdk = 37
-    versionCode = 6
-    versionName = "1.3.0"
+    versionCode = 7
+    versionName = "1.4.0"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     buildConfigField("boolean", "D14_DEVICE_TEST", "false")
     buildConfigField("int", "DNS_UPSTREAM_PORT", "53")
@@ -212,7 +212,7 @@ dependencies {
 
 
 // Materialize Windows Git header-link placeholders only in generated sources.
-val prepareNativeSources by tasks.registering(Sync::class) {
+val prepareNativeSources = tasks.register<Sync>("prepareNativeSources") {
     from("src/main/cpp/hev") {
         exclude("**/.git", "**/.git/**", "src/hev-jni.c")
         filesMatching("**/include/*.h") {

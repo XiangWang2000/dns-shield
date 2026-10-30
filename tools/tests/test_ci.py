@@ -2,6 +2,7 @@ import importlib.util
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location("ci", Path(__file__).resolve().parents[1] / "ci.py")
@@ -106,6 +107,32 @@ class CiRoutingTest(unittest.TestCase):
             Path("README.md"), {"icon.png"})
         self.assertEqual(count, 2)
         self.assertEqual(len(errors), 1)
+
+
+    def test_docs_validation_handles_uncommitted_moves_and_ignores_private_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=root, stderr=subprocess.PIPE)
+
+            git("init", "-q")
+            (root / "docs").mkdir()
+            (root / "README.md").write_text("[old](docs/old.md)\n", encoding="utf-8")
+            (root / "docs/old.md").write_text("Historical result\n", encoding="utf-8")
+            git("add", "README.md", "docs/old.md")
+            (root / "docs/old.md").unlink()
+            (root / "docs/archive").mkdir()
+            (root / "docs/archive/old.md").write_text("Historical result\n", encoding="utf-8")
+            (root / "README.md").write_text("[docs](docs/README.md)\n", encoding="utf-8")
+            (root / "docs/README.md").write_text("[history](archive/old.md)\n", encoding="utf-8")
+            (root / ".gitignore").write_text("docs/private.md\n", encoding="utf-8")
+            (root / "docs/private.md").write_text("[ignored](missing.md)\n", encoding="utf-8")
+            with patch.object(ci, "ROOT", root), patch.object(ci, "git", side_effect=git):
+                ci.verify_docs()
+                (root / "docs/README.md").write_text("[private](private.md)\n", encoding="utf-8")
+                with self.assertRaisesRegex(SystemExit, "missing .*target"):
+                    ci.verify_docs()
 
 
 if __name__ == "__main__":

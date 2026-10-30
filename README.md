@@ -1,6 +1,6 @@
 # DNS Shield
 
-<img src="app/src/main/res/drawable/dns_shield_icon_1780828904628.png" width="96" alt="DNS Shield 應用程式圖示">
+<img src="app/src/main/res/drawable-nodpi/dns_shield_icon_1780828904628.png" width="96" alt="DNS Shield 應用程式圖示">
 
 DNS Shield 讓你決定要攔哪些網域、查詢交給誰解析。用 1Hosts Lite 與自訂規則封鎖常見廣告、追蹤和惡意網域，解析器也能自行選擇。Android 7.0（API 24）以上可用，不需 Root。
 
@@ -9,7 +9,7 @@ DNS Shield 讓你決定要攔哪些網域、查詢交給誰解析。用 1Hosts L
 - **擋哪些網域：** 使用 APK 內附的 1Hosts Lite，也可新增允許或封鎖規則。名單隨 APK 更新，App 執行時不會另行下載。
 - **交給誰解析：** 選擇 Google、Cloudflare、AdGuard、Quad9，或自訂 DNS／DoH。
 - **加密失敗怎麼辦：** 預設加密優先，DoH 故障時可降級為明文 UDP/53；選「僅加密」則故障時回報解析錯誤，不送出明文 DNS。
-- **App 例外與記錄：** 排除指定 App，查看查詢統計與即時診斷日誌。
+- **App 例外與記錄：** 排除指定 App；同網域記錄合併顯示最新判斷與累計記錄次數，可搜尋、篩選及複製完整網域。
 
 ## 安裝與啟動
 
@@ -31,18 +31,9 @@ DoH 透過 HTTPS 傳輸；降級至 UDP/53 時，查詢未加密。DNS Shield �
 
 部分手機的電池或背景管理會阻止 VPN 恢復；已測的 ASUS Android 10 裝置需要替 DNS Shield 設定電池豁免。Android 系統 Always-on 可用；目前不支援封鎖未經 VPN 的連線（lockdown）。
 
-<details>
-<summary>驗收報告與待補項目</summary>
-
-- 共通驗收：[共同驗收](docs/r09-common-validation.md)。
-- Wi-Fi／行動數據切換：[驗收報告](docs/r10-cellular-handoff-validation.md)。
-- 尚待特殊網路、裝置與長時間測試環境：IPv6-only／NAT64、真實 captive portal、完整 Android API／廠牌矩陣與真正低記憶體終止（LMK）、8–10 小時離電耗電 A/B；追蹤於 [#73](https://github.com/XiangWang2000/dns-shield/issues/73)。
-
-</details>
-
 ## 開發
 
-開發環境、架構與建置方式請看[技術與開發指南](docs/development.md)；版本異動見[CHANGELOG.md](CHANGELOG.md)，第三方資料與授權見[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+開發環境、架構與指令見[開發指南](docs/development.md)；規格、benchmark 與歷史驗證從[文件索引](docs/README.md)查找。版本異動見[CHANGELOG.md](CHANGELOG.md)，第三方資料與授權見[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 授權
 

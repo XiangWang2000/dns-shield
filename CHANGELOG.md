@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.4.0 - 2026-10-30
+
+### Changed
+
+- 重新整理控制中心、DNS 設定、App 例外、網域規則與運作記錄的版面、操作狀態及繁體中文說明。
+- 同一個正規化網域合併為一筆記錄，更新最新時間、最新判斷與累計記錄次數；最多保留 100 個不同網域。
+- 運作記錄可搜尋、依允許／封鎖結果篩選並複製完整網域，保留一鍵允許、目前規則提示與復原操作。
+- 內建 1Hosts Lite 更新為 2026-09-03 來源，共 102,241 筆；固定來源 revision 與資產 SHA-256，名單仍隨 APK 更新。
+- 分開顯示 VPN 防護與底層網路狀態，涵蓋確認中、等待網路、確認連線、需要登入與連線正常；未連網時不將 VPN 運作狀態混稱為連線成功。
+- 區分已選 DNS 與服務實際套用的設定，相同的主要／備援 DoH 端點合併顯示；名單來源日期於摘要直接可見。
+- 維護腳本集中至 tools/，保留根目錄 verify.ps1；技術文件合併並將歷史驗收移至 docs/archive/。
+- 更新 Android 建置工具與依賴，使用 AGP 9.5.0 與 Gradle 9.6.0。
+
+### Fixed
+
+- App 例外清單載入失敗時提供重新載入，並避免重複啟動載入工作。
+- 改善長網域、小螢幕與大字體下的操作版面，避免允許通知遮住記錄，並保留可見的復原按鈕。
+- 「包含子網域」可由整列切換，無障礙節點一併提供標籤與開關狀態；儲存期間停用重複操作。
+
+### Known limits
+
+- 防護仍限於 IPv4 UDP／TCP 53；IPv6 DNS、App 自帶的 DoH／DoT 與直接 IP 連線不會被攔截。
+- 實機網路恢復與模擬器 UI 驗證分別記錄；真正 captive portal、完整 API／廠牌矩陣及 TalkBack 語音朗讀尚未完成驗收。
+
 ## 1.3.0 - 2026-10-13
 
 ### Added
@@ -37,10 +61,10 @@
 
 ### Validation and known limits
 
-- 完整驗證與 Android 10 實機、API 26／35 模擬器的代表性回歸已通過，詳見 [共同驗收](docs/r09-common-validation.md)、[傳輸上限](docs/r08-transport-size-validation.md) 及 [API 26 STOP](docs/api26-tun-stop-validation.md)。
-- Android 15 實機完成三輪 Wi-Fi／LTE 雙向切換、舊回應防護、strict 切換前後防護與行動網路雙棧驗證，詳見 [R10 驗收](docs/r10-cellular-handoff-validation.md)。
+- 完整驗證與 Android 10 實機、API 26／35 模擬器的代表性回歸已通過，詳見 [共同驗收](docs/archive/r09-common-validation.md)、[傳輸上限](docs/archive/r08-transport-size-validation.md) 及 [API 26 STOP](docs/archive/api26-tun-stop-validation.md)。
+- Android 15 實機完成三輪 Wi-Fi／LTE 雙向切換、舊回應防護、strict 切換前後防護與行動網路雙棧驗證，詳見 [R10 驗收](docs/archive/r10-cellular-handoff-validation.md)。
 - IPv6-only／NAT64、真正 captive portal、完整 API／廠牌矩陣及真正低記憶體回收、長時間耗電仍未完成，追蹤於 [#73](https://github.com/XiangWang2000/dns-shield/issues/73)。已測 ASUS Android 10 的背景恢復需電池豁免，DNS-only lockdown 不宣稱支援。
-- 正式簽章 APK、API35 模擬器與 Android 10／15 實機原地升級及代表性功能驗收已完成。Android 15 三輪 Wi-Fi／行動數據雙向切換與 UI 啟停通過，範圍及限制詳見 [候選優化與實機驗收](docs/release-1.3.0-optimization-validation.md)；首次審查及容量 SERVFAIL 原始證據見 [發版前審查](docs/release-1.3.0-preflight.md)。
+- 正式簽章 APK、API35 模擬器與 Android 10／15 實機原地升級及代表性功能驗收已完成。Android 15 三輪 Wi-Fi／行動數據雙向切換與 UI 啟停通過，範圍及限制詳見 [候選優化與實機驗收](docs/archive/release-1.3.0-optimization-validation.md)；首次審查及容量 SERVFAIL 原始證據見 [發版前審查](docs/archive/release-1.3.0-preflight.md)。
 
 ## 1.2.2 - 2026-08-21
 

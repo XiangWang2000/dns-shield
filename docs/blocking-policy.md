@@ -80,4 +80,4 @@ Installers are serialized, while domain lookups remain lock-free and delegate th
 
 ## Current scope
 
-The production APK packages a pinned, verified 102,972-entry 1Hosts Lite compiled blocklist and the reviewed Public Suffix artifact used for bounded parent matching. The repository still does not ship a runtime remote-update flow, user-managed allowlist persistence, blocking-policy UI, or Room schema change. A private app-files `active.bin` remains an explicit local override; without one, the packaged production list is active by default.
+The production APK packages a pinned, verified 102,241-entry 1Hosts Lite compiled blocklist and the reviewed Public Suffix artifact used for bounded parent matching. The repository still does not ship a runtime remote-update flow, user-managed allowlist persistence, blocking-policy UI, or Room schema change. A private app-files `active.bin` remains an explicit local override; without one, the packaged production list is active by default.

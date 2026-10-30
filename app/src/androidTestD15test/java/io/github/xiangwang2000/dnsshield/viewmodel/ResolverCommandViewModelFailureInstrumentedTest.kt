@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -166,6 +167,42 @@ class ResolverCommandViewModelFailureInstrumentedTest {
         val logs = viewModel.liveLogs.value
         assertTrue(logs.any { it.contains("找不到這組 DNS，請重新選擇。") })
         assertFalse(logs.any { it.contains("9304") })
+        assertEquals(emptyList<Throwable>(), waiterFailures.toList())
+    }
+
+    @Test
+    fun visibleNoticeClearsOnlyAfterSuccessfulRetryOrDismissal() = runBlocking {
+        viewModel.resolverCommandOperations = operations(
+            setActive = { false },
+            updateFallback = { _, _ -> 1 },
+            deleteSafely = { true },
+            dispatch = { _, _ -> }
+        )
+        viewModel.selectDnsServer(9305)
+        val failed = withTimeout(10_000) {
+            viewModel.uiState.first { it.resolverNotice == "找不到這組 DNS，請重新選擇。" }
+        }
+        assertEquals("找不到這組 DNS，請重新選擇。", failed.resolverNotice)
+
+        viewModel.resolverCommandOperations = operations(
+            setActive = { true },
+            updateFallback = { _, _ -> 1 },
+            deleteSafely = { true },
+            dispatch = { _, _ -> }
+        )
+        viewModel.selectDnsServer(9305)
+        withTimeout(10_000) { viewModel.uiState.first { it.resolverNotice == null } }
+
+        viewModel.resolverCommandOperations = operations(
+            setActive = { false },
+            updateFallback = { _, _ -> 1 },
+            deleteSafely = { true },
+            dispatch = { _, _ -> }
+        )
+        viewModel.selectDnsServer(9305)
+        withTimeout(10_000) { viewModel.uiState.first { it.resolverNotice != null } }
+        viewModel.dismissResolverNotice()
+        withTimeout(10_000) { viewModel.uiState.first { it.resolverNotice == null } }
         assertEquals(emptyList<Throwable>(), waiterFailures.toList())
     }
 

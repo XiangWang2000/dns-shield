@@ -24,6 +24,3 @@ debug.keystore
 keystore.properties
 __pycache__/
 *.py[cod]
-
-# Local handoff notes; preserve on disk without publishing.
-/docs/progress-and-next-steps-2026-09-27.md

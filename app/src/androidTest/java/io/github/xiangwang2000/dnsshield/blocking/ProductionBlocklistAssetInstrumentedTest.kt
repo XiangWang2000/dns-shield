@@ -29,7 +29,7 @@ class ProductionBlocklistAssetInstrumentedTest {
             )
 
             assertEquals(
-                CompiledBlocklistStatus.Loaded(entryCount = 102_972),
+                CompiledBlocklistStatus.Loaded(entryCount = 102_241),
                 assembly.compiledBlocklistStatus
             )
             assertTrue(assembly.matcher.shouldBlock("app-measurement.com"))

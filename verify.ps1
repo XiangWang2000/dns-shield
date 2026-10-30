@@ -33,15 +33,18 @@ Set-Location $Root
 
 Write-Host "==> PowerShell script syntax"
 foreach ($scriptName in @(
-    "prepare-active-blocklist-production.ps1",
-    "install-active-blocklist-asset.ps1",
-    "benchmark-production-blocklist-android.ps1",
-    "prepare-public-suffix-production.ps1",
-    "install-public-suffix-asset.ps1",
-    "benchmark-runtime-domain-policy-android.ps1",
+    "tools/prepare-active-blocklist-production.ps1",
+    "tools/install-active-blocklist-asset.ps1",
+    "tools/benchmark-production-blocklist-android.ps1",
+    "tools/benchmark-public-suffix-android.ps1",
+    "tools/benchmark-public-suffix.ps1",
+    "tools/prepare-public-suffix-production.ps1",
+    "tools/install-public-suffix-asset.ps1",
+    "tools/benchmark-runtime-domain-policy-android.ps1",
     "tools/d14-device-test.ps1",
     "tools/d04-device-test.ps1",
-    "release.ps1"
+    "tools/release.ps1",
+    "tools/setup-release-signing.ps1"
 )) {
     $tokens = $null
     $parseErrors = $null

@@ -126,7 +126,10 @@ def documentation_errors(text, document, tracked):
 
 
 def verify_docs():
-    tracked = {p.decode("utf-8") for p in git("ls-files", "-z").split(b"\0") if p}
+    # Validate the publishable working tree before staging, including moves and new files.
+    listed = git("ls-files", "--cached", "--others", "--exclude-standard", "-z")
+    tracked = {p.decode("utf-8") for p in listed.split(b"\0") if p}
+    tracked = {p for p in tracked if (ROOT / p).is_file() or (ROOT / p).is_dir()}
     errors, count, evidence = [], 0, 0
     docs = sorted(p for p in tracked if is_documentation(p))
     for name in docs:
