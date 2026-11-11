@@ -44,13 +44,38 @@ class DnsTcpTunTest {
                 assertEquals(3, response[3].toInt() and 15)
                 assertNull(DnsTcpFrameCodec.readFrame(input))
             }
-            Socket().use { pending ->
-                pending.soTimeout = 10_000
-                pending.connect(InetSocketAddress("10.0.0.1", 53), 5_000)
-                context.startService(Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP))
-                withTimeout(15_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.STOPPED } }
-                try { assertEquals(-1, pending.getInputStream().read()) }
-                catch (_: SocketException) { /* Reset on TUN teardown is valid. */ }
+            Socket().use { socket ->
+                socket.soTimeout = 10_000
+                socket.connect(InetSocketAddress(java.net.InetAddress.getByName(DnsVpnAddresses.IPV6_DNS), 53), 5_000)
+                val input = socket.getInputStream()
+                val output = socket.getOutputStream()
+                repeat(3) { index ->
+                    val query = query(11 + index)
+                    DnsTcpFrameCodec.writeFrame(output, query)
+                    val response = requireNotNull(DnsTcpFrameCodec.readFrame(input))
+                    assertEquals(11 + index, response[1].toInt() and 255)
+                    assertEquals(3, response[3].toInt() and 15)
+                }
+                DnsTcpFrameCodec.writeFrame(output, query(14))
+                socket.shutdownOutput()
+                val response = requireNotNull(DnsTcpFrameCodec.readFrame(input))
+                assertEquals(14, response[1].toInt() and 255)
+                assertEquals(3, response[3].toInt() and 15)
+                assertNull(DnsTcpFrameCodec.readFrame(input))
+            }
+            Socket().use { pendingIpv4 ->
+                pendingIpv4.soTimeout = 10_000
+                pendingIpv4.connect(InetSocketAddress("10.0.0.1", 53), 5_000)
+                Socket().use { pendingIpv6 ->
+                    pendingIpv6.soTimeout = 10_000
+                    pendingIpv6.connect(InetSocketAddress(java.net.InetAddress.getByName(DnsVpnAddresses.IPV6_DNS), 53), 5_000)
+                    context.startService(Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP))
+                    withTimeout(15_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.STOPPED } }
+                    try { assertEquals(-1, pendingIpv4.getInputStream().read()) }
+                    catch (_:SocketException) { /* Reset on TUN teardown is valid. */ }
+                    try { assertEquals(-1, pendingIpv6.getInputStream().read()) }
+                    catch (_:SocketException) { /* Reset on TUN teardown is valid. */ }
+                }
             }
         } finally {
             context.startService(Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP))
@@ -70,6 +95,8 @@ class DnsTcpTunTest {
         val tcp = java.net.ServerSocket().apply { bind(InetSocketAddress(address, io.github.xiangwang2000.dnsshield.BuildConfig.DNS_UPSTREAM_PORT)) }
         val udpCount = java.util.concurrent.atomic.AtomicInteger()
         val tcpCount = java.util.concurrent.atomic.AtomicInteger()
+        val addressCount = java.util.concurrent.atomic.AtomicInteger()
+        val blockedCount = java.util.concurrent.atomic.AtomicInteger()
         val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
         val udpThread = Thread {
             try {
@@ -79,10 +106,22 @@ class DnsTcpTunTest {
                     udp.receive(packet)
                     val request = packet.data.copyOf(packet.length)
                     val parsed = (DnsMessageValidator.parseQuery(request) as DnsQueryParseResult.Valid).query
-                    val response = DnsMessageValidator.buildServFailResponse(parsed)
-                    if (parsed.question.domainName == "d11-large.example.test") {
-                        udpCount.incrementAndGet()
-                        response[2] = 0x83.toByte(); response[3] = 0x80.toByte()
+                    val response = when (parsed.question.domainName) {
+                        "d11-large.example.test", "d11-large-ipv6.example.test" -> {
+                            udpCount.incrementAndGet()
+                            largeTxtResponse(parsed, recordCount = 4, truncated = true).also {
+                                check(it.size > 512) { "TC upstream fixture response must exceed the client UDP limit" }
+                            }
+                        }
+                        "ipv6-a.example.test", "ipv6-aaaa.example.test" -> {
+                            addressCount.incrementAndGet()
+                            addressResponse(parsed)
+                        }
+                        "doubleclick.net" -> {
+                            blockedCount.incrementAndGet()
+                            DnsMessageValidator.buildServFailResponse(parsed)
+                        }
+                        else -> DnsMessageValidator.buildServFailResponse(parsed)
                     }
                     udp.send(java.net.DatagramPacket(response, response.size, packet.socketAddress))
                 }
@@ -90,16 +129,14 @@ class DnsTcpTunTest {
         }.apply { start() }
         val tcpThread = Thread {
             try {
-                tcp.accept().use { socket ->
-                    socket.soTimeout = 8000
-                    val request = requireNotNull(DnsTcpFrameCodec.readFrame(socket.getInputStream()))
-                    tcpCount.incrementAndGet()
-                    val parsed = (DnsMessageValidator.parseQuery(request) as DnsQueryParseResult.Valid).query
-                    val response = DnsMessageValidator.buildServFailResponse(parsed).also {
-                        it[2] = 0x81.toByte(); it[3] = 0x80.toByte(); it[7] = 30
+                repeat(2) {
+                    tcp.accept().use { socket ->
+                        socket.soTimeout = 8000
+                        val request = requireNotNull(DnsTcpFrameCodec.readFrame(socket.getInputStream()))
+                        tcpCount.incrementAndGet()
+                        val parsed = (DnsMessageValidator.parseQuery(request) as DnsQueryParseResult.Valid).query
+                        DnsTcpFrameCodec.writeFrame(socket.getOutputStream(), largeTxtResponse(parsed, recordCount = 30))
                     }
-                    val record = byteArrayOf(0xc0.toByte(), 12, 0, 16, 0, 1, 0, 0, 0, 60, 0, 201.toByte(), 200.toByte()) + ByteArray(200) { 65 }
-                    DnsTcpFrameCodec.writeFrame(socket.getOutputStream(), response + (1..30).flatMap { record.toList() }.toByteArray())
                 }
             } catch (error: Throwable) { if (!tcp.isClosed) failure.set(error) }
         }.apply { start() }
@@ -120,9 +157,29 @@ class DnsTcpTunTest {
             }
             // Let initial underlying-network callbacks finish before testing steady-state TCP fallback.
             kotlinx.coroutines.delay(1_000)
-            val request = (listOf<Byte>(0, 41, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0) +
-                "d11-large.example.test".split('.').flatMap { listOf(it.length.toByte()) + it.toByteArray().toList() } +
-                listOf<Byte>(0, 0, 16, 0, 1)).toByteArray()
+            listOf("ipv6-a.example.test" to 1, "ipv6-aaaa.example.test" to 28).forEachIndexed { index, (domain, type) ->
+                val udpWire = query(0x5200 + index, domain, type)
+                val parsedUdp = parseQuery(udpWire)
+                assertDnsAddressAnswer(udpQuery(DnsVpnAddresses.IPV6_DNS, udpWire), parsedUdp, type)
+
+                val tcpWire = query(0x5210 + index, domain, type)
+                val parsedTcp = parseQuery(tcpWire)
+                assertDnsAddressAnswer(tcpQuery(DnsVpnAddresses.IPV6_DNS, tcpWire), parsedTcp, type)
+            }
+            assertEquals("IPv6 UDP A and AAAA queries should each reach upstream once; TCP reads the cache", 2, addressCount.get())
+
+            if (InstrumentationRegistry.getArguments().getString("exercise_ip_change") == "true") {
+                assertSelectedIpChangeInvalidatesCache(context, addressCount)
+            }
+
+            val blockedWire = query(0x5220, "doubleclick.net", 1)
+            val blockedQuery = parseQuery(blockedWire)
+            val blockedAnswer = udpQuery(DnsVpnAddresses.IPV6_DNS, blockedWire)
+            assertTrue(DnsMessageValidator.isValidResponse(blockedAnswer, blockedQuery))
+            assertEquals(3, readUnsignedShort(blockedAnswer, 2) and 0x0F)
+            assertEquals("Blocked IPv6 query must not reach upstream", 0, blockedCount.get())
+
+            val request = query(41, "d11-large.example.test", 16)
             java.net.DatagramSocket().use { client ->
                 client.soTimeout = 500
                 client.connect(java.net.InetAddress.getByName("10.0.0.1"), 53)
@@ -158,14 +215,101 @@ class DnsTcpTunTest {
             }
             assertEquals(1, udpCount.get())
             assertEquals("UDP/TCP client retries must share the full response cache", 1, tcpCount.get())
+
+            val ipv6Request = query(0x5230, "d11-large-ipv6.example.test", 16)
+            val ipv6Parsed = parseQuery(ipv6Request)
+            val ipv6UdpAnswer = udpQuery(DnsVpnAddresses.IPV6_DNS, ipv6Request)
+            assertTrue("IPv6 UDP should receive a small TC response", ipv6UdpAnswer.size <= 512)
+            assertTrue("IPv6 UDP response must request TCP retry", DnsMessageValidator.isTruncatedResponse(ipv6UdpAnswer, ipv6Parsed))
+            Socket().use { client ->
+                client.soTimeout = 10_000
+                client.connect(InetSocketAddress(java.net.InetAddress.getByName(DnsVpnAddresses.IPV6_DNS), 53), 5_000)
+                repeat(2) { index ->
+                    val next = query(0x5240 + index, "d11-large-ipv6.example.test", 16)
+                    val parsed = parseQuery(next)
+                    DnsTcpFrameCodec.writeFrame(client.getOutputStream(), next)
+                    val answer = requireNotNull(DnsTcpFrameCodec.readFrame(client.getInputStream()))
+                    assertTrue("IPv6 TCP must retain the complete large answer: ${answer.size} bytes", answer.size > 4096)
+                    assertEquals(0, readUnsignedShort(answer, 2) and 0x0200)
+                    assertEquals(30, readUnsignedShort(answer, 6))
+                    assertTrue(DnsMessageValidator.isValidResponse(answer, parsed))
+                }
+            }
+            assertEquals(2, udpCount.get())
+            assertEquals("IPv4 and IPv6 retries should each fetch one full answer from upstream", 2, tcpCount.get())
             failure.get()?.let { throw AssertionError("Fake upstream failed", it) }
         } finally {
-            context.startService(Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP))
-            withTimeout(15_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.STOPPED } }
-            if (previous != null) dao.setActiveDnsServer(previous.id)
-            dao.deleteDnsServerById(resolverId)
-            udp.close(); tcp.close(); udpThread.join(1000); tcpThread.join(9000)
-            assertFalse(udpThread.isAlive); assertFalse(tcpThread.isAlive)
+            try {
+                context.startService(Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP))
+                withTimeout(15_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.STOPPED } }
+                if (previous != null) dao.setActiveDnsServer(previous.id)
+                dao.deleteDnsServerById(resolverId)
+            } finally {
+                udp.close(); tcp.close(); udpThread.join(1000); tcpThread.join(9000)
+                assertFalse(udpThread.isAlive); assertFalse(tcpThread.isAlive)
+            }
+        }
+    }
+
+    /** Only the explicitly requested emulator run changes its disposable underlay address. */
+    @Suppress("DEPRECATION")
+    private suspend fun assertSelectedIpChangeInvalidatesCache(
+        context: android.content.Context,
+        upstreamCount: java.util.concurrent.atomic.AtomicInteger
+    ) {
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        fun shell(command: String): String = android.os.ParcelFileDescriptor.AutoCloseInputStream(
+            automation.executeShellCommand(command)
+        ).bufferedReader().use { it.readText() }
+        assertEquals("This scenario is limited to the disposable Android emulator", "1", shell("getprop ro.kernel.qemu").trim())
+        val manager = context.getSystemService(android.net.ConnectivityManager::class.java)
+        val physical = manager.allNetworks.first { network ->
+            manager.getNetworkCapabilities(network)?.let {
+                !it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) &&
+                    it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) &&
+                    it.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            } == true
+        }
+        val networkId = physical.networkHandle
+        val iface = requireNotNull(manager.getLinkProperties(physical)?.interfaceName)
+        require(iface.matches(Regex("[a-zA-Z0-9_.-]+")))
+        val cidr = "2001:db8:7c0d::2/64"
+        val address = requireNotNull(IpAddressLiteral.parse("2001:db8:7c0d::2")).toInetAddress()
+        assertFalse(manager.getLinkProperties(physical)!!.linkAddresses.any { it.address == address })
+        val oldClient = DnsVpnService.getOkHttpClient()
+        var added = false
+        var verified = false
+        try {
+            assertEquals("", shell("su 0 ip -6 addr add $cidr dev $iface nodad").trim())
+            added = true
+            val observed = kotlinx.coroutines.withTimeoutOrNull(10_000) {
+                while (manager.getLinkProperties(physical)?.linkAddresses?.any { it.address == address } != true ||
+                    DnsVpnService.getOkHttpClient() === oldClient) kotlinx.coroutines.delay(50)
+                true
+            } == true
+            assertTrue("IP change did not rebuild DoH: network=$networkId properties=${manager.getLinkProperties(physical)} clientChanged=${DnsVpnService.getOkHttpClient() !== oldClient}", observed)
+            kotlinx.coroutines.delay(1_000)
+            assertEquals(networkId, physical.networkHandle)
+            assertTrue("The same physical Network must remain connected", manager.allNetworks.contains(physical))
+            assertTrue(manager.getNetworkCapabilities(physical)
+                ?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true)
+            val countBefore = upstreamCount.get()
+            val wire = query(0x5260, "ipv6-a.example.test", 1)
+            assertDnsAddressAnswer(udpQuery(DnsVpnAddresses.IPV6_DNS, wire), parseQuery(wire), 1)
+            assertEquals("Same-ID IP changes must invalidate the previously cached answer", countBefore + 1, upstreamCount.get())
+            verified = true
+            println("IP_CONTEXT_CHANGE_PASS networkId=$networkId interface=$iface cacheInvalidated=true dohClientRebuilt=true")
+        } finally {
+            if (added) {
+                val clientBeforeRemoval = DnsVpnService.getOkHttpClient()
+                assertEquals("", shell("su 0 ip -6 addr del $cidr dev $iface").trim())
+                val restored = kotlinx.coroutines.withTimeoutOrNull(10_000) {
+                    while (manager.getLinkProperties(physical)?.linkAddresses?.any { it.address == address } == true ||
+                        DnsVpnService.getOkHttpClient() === clientBeforeRemoval) kotlinx.coroutines.delay(50)
+                    true
+                } == true
+                if (verified) assertTrue("Removing the test address must restore IP context and rebuild DoH", restored)
+            }
         }
     }
 
@@ -247,7 +391,79 @@ class DnsTcpTunTest {
             withTimeout(15_000) { DnsVpnService.lifecycleStateFlow.first { it == VpnLifecycleState.STOPPED } }
         }
     }
-    private fun query(id: Int): ByteArray = (listOf<Byte>(0, id.toByte(), 1, 0, 0, 1, 0, 0, 0, 0, 0, 0) +
-        "doubleclick.net".split('.').flatMap { listOf(it.length.toByte()) + it.toByteArray().toList() } +
-        listOf<Byte>(0, 0, 1, 0, 1)).toByteArray()
+    private fun query(id: Int, domain: String = "doubleclick.net", type: Int = 1): ByteArray =
+        (listOf<Byte>((id ushr 8).toByte(), id.toByte(), 1, 0, 0, 1, 0, 0, 0, 0, 0, 0) +
+            domain.split('.').flatMap { listOf(it.length.toByte()) + it.toByteArray().toList() } +
+            listOf<Byte>(0, (type ushr 8).toByte(), type.toByte(), 0, 1)).toByteArray()
+
+    private fun parseQuery(wire: ByteArray): ParsedDnsQuery =
+        (DnsMessageValidator.parseQuery(wire) as DnsQueryParseResult.Valid).query
+
+    private fun udpQuery(address: String, wire: ByteArray): ByteArray =
+        java.net.DatagramSocket().use { socket ->
+            socket.soTimeout = 8_000
+            socket.connect(java.net.InetAddress.getByName(address), 53)
+            socket.send(java.net.DatagramPacket(wire, wire.size))
+            val packet = java.net.DatagramPacket(ByteArray(4096), 4096)
+            socket.receive(packet)
+            packet.data.copyOf(packet.length)
+        }
+
+    private fun tcpQuery(address: String, wire: ByteArray): ByteArray = Socket().use { socket ->
+        socket.soTimeout = 8_000
+        socket.connect(InetSocketAddress(java.net.InetAddress.getByName(address), 53), 5_000)
+        DnsTcpFrameCodec.writeFrame(socket.getOutputStream(), wire)
+        requireNotNull(DnsTcpFrameCodec.readFrame(socket.getInputStream()))
+    }
+
+    private fun addressResponse(query: ParsedDnsQuery): ByteArray {
+        val type = query.question.type
+        val address = when (type) {
+            1 -> byteArrayOf(203.toByte(), 0, 113, 7)
+            28 -> byteArrayOf(0x20, 0x01, 0x0d, 0xb8.toByte()) + ByteArray(10) + byteArrayOf(0, 7)
+            else -> return DnsMessageValidator.buildServFailResponse(query)
+        }
+        val response = query.wire.copyOf().also {
+            it[2] = 0x81.toByte()
+            it[3] = 0x80.toByte()
+            it[6] = 0
+            it[7] = 1
+        }
+        val record = byteArrayOf(
+            0xc0.toByte(), 12, (type ushr 8).toByte(), type.toByte(), 0, 1,
+            0, 0, 0, 60, (address.size ushr 8).toByte(), address.size.toByte()
+        )
+        return response + record + address
+    }
+
+    private fun largeTxtResponse(
+        query: ParsedDnsQuery,
+        recordCount: Int,
+        truncated: Boolean = false
+    ): ByteArray {
+        val response = DnsMessageValidator.buildServFailResponse(query).also {
+            it[2] = if (truncated) 0x83.toByte() else 0x81.toByte()
+            it[3] = 0x80.toByte()
+            it[6] = (recordCount ushr 8).toByte()
+            it[7] = recordCount.toByte()
+        }
+        val record = byteArrayOf(0xc0.toByte(), 12, 0, 16, 0, 1, 0, 0, 0, 60, 0, 201.toByte()) +
+            byteArrayOf(200.toByte()) + ByteArray(200) { 65 }
+        return response + (1..recordCount).flatMap { record.toList() }.toByteArray()
+    }
+
+    private fun assertDnsAddressAnswer(response: ByteArray, query: ParsedDnsQuery, type: Int) {
+        assertTrue("Invalid DNS response for ${query.question.domainName}", DnsMessageValidator.isValidResponse(response, query))
+        assertEquals(0, readUnsignedShort(response, 2) and 0x0F)
+        assertEquals(1, readUnsignedShort(response, 6))
+        val answerOffset = query.questionEndOffset
+        assertEquals(type, readUnsignedShort(response, answerOffset + 2))
+        val expectedAddress = when (type) {
+            1 -> byteArrayOf(203.toByte(), 0, 113, 7)
+            28 -> byteArrayOf(0x20, 0x01, 0x0d, 0xb8.toByte()) + ByteArray(10) + byteArrayOf(0, 7)
+            else -> error("Unexpected address query type $type")
+        }
+        assertEquals(expectedAddress.size, readUnsignedShort(response, answerOffset + 10))
+        assertArrayEquals(expectedAddress, response.copyOfRange(answerOffset + 12, answerOffset + 12 + expectedAddress.size))
+    }
 }

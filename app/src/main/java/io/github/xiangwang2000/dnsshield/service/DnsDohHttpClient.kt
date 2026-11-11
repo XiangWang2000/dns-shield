@@ -26,7 +26,7 @@ internal suspend fun OkHttpClient.lookupDoh(
     deadline: DnsRequestDeadline,
     attemptTimeoutMillis: Long? = null,
     onCallQueued: () -> Unit = {},
-    logFailure: (String, Throwable?) -> Unit
+    logFailure: (String) -> Unit
 ): ByteArray? {
     val remainingMillis = deadline.remainingMillis()
     if (remainingMillis <= 0L) return null
@@ -49,7 +49,7 @@ internal suspend fun OkHttpClient.lookupDoh(
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 if (continuation.isActive) {
-                    logFailure("DoH resolution failed for $endpointUrl", e)
+                    logFailure("DoH request failed for ${request.url.host}: ${e.javaClass.simpleName}")
                     continuation.resume(null)
                 }
             }
@@ -67,14 +67,14 @@ internal suspend fun OkHttpClient.lookupDoh(
                             )
                             continuation.resume(bytes)
                         } else {
-                            logFailure("DoH resolution error: HTTP ${response.code} for $endpointUrl", null)
+                            logFailure("DoH HTTP ${response.code} from ${request.url.host}")
                             continuation.resume(null)
                         }
                     } else {
                         response.close()
                     }
                 } catch (e: Exception) {
-                    logFailure("Failed reading DoH body bytes", e)
+                    logFailure("DoH response read failed for ${request.url.host}: ${e.javaClass.simpleName}")
                     if (continuation.isActive) continuation.resume(null)
                 } finally {
                     try {

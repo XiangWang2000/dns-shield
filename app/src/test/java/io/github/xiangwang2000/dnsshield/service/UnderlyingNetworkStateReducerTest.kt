@@ -8,6 +8,29 @@ import kotlin.test.assertTrue
 
 class UnderlyingNetworkStateReducerTest {
     @Test
+    fun confirmsThePreVpnRouteOnceAfterAndroidSelectsIt() {
+        val confirmation = StartupNetworkConfirmation(42L)
+        val unknown = UnderlyingNetworkSnapshot(UnderlyingNetworkConnectivity.UNKNOWN, 1)
+        val online = UnderlyingNetworkSnapshot(UnderlyingNetworkConnectivity.ONLINE, 1, selectedNetworkId = 42L)
+        assertFalse(confirmation.confirmsFirstRoute(unknown))
+        assertFalse(confirmation.confirmsFirstRoute(unknown.copy(selectedNetworkId = 42L)))
+        assertTrue(confirmation.confirmsFirstRoute(online))
+        assertFalse(confirmation.confirmsFirstRoute(online))
+    }
+
+    @Test
+    fun keepsTheDebounceAfterAConflictingRouteOrLossOfValidation() {
+        val online = UnderlyingNetworkSnapshot(UnderlyingNetworkConnectivity.ONLINE, 1, selectedNetworkId = 42L)
+        val changedRoute = StartupNetworkConfirmation(42L)
+        val lostValidation = StartupNetworkConfirmation(42L)
+        assertFalse(changedRoute.confirmsFirstRoute(online.copy(selectedNetworkId = 7L)))
+        assertFalse(changedRoute.confirmsFirstRoute(online))
+        assertFalse(lostValidation.confirmsFirstRoute(online.copy(connectivity = UnderlyingNetworkConnectivity.CONNECTING)))
+        assertFalse(lostValidation.confirmsFirstRoute(online))
+        assertFalse(StartupNetworkConfirmation(null).confirmsFirstRoute(online))
+    }
+
+    @Test
     fun ignoresVpnEventsAndReportsNonVpnConnectivity() {
         val reducer = UnderlyingNetworkStateReducer()
 
@@ -401,6 +424,114 @@ class UnderlyingNetworkStateReducerTest {
             reducer.selectDefaultNetwork(4)?.current?.connectivity
         )
     }
+
+    @Test
+    fun selectedSameNetworkIpContextChangesFenceDnsWithoutChangingConnectivity() {
+        val reducer = UnderlyingNetworkStateReducer()
+        reducer.update(facts(1, isValidated = true))
+        reducer.selectDefaultNetwork(1)
+        assertNull(reducer.updateIpContext(1, ipContext()))
+        val before = reducer.snapshot()
+        val changes = listOf(
+            ipContext(prefix = "2001:db8:64::/96"),
+            ipContext(prefix = "2001:db8:64::/96", address = "2001:db8:2::2/64"),
+            ipContext(prefix = "2001:db8:64::/96", address = "2001:db8:2::2/64", route = "::/0 via fe80::2"),
+            ipContext(prefix = "2001:db8:64::/96", address = "2001:db8:2::2/64", route = "::/0 via fe80::2", dns = "2001:db8::54")
+        )
+        for (context in changes) {
+            val transition = requireNotNull(reducer.updateIpContext(1, context))
+            assertEquals(before, transition.previous)
+            assertEquals(before, transition.current)
+            var fenced = false
+            assertTrue(transition.runIfDnsStateFenceRequired { fenced = true })
+            assertTrue(fenced)
+            assertNull(reducer.updateIpContext(1, context))
+        }
+    }
+
+    @Test
+    fun selectedPrivateDnsChangesFenceDnsWithoutChangingConnectivity() {
+        val reducer = UnderlyingNetworkStateReducer()
+        reducer.update(facts(1, isValidated = true))
+        reducer.selectDefaultNetwork(1)
+        fun privateDnsContext(active: Boolean, serverName: String? = null) =
+            UnderlyingNetworkIpContext.of(
+                emptyList(), emptyList(), listOf("192.0.2.53"),
+                privateDnsActive = active, privateDnsServerName = serverName
+            )
+
+        assertNull(reducer.updateIpContext(1, privateDnsContext(false)))
+        val opportunistic = requireNotNull(reducer.updateIpContext(1, privateDnsContext(true)))
+        assertTrue(opportunistic.shouldFenceDnsState)
+        assertEquals(opportunistic.previous, opportunistic.current)
+
+        val strict = privateDnsContext(true, "resolver.example")
+        assertTrue(requireNotNull(reducer.updateIpContext(1, strict)).shouldFenceDnsState)
+        assertNull(reducer.updateIpContext(1, strict))
+    }
+
+    @Test
+    fun unselectedIpChangesAreStoredWithoutFencingAndSelectionStillFences() {
+        val reducer = UnderlyingNetworkStateReducer()
+        reducer.update(facts(1, isValidated = true))
+        reducer.update(facts(2, isValidated = true))
+        reducer.selectDefaultNetwork(1)
+        assertNull(reducer.updateIpContext(2, ipContext()))
+        assertNull(reducer.updateIpContext(2, ipContext(prefix = "2001:db8:64::/96")))
+        assertEquals(1L, reducer.snapshot().selectedNetworkId)
+        assertTrue(reducer.selectDefaultNetwork(2)?.shouldFenceDnsState == true)
+        assertNull(reducer.updateIpContext(2, ipContext(prefix = "2001:db8:64::/96")))
+        assertTrue(reducer.updateIpContext(2, ipContext())?.shouldFenceDnsState == true)
+    }
+
+    @Test
+    fun ipContextBeforeCapabilitiesOrSelectionIsAnInitialBaseline() {
+        val reducer = UnderlyingNetworkStateReducer()
+        assertNull(reducer.updateIpContext(9, ipContext()))
+        reducer.update(facts(9, isValidated = true))
+        assertTrue(reducer.selectDefaultNetwork(9)?.shouldFenceDnsState == true)
+        assertNull(reducer.updateIpContext(9, ipContext()))
+        assertTrue(reducer.updateIpContext(9, ipContext(prefix = null))?.shouldFenceDnsState == true)
+    }
+
+    @Test
+    fun normalizedIpContextsIgnoreOrderingAndDoNotRetainMutableInputLists() {
+        val addresses = mutableListOf("2001:db8::2/64", "192.0.2.2/24")
+        val context = UnderlyingNetworkIpContext.of(addresses, listOf("b", "a"), listOf("::1", "::1"))
+        addresses.clear()
+        assertEquals(context, UnderlyingNetworkIpContext.of(
+            listOf("192.0.2.2/24", "2001:db8::2/64"), listOf("a", "b", "a"), listOf("::1")
+        ))
+        val reducer = UnderlyingNetworkStateReducer()
+        reducer.update(facts(1, isValidated = true))
+        reducer.selectDefaultNetwork(1)
+        assertNull(reducer.updateIpContext(1, context))
+        assertNull(reducer.updateIpContext(1, UnderlyingNetworkIpContext.of(
+            listOf("2001:db8::2/64", "192.0.2.2/24"), listOf("b", "a"), listOf("::1")
+        )))
+    }
+
+    @Test
+    fun lostNetworksAndCallbackRestartDiscardIpContextBaselines() {
+        val reducer = UnderlyingNetworkStateReducer()
+        reducer.update(facts(3, isValidated = true))
+        reducer.selectDefaultNetwork(3)
+        reducer.updateIpContext(3, ipContext())
+        reducer.update(facts(3, lost = true))
+        reducer.update(facts(3, isValidated = true))
+        assertNull(reducer.updateIpContext(3, ipContext(prefix = null)))
+        reducer.clear()
+        reducer.update(facts(3, isValidated = true))
+        reducer.selectDefaultNetwork(3)
+        assertNull(reducer.updateIpContext(3, ipContext()))
+    }
+
+    private fun ipContext(
+        prefix: String? = "64:ff9b::/96",
+        address: String = "2001:db8:1::2/64",
+        route: String = "::/0 via fe80::1",
+        dns: String = "2001:db8::53"
+    ) = UnderlyingNetworkIpContext.of(listOf(address), listOf(route), listOf(dns), prefix)
 
     private fun facts(
         networkId: Long,

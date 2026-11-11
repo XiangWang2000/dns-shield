@@ -83,6 +83,184 @@ class DnsMessageValidatorTest {
     }
 
     @Test
+    fun addsPlainEdnsOnlyToUnsignedPureQuestionClassicQueriesForSystemRetry() {
+        val queryBytes = DnsTestMessages.query(name = "txt.example", type = 16)
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val originalWire = query.wire.copyOf()
+
+        val retry = assertNotNull(DnsMessageValidator.withEdnsForSystemRetry(query))
+        val optOffset = queryBytes.size
+        assertEquals(queryBytes.size + 11, retry.wire.size)
+        val expectedPrefix = queryBytes.copyOf().also { it[11] = 1 }
+        assertContentEquals(expectedPrefix, retry.wire.copyOfRange(0, queryBytes.size))
+        assertEquals(0x0100, readUnsignedShort(retry.wire, 2))
+        assertEquals(1, readUnsignedShort(retry.wire, 10))
+        assertEquals(0, retry.wire[optOffset].toInt())
+        assertEquals(41, readUnsignedShort(retry.wire, optOffset + 1))
+        assertEquals(4096, readUnsignedShort(retry.wire, optOffset + 3))
+        assertEquals(0L, retry.wire.copyOfRange(optOffset + 5, optOffset + 9).fold(0L) { value, byte ->
+            (value shl 8) or (byte.toLong() and 0xFFL)
+        })
+        assertEquals(0, readUnsignedShort(retry.wire, optOffset + 9))
+        assertEquals(DnsMessageValidator.MAX_UDP_RESPONSE_BYTES, retry.maxUdpResponseBytes)
+        assertContentEquals(originalWire, query.wire)
+
+        val ednsQuery = assertIs<DnsQueryParseResult.Valid>(
+            DnsMessageValidator.parseQuery(DnsTestMessages.query(edns = true, udpPayloadSize = 4096))
+        ).query
+        assertNull(DnsMessageValidator.withEdnsForSystemRetry(ednsQuery))
+
+        val answerQuery = DnsTestMessages.responseWithARecords(queryBytes, answerCount = 1).also {
+            it[2] = 0x01
+            it[3] = 0
+        }
+        val parsedAnswerQuery = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(answerQuery)).query
+        assertNull(DnsMessageValidator.withEdnsForSystemRetry(parsedAnswerQuery))
+
+        val additionalQuery = DnsTestMessages.responseWithARecords(queryBytes, answerCount = 0, additionalCount = 1).also {
+            it[2] = 0x01
+            it[3] = 0
+        }
+        val parsedAdditionalQuery = assertIs<DnsQueryParseResult.Valid>(
+            DnsMessageValidator.parseQuery(additionalQuery)
+        ).query
+        assertNull(DnsMessageValidator.withEdnsForSystemRetry(parsedAdditionalQuery))
+
+        val signedQuery = queryBytes.copyOf(queryBytes.size + 28).also { wire ->
+            val recordOffset = queryBytes.size
+            wire[2] = 0x01
+            wire[3] = 0
+            wire[recordOffset] = 0 // TSIG owner name.
+            wire[recordOffset + 1] = 0
+            wire[recordOffset + 2] = 250.toByte()
+            wire[recordOffset + 3] = 0xFF.toByte()
+            wire[recordOffset + 4] = 0xFF.toByte()
+            wire[recordOffset + 9] = 0
+            wire[recordOffset + 10] = 17
+            wire[recordOffset + 11] = 0 // Algorithm name.
+            wire[recordOffset + 22] = 0x12
+            wire[recordOffset + 23] = 0x34
+            wire[10] = 0
+            wire[11] = 1
+        }
+        val parsedSignedQuery = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(signedQuery)).query
+        assertNull(DnsMessageValidator.withEdnsForSystemRetry(parsedSignedQuery))
+    }
+
+    @Test
+    fun enlargesOnlyTheSoleExistingOptAndPreservesItsFlagsAndOptions() {
+        fun writeShort(wire: ByteArray, offset: Int, value: Int) {
+            wire[offset] = (value ushr 8).toByte()
+            wire[offset + 1] = value.toByte()
+        }
+
+        val base = DnsTestMessages.query(name = "txt.example", type = 16, edns = true, udpPayloadSize = 1232)
+        val optOffset = DnsTestMessages.queryQuestionEnd(base)
+        val option = byteArrayOf(0, 12, 0, 4, 1, 2, 3, 4)
+        val queryBytes = base.copyOf(base.size + option.size).also { wire ->
+            wire[optOffset + 7] = 0x80.toByte() // Preserve the DO flag.
+            writeShort(wire, optOffset + 9, option.size)
+            System.arraycopy(option, 0, wire, optOffset + 11, option.size)
+        }
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val originalWire = query.wire.copyOf()
+
+        val retry = assertNotNull(DnsMessageValidator.withEdnsForSystemRetry(query))
+        val expectedWire = originalWire.copyOf().also {
+            writeShort(it, optOffset + 3, DnsMessageValidator.MAX_UDP_RESPONSE_BYTES)
+        }
+        assertContentEquals(expectedWire, retry.wire)
+        assertContentEquals(originalWire, query.wire)
+        assertEquals(4096, retry.maxUdpResponseBytes)
+        assertEquals(optOffset + 3, retry.udpPayloadSizeOffset)
+        assertEquals(0x8000, readUnsignedShort(retry.wire, optOffset + 7))
+        assertContentEquals(option, retry.wire.copyOfRange(optOffset + 11, retry.wire.size))
+
+        val alreadyMaximum = assertIs<DnsQueryParseResult.Valid>(
+            DnsMessageValidator.parseQuery(
+                DnsTestMessages.query(name = "txt.example", type = 16, edns = true, udpPayloadSize = 4096)
+            )
+        ).query
+        assertNull(DnsMessageValidator.withEdnsForSystemRetry(alreadyMaximum))
+
+        val clampedMaximum = assertIs<DnsQueryParseResult.Valid>(
+            DnsMessageValidator.parseQuery(
+                DnsTestMessages.query(name = "txt.example", type = 16, edns = true, udpPayloadSize = 65_535)
+            )
+        ).query
+        assertNull(DnsMessageValidator.withEdnsForSystemRetry(clampedMaximum))
+
+        val noEdns = DnsTestMessages.query(name = "txt.example", type = 16)
+        val extraRecord = DnsTestMessages.responseWithARecords(noEdns, answerCount = 1)
+            .copyOfRange(noEdns.size, noEdns.size + 16)
+        val queryWithAnotherAdditional = queryBytes.copyOf(queryBytes.size + extraRecord.size).also { wire ->
+            wire[11] = 2
+            System.arraycopy(extraRecord, 0, wire, queryBytes.size, extraRecord.size)
+        }
+        val parsedWithAnotherAdditional = assertIs<DnsQueryParseResult.Valid>(
+            DnsMessageValidator.parseQuery(queryWithAnotherAdditional)
+        ).query
+        assertNull(DnsMessageValidator.withEdnsForSystemRetry(parsedWithAnotherAdditional))
+    }
+
+    @Test
+    fun stripsSyntheticEdnsAndLaterAdditionalsFromValidatedResponses() {
+        val originalBytes = DnsTestMessages.query(name = "txt.example", type = 16)
+        val original = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(originalBytes)).query
+        val retry = assertNotNull(DnsMessageValidator.withEdnsForSystemRetry(original))
+        val prefix = DnsTestMessages.responseWithARecords(retry.wire, answerCount = 1, additionalCount = 1)
+        val precedingAdditional = prefix.copyOfRange(prefix.size - 16, prefix.size)
+        val fullResponse = prefix.copyOf(prefix.size + 27).also { wire ->
+            fun writeShort(offset: Int, value: Int) {
+                wire[offset] = (value ushr 8).toByte()
+                wire[offset + 1] = value.toByte()
+            }
+
+            writeShort(10, 3)
+            val optOffset = prefix.size
+            wire[optOffset] = 0
+            writeShort(optOffset + 1, 41)
+            writeShort(optOffset + 3, DnsMessageValidator.MAX_UDP_RESPONSE_BYTES)
+            writeShort(optOffset + 9, 0)
+            System.arraycopy(precedingAdditional, 0, wire, optOffset + 11, precedingAdditional.size)
+        }
+
+        assertTrue(DnsMessageValidator.isValidResponse(fullResponse, retry))
+        val sanitized = assertNotNull(DnsMessageValidator.withoutSyntheticEdns(fullResponse, retry, original))
+        assertContentEquals(prefix, sanitized)
+        assertEquals(1, readUnsignedShort(sanitized, 6))
+        assertEquals(0, readUnsignedShort(sanitized, 8))
+        assertEquals(1, readUnsignedShort(sanitized, 10))
+        assertTrue(DnsMessageValidator.isValidResponse(sanitized, original))
+
+        val responseWithoutOpt = DnsTestMessages.response(retry.wire)
+        assertContentEquals(
+            responseWithoutOpt,
+            assertNotNull(DnsMessageValidator.withoutSyntheticEdns(responseWithoutOpt, retry, original))
+        )
+    }
+
+    @Test
+    fun rejectsInvalidOrUnrepresentableSyntheticEdnsResponses() {
+        val original = assertIs<DnsQueryParseResult.Valid>(
+            DnsMessageValidator.parseQuery(DnsTestMessages.query(name = "txt.example", type = 16))
+        ).query
+        val retry = assertNotNull(DnsMessageValidator.withEdnsForSystemRetry(original))
+
+        val wrongId = DnsTestMessages.response(retry.wire, transactionId = retry.transactionId + 1)
+        val wrongQuestion = DnsTestMessages.response(retry.wire, name = "other.example")
+        val malformed = DnsTestMessages.response(retry.wire) + byteArrayOf(0)
+        val extendedRcode = DnsTestMessages.responseWithOpt(retry.wire, extendedRcode = 1)
+        val unsupportedVersion = DnsTestMessages.responseWithOpt(retry.wire, extendedRcode = 0).also {
+            it[DnsTestMessages.queryQuestionEnd(retry.wire) + 6] = 1
+        }
+
+        listOf(wrongId, wrongQuestion, malformed, extendedRcode, unsupportedVersion).forEach { response ->
+            assertNull(DnsMessageValidator.withoutSyntheticEdns(response, retry, original))
+        }
+    }
+
+    @Test
     fun acceptsMaximumCompleteResponsesCachesThemAndTruncatesForUdp() {
         val queryBytes = DnsTestMessages.query(type = 16, edns = true, udpPayloadSize = 65_535)
         val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
@@ -101,6 +279,27 @@ class DnsMessageValidatorTest {
         assertTrue(DnsMessageValidator.isValidResponse(truncated, query))
         assertEquals(0, readUnsignedShort(truncated, 6))
         assertFalse(DnsMessageValidator.isCacheableResponse(truncated, query))
+    }
+
+    @Test
+    fun ipv6TruncationHonorsMtuWithoutChangingTheFullCachedAnswer() {
+        val wire = DnsTestMessages.query(edns = true, udpPayloadSize = 4096)
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(wire)).query
+        val full = DnsTestMessages.responseWithARecords(wire, answerCount = 100)
+        val original = full.copyOf()
+        val limit = DnsMessageValidator.maxClientUdpResponseBytes(query, ipHeaderBytes = 40)
+        assertEquals(1452, limit)
+        assertEquals(1232, DnsMessageValidator.maxClientUdpResponseBytes(query, 1280, 40))
+        val noEdns = assertIs<DnsQueryParseResult.Valid>(
+            DnsMessageValidator.parseQuery(DnsTestMessages.query())
+        ).query
+        assertEquals(512, DnsMessageValidator.maxClientUdpResponseBytes(noEdns, ipHeaderBytes = 40))
+        val truncated = assertNotNull(DnsMessageValidator.truncateResponseForClient(full, query, limit))
+        assertTrue(truncated.size <= limit)
+        assertTrue(DnsMessageValidator.isTruncatedResponse(truncated, query))
+        assertTrue(DnsMessageValidator.isValidResponse(truncated, query))
+        assertContentEquals(original, full)
+        assertTrue(DnsMessageValidator.isCacheableResponse(full, query))
     }
 
     @Test
@@ -278,6 +477,12 @@ class DnsMessageValidatorTest {
             message[offset + 5] = 1
         }
         assertIs<DnsQueryParseResult.Rejected>(DnsMessageValidator.parseQuery(pointerLoop))
+
+        val recordOffset = query.size
+        val backwardLoop = compressedRecord.copyOfRange(0, recordOffset) +
+            byteArrayOf(1, 'a'.code.toByte(), 0xC0.toByte(), recordOffset.toByte()) +
+            compressedRecord.copyOfRange(recordOffset + 2, compressedRecord.size)
+        assertIs<DnsQueryParseResult.Rejected>(DnsMessageValidator.parseQuery(backwardLoop))
     }
 
     @Test
@@ -298,6 +503,22 @@ class DnsMessageValidatorTest {
         assertFalse(DnsMessageValidator.isValidResponse(wrongType, query))
         assertFalse(DnsMessageValidator.isValidResponse(wrongQuestion, query))
         assertFalse(DnsMessageValidator.isValidResponse(malformedTail, query))
+    }
+
+    @Test
+    fun validatesCompressedResponseQuestionWithTheSameExpandedLabels() {
+        val queryBytes = DnsTestMessages.query(name = "abc").apply {
+            this[14] = 0
+            this[15] = 0
+        }
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val response = queryBytes.copyOfRange(0, 16).apply { this[2] = 0x81.toByte() } +
+            byteArrayOf(0xC0.toByte(), 14) + queryBytes.copyOfRange(17, queryBytes.size)
+
+        // The pointer targets a root label inside the earlier binary label.
+        assertTrue(DnsMessageValidator.isValidResponse(response, query))
+        response[17] = 16 // Self-reference must still be rejected.
+        assertFalse(DnsMessageValidator.isValidResponse(response, query))
     }
 
     @Test
@@ -378,6 +599,22 @@ class DnsMessageValidatorTest {
         assertFalse(DnsMessageValidator.isCacheableResponse(badVersion, query))
         assertFalse(DnsMessageValidator.isValidResponse(misplacedOpt, query))
         assertFalse(DnsMessageValidator.isValidResponse(duplicateOpt, query))
+    }
+
+    @Test
+    fun checksExpandedOwnerNameOfCompressedOptRecord() {
+        val queryBytes = DnsTestMessages.query(edns = true)
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val response = DnsTestMessages.responseWithOpt(queryBytes, extendedRcode = 0)
+        val ownerOffset = DnsTestMessages.queryQuestionEnd(queryBytes)
+        val compressed = response.copyOfRange(0, ownerOffset) +
+            byteArrayOf(0xC0.toByte(), (ownerOffset - 5).toByte()) +
+            response.copyOfRange(ownerOffset + 1, response.size)
+
+        // The last name byte before QTYPE and QCLASS is the root label.
+        assertTrue(DnsMessageValidator.isValidResponse(compressed, query))
+        compressed[ownerOffset + 1] = 12 // Points to the first non-empty question label.
+        assertFalse(DnsMessageValidator.isValidResponse(compressed, query))
     }
 
     @Test

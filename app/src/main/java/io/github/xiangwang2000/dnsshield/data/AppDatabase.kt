@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [BypassedApp::class, DnsServer::class, UserDomainRuleEntity::class], version = 3, exportSchema = false)
+@Database(entities = [BypassedApp::class, DnsServer::class, UserDomainRuleEntity::class], version = 4, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dnsDao(): DnsDao
 
@@ -42,6 +42,24 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE dns_servers ADD COLUMN secondaryDohBootstrapIps TEXT")
             }
         }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE dns_servers ADD COLUMN resolverMode TEXT NOT NULL DEFAULT 'CONFIGURED'")
+                insertSystemDnsPreset(db)
+            }
+        }
+
+        private fun insertSystemDnsPreset(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                INSERT INTO dns_servers
+                (name, primaryIp, secondaryIp, isCustom, isActive, allowPlaintextFallback,
+                 primaryDohUrl, primaryDohBootstrapIps, secondaryDohUrl, secondaryDohBootstrapIps, resolverMode)
+                VALUES ('系統 DNS', '', NULL, 0, 0, 1, NULL, NULL, NULL, NULL, 'SYSTEM')
+                """.trimIndent()
+            )
+        }
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -52,7 +70,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "dns_shield_database"
                 )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         super.onCreate(db)
@@ -76,6 +94,7 @@ abstract class AppDatabase : RoomDatabase() {
                                     server
                                 )
                             }
+                            insertSystemDnsPreset(db)
                             db.setTransactionSuccessful()
                         } finally {
                             db.endTransaction()

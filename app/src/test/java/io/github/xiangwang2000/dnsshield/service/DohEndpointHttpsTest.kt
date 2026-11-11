@@ -36,7 +36,7 @@ class DohEndpointHttpsTest {
                 val response = base.forDohEndpoint(ep).lookupDoh(
                     ep.url, query,
                     DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 3_000)
-                ) { _, _ -> }
+                ) { _ -> }
                 assertContentEquals(expected, response)
                 assertEquals(DnsMessageValidator.MAX_DNS_RESPONSE_BYTES, response?.size)
             } finally { closeClient(base) }
@@ -67,7 +67,7 @@ class DohEndpointHttpsTest {
                                 query = query,
                                 deadline = deadline,
                                 attemptTimeoutMillis = attemptTimeoutMillis
-                            ) { _, _ -> }
+                            ) { _ -> }
                         },
                         plaintextQuery = {
                             udpAttempts.incrementAndGet()
@@ -175,7 +175,7 @@ class DohEndpointHttpsTest {
                 val bytes = DnsTestMessages.query()
                 val query = (DnsMessageValidator.parseQuery(bytes) as DnsQueryParseResult.Valid).query
                 kotlin.test.assertNull(base.forDohEndpoint(endpoint).lookupDoh(endpoint.url, query,
-                    DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 3000)) { _, _ -> })
+                    DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 3000)) { _ -> })
                 assertEquals(emptyList(), server.paths.toList())
             } finally { closeClient(base) }
         }
@@ -254,7 +254,7 @@ class DohEndpointHttpsTest {
         val bytes = DnsTestMessages.query(name = domain)
         val query = (DnsMessageValidator.parseQuery(bytes) as DnsQueryParseResult.Valid).query
         val response = client.lookupDoh(endpoint.url, query,
-            DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 3000)) { _, _ -> }
+            DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 3000)) { _ -> }
         assertContentEquals(DnsTestMessages.response(bytes), response)
     }
 

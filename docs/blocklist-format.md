@@ -40,6 +40,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-active-block
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 ```
 
-`tools/active_blocklist_source.json` pins the source repository, commit, path, byte size, Git blob SHA-1, SHA-256, and license. `tools/active_blocklist_production.json` pins the deterministic artifact size, SHA-256, and entry count. Preparation downloads only the exact pinned GitHub revision and verifies every identity field before compilation. Routine verification is offline and rejects a missing, tampered, malformed, or unsorted packaged artifact.
+`tools/active_blocklist_source.json` pins both upstream repositories, commits, paths, byte sizes, Git blob SHA-1 digests, SHA-256 digests, and licenses. It also pins the canonical merged domain text. `tools/active_blocklist_production.json` pins the deterministic artifact size, SHA-256, and entry count. Preparation downloads and verifies both pinned inputs, then derives and verifies the merged domain text before compilation. Routine verification is offline and rejects a missing, tampered, malformed, or unsorted packaged artifact.
 
-The production source is 1Hosts Lite under MPL-2.0. Its exact source revision and license are recorded in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+The merge includes 1Hosts Lite and simple AdGuard DNS Filter domain rules. The AdGuard input contributes plain `||domain^` blocks and simple exceptions. Source revisions, merge scope, and license notices are recorded in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).

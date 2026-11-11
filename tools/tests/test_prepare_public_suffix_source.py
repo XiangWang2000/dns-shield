@@ -73,11 +73,11 @@ GITHUB.IO
         manifest = load_manifest(manifest_path)
 
         self.assertEqual(
-            "e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20",
+            "73f8cc701c084fe07d888ec552b2f0b53281a674",
             manifest.source_revision,
         )
         self.assertEqual(
-            "52b981034da22eb87ee6cc719cba4d5561a7d351",
+            "369b6c37621c2f297130160ef9f1a1b67150b26f",
             manifest.git_blob_sha1,
         )
         self.assertEqual("idna", manifest.idna_package)

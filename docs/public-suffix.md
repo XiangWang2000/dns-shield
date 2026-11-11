@@ -4,7 +4,7 @@
 
 ## 固定來源與正規化
 
-來源是 publicsuffix/list 的固定 revision e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20，Git blob 為 52b981034da22eb87ee6cc719cba4d5561a7d351。official mirror 可能在內容前加入 // VERSION 與 // COMMIT；preparer 只接受符合 manifest 的 metadata，移除這兩項後，以 Git blob 標準 header `blob <length> NUL` 加上來源 bytes 計算 blob identity。
+來源是 publicsuffix/list 的固定 revision 73f8cc701c084fe07d888ec552b2f0b53281a674，Git blob 為 369b6c37621c2f297130160ef9f1a1b67150b26f。official mirror 可能在內容前加入 // VERSION 與 // COMMIT；preparer 只接受符合 manifest 的 metadata，移除這兩項後，以 Git blob 標準 header `blob <length> NUL` 加上來源 bytes 計算 blob identity。
 
 tools/prepare_public_suffix_source.py 會驗證 pinned source、MPL-2.0 notice，以及完整的 ICANN 和 PRIVATE 區段，再產出正規化 source。Unicode 網域以鎖定的 idna==3.18 處理，設定為 UTS #46、STD3 與 non-transitional；wheel 和 source distribution 都由 tools/requirements-public-suffix.txt 的 hashes 鎖定。原始碼不能直接帶入 binary：format version 1 只接受 ASCII 與 punycode。
 

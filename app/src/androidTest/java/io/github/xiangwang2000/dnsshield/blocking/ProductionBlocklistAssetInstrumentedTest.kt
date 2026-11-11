@@ -29,11 +29,12 @@ class ProductionBlocklistAssetInstrumentedTest {
             )
 
             assertEquals(
-                CompiledBlocklistStatus.Loaded(entryCount = 102_241),
+                CompiledBlocklistStatus.Loaded(entryCount = 247_497),
                 assembly.compiledBlocklistStatus
             )
             assertTrue(assembly.matcher.shouldBlock("app-measurement.com"))
             assertTrue(assembly.matcher.shouldBlock("sub.app-measurement.com"))
+            assertTrue(assembly.matcher.shouldBlock("supportmetrics.apple.com"))
             assertFalse(assembly.matcher.shouldBlock("github.com"))
         } finally {
             if (activeFile.exists()) {

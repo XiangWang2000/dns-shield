@@ -18,6 +18,22 @@ interface DnsDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertUserDomainRule(rule: UserDomainRuleEntity)
 
+    @Transaction
+    suspend fun saveUserDomainRule(
+        rule: UserDomainRuleEntity,
+        expectedRevision: String?
+    ): Boolean {
+        val existing = getUserDomainRule(rule.domain, rule.includeSubdomains)
+        if (existing != null && existing.action != rule.action) {
+            if (expectedRevision == null || existing.revision != expectedRevision) return false
+        } else if (expectedRevision != null && existing?.revision != expectedRevision) {
+            if (existing?.action == rule.action) return true
+            return false
+        }
+        insertUserDomainRule(rule)
+        return true
+    }
+
     @Query("DELETE FROM user_domain_rules WHERE domain = :domain AND includeSubdomains = :includeSubdomains")
     suspend fun deleteUserDomainRule(domain: String, includeSubdomains: Boolean): Int
 

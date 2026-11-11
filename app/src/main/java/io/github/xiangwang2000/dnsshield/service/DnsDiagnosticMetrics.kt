@@ -11,7 +11,8 @@ internal enum class DnsUpstreamTransport {
     // OkHttp accepted the call into its queue; this does not confirm a network write.
     DOH_CALL_QUEUED,
     UDP,
-    TCP
+    TCP,
+    SYSTEM
 }
 
 data class DnsLatencySummary(
@@ -41,11 +42,17 @@ data class DnsDiagnosticsSnapshot(
     val udpRetryAttempts: Long = 0,
     val tcpAttempts: Long = 0,
     val fallbackAttempts: Long = 0,
+    val primaryUdpTimeouts: Long = 0,
+    val secondaryUdpTimeouts: Long = 0,
+    val primaryUdpAnswers: Long = 0,
+    val secondaryUdpAnswers: Long = 0,
+    val primaryUdpDeferredToBackup: Long = 0,
     val pending: Long = 0,
     val peakPending: Long = 0,
     val estimatedSavedBytes: Long = 0,
     val latency: DnsLatencySummary = DnsLatencySummary(),
-    val coalescedWait: DnsCoalescedWaitSummary = DnsCoalescedWaitSummary()
+    val coalescedWait: DnsCoalescedWaitSummary = DnsCoalescedWaitSummary(),
+    val systemAttempts: Long = 0
 ) {
     val terminalCount: Long get() = resolved + blocked + failed + rejected
 }
@@ -82,7 +89,13 @@ internal class DnsDiagnosticMetrics(
     private var udpAttempts = 0L
     private var udpRetryAttempts = 0L
     private var tcpAttempts = 0L
+    private var systemAttempts = 0L
     private var fallbackAttempts = 0L
+    private var primaryUdpTimeouts = 0L
+    private var secondaryUdpTimeouts = 0L
+    private var primaryUdpAnswers = 0L
+    private var secondaryUdpAnswers = 0L
+    private var primaryUdpDeferredToBackup = 0L
     private var pending = 0L
     private var peakPending = 0L
     private var estimatedSavedBytes = 0L
@@ -110,12 +123,23 @@ internal class DnsDiagnosticMetrics(
             DnsUpstreamTransport.DOH_CALL_QUEUED -> dohCallsQueued++
             DnsUpstreamTransport.UDP -> udpAttempts++
             DnsUpstreamTransport.TCP -> tcpAttempts++
+            DnsUpstreamTransport.SYSTEM -> systemAttempts++
         }
     }
 
     fun recordFallbackAttempt(request: Request) = updateActive(request) { fallbackAttempts++ }
 
     fun recordUdpRetryAttempt(request: Request) = updateActive(request) { udpRetryAttempts++ }
+
+    fun recordUdpTimeout(request: Request, isPrimary: Boolean) = updateActive(request) {
+        if (isPrimary) primaryUdpTimeouts++ else secondaryUdpTimeouts++
+    }
+
+    fun recordUdpAnswer(request: Request, isPrimary: Boolean) = updateActive(request) {
+        if (isPrimary) primaryUdpAnswers++ else secondaryUdpAnswers++
+    }
+
+    fun recordUdpPrimaryDeferred(request: Request) = updateActive(request) { primaryUdpDeferredToBackup++ }
 
     fun recordCoalescedWait(request: Request, elapsedNanos: Long) = updateActive(request) {
         queueWaitSamplesNanos[nextQueueWaitSample] = elapsedNanos.coerceAtLeast(0L)
@@ -167,6 +191,11 @@ internal class DnsDiagnosticMetrics(
             udpRetryAttempts = udpRetryAttempts,
             tcpAttempts = tcpAttempts,
             fallbackAttempts = fallbackAttempts,
+            primaryUdpTimeouts = primaryUdpTimeouts,
+            secondaryUdpTimeouts = secondaryUdpTimeouts,
+            primaryUdpAnswers = primaryUdpAnswers,
+            secondaryUdpAnswers = secondaryUdpAnswers,
+            primaryUdpDeferredToBackup = primaryUdpDeferredToBackup,
             pending = pending,
             peakPending = peakPending,
             estimatedSavedBytes = estimatedSavedBytes,
@@ -180,7 +209,8 @@ internal class DnsDiagnosticMetrics(
                 p50Millis = percentileMillis(sortedQueueWaitSamples, 50),
                 p95Millis = percentileMillis(sortedQueueWaitSamples, 95),
                 p99Millis = percentileMillis(sortedQueueWaitSamples, 99)
-            )
+            ),
+            systemAttempts = systemAttempts
         )
     }
 
@@ -199,7 +229,13 @@ internal class DnsDiagnosticMetrics(
         udpAttempts = 0L
         udpRetryAttempts = 0L
         tcpAttempts = 0L
+        systemAttempts = 0L
         fallbackAttempts = 0L
+        primaryUdpTimeouts = 0L
+        secondaryUdpTimeouts = 0L
+        primaryUdpAnswers = 0L
+        secondaryUdpAnswers = 0L
+        primaryUdpDeferredToBackup = 0L
         pending = 0L
         peakPending = 0L
         estimatedSavedBytes = 0L

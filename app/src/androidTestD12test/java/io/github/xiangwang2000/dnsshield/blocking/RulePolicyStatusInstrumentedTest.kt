@@ -27,7 +27,7 @@ class RulePolicyStatusInstrumentedTest {
             val bundled = assemble()
             assertEquals(RuleBlocklistSource.APK_BUNDLED, bundled.displayStatus.source)
             assertEquals(RuleBlocklistValidation.APK_VERIFIED, bundled.displayStatus.validation)
-            assertEquals(102972, bundled.displayStatus.entryCount)
+            assertEquals(247_497, bundled.displayStatus.entryCount)
             assertEquals(loader.sourceMetadata.revision, bundled.displayStatus.sourceRevision)
             assertTrue(bundled.matcher.shouldBlock("app-measurement.com"))
             assertFalse(bundled.matcher.shouldBlock("github.com"))

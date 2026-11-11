@@ -294,11 +294,16 @@ internal class SocksDnsServer(
             writeReply(output, REP_COMMAND_NOT_SUPPORTED)
             return false
         }
-        if (addressType != ATYP_IPV4) {
+        if (addressType != ATYP_IPV4 && addressType != ATYP_IPV6) {
             writeReply(output, REP_ADDRESS_NOT_SUPPORTED)
             return false
         }
-        if (!address.contentEquals(DNS_IPV4) || destinationPort != DNS_PORT) {
+        val isVirtualDns = when (addressType) {
+            ATYP_IPV4 -> address.contentEquals(DNS_IPV4)
+            ATYP_IPV6 -> address.contentEquals(DNS_IPV6)
+            else -> false
+        }
+        if (!isVirtualDns || destinationPort != DNS_PORT) {
             writeReply(output, REP_NOT_ALLOWED)
             return false
         }
@@ -386,7 +391,8 @@ internal class SocksDnsServer(
         const val DNS_PORT = 53
         const val CREDENTIAL_BYTES = 24
         const val HEX = "0123456789abcdef"
-        val DNS_IPV4 = byteArrayOf(10, 0, 0, 1)
+        val DNS_IPV4 = InetAddress.getByName(DnsVpnAddresses.IPV4_DNS).address
+        val DNS_IPV6 = InetAddress.getByName(DnsVpnAddresses.IPV6_DNS).address
         val LOOPBACK: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
         val SECURE_RANDOM = SecureRandom()
     }

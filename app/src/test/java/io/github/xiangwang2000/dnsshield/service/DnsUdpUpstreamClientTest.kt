@@ -20,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertContentEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -44,6 +45,110 @@ class DnsUdpUpstreamClientTest {
         fun runPending() {
             checkNotNull(pending).run()
         }
+    }
+
+    private class LoopbackDnsResponder(name: String) : AutoCloseable {
+        val responseFlags = AtomicInteger(0x8180)
+        val extendedRcode = AtomicInteger(0)
+        val requests = AtomicInteger()
+        private val requestObserved = CountDownLatch(1)
+        private val socket = DatagramSocket(0, InetAddress.getByName("127.0.0.1"))
+        private val failure = AtomicReference<Throwable?>()
+        val endpoint = DnsUdpUpstreamEndpoint(InetAddress.getByName("127.0.0.1"), socket.localPort)
+        private val listener = thread(name = name, isDaemon = true) {
+            while (!socket.isClosed) {
+                try {
+                    val request = DatagramPacket(ByteArray(4096), 4096)
+                    socket.receive(request)
+                    requests.incrementAndGet()
+                    requestObserved.countDown()
+                    val flags = responseFlags.get()
+                    if (flags != NO_RESPONSE) {
+                        val requestBytes = request.data.copyOfRange(request.offset, request.offset + request.length)
+                        val extended = extendedRcode.get()
+                        val response = if (extended != 0) {
+                            DnsTestMessages.responseWithOpt(requestBytes, extended)
+                        } else {
+                            DnsTestMessages.response(requestBytes, flags = flags)
+                        }
+                        socket.send(DatagramPacket(response, response.size, request.address, request.port))
+                    }
+                } catch (exception: java.net.SocketException) {
+                    if (!socket.isClosed) failure.compareAndSet(null, exception)
+                    return@thread
+                } catch (exception: Throwable) {
+                    failure.compareAndSet(null, exception)
+                    return@thread
+                }
+            }
+        }
+
+        fun assertNoFailure() = assertNull(failure.get())
+
+        fun awaitRequest(timeout: Long, unit: TimeUnit): Boolean = requestObserved.await(timeout, unit)
+
+        override fun close() {
+            socket.close()
+            listener.join(1_000)
+        }
+
+        private companion object {
+            const val NO_RESPONSE = Int.MIN_VALUE
+        }
+    }
+
+    private data class LoopbackSample(
+        val elapsedMillis: Long,
+        val attempts: Int,
+        val primaryTimeouts: Int,
+        val secondaryTimeouts: Int,
+        val answers: Int,
+        val deferredPrimary: Int,
+        val failures: Int
+    )
+
+    private suspend fun runLoopbackSample(
+        query: ParsedDnsQuery,
+        primary: DnsUdpUpstreamEndpoint,
+        secondary: DnsUdpUpstreamEndpoint,
+        backoff: UdpPrimaryBackoff?
+    ): LoopbackSample {
+        val socket = DatagramSocket()
+        val attempts = AtomicInteger()
+        val primaryTimeouts = AtomicInteger()
+        val secondaryTimeouts = AtomicInteger()
+        val answers = AtomicInteger()
+        val deferredPrimary = AtomicInteger()
+        val startedAt = System.nanoTime()
+        val outcome = try {
+            DnsUdpUpstreamClient.queryWithFallback(
+                socket = socket,
+                query = query,
+                upstreams = listOf(primary, secondary),
+                deadline = DnsRequestDeadline.fromReceivedAt(startedAt, timeoutMillis = 400),
+                onAttempt = { attempts.incrementAndGet() },
+                primaryBackoff = backoff,
+                onTimeout = { isPrimary ->
+                    if (isPrimary) primaryTimeouts.incrementAndGet() else secondaryTimeouts.incrementAndGet()
+                },
+                onAnswer = { answers.incrementAndGet() },
+                onPrimaryDeferred = { deferredPrimary.incrementAndGet() }
+            )
+        } finally {
+            socket.close()
+        }
+        val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L
+        val responseCode = outcome?.response?.let { DnsMessageValidator.validatedResponseCode(it, query) } ?: -1
+        val failures = if (responseCode == 0 || responseCode == 3) 0 else 1
+        return LoopbackSample(
+            elapsedMillis,
+            attempts.get(),
+            primaryTimeouts.get(),
+            secondaryTimeouts.get(),
+            answers.get(),
+            deferredPrimary.get(),
+            failures
+        )
     }
 
     @Test
@@ -532,19 +637,24 @@ class DnsUdpUpstreamClientTest {
     }
 
     private fun bindDualProtocolServers(loopback: InetAddress): Pair<DatagramSocket, ServerSocket> {
-        // TCP and UDP have separate port namespaces; an ephemeral port in one may be busy in the other.
+        // Reserve UDP first: Windows may allow TCP to select a port excluded from UDP binding.
+        var lastFailure: java.net.BindException? = null
+        var lastPort = 0
         repeat(20) {
-            val tcpServer = ServerSocket(0, 1, loopback)
+            val udpServer = DatagramSocket(0, loopback)
             try {
-                return DatagramSocket(tcpServer.localPort, loopback) to tcpServer
-            } catch (_: java.net.BindException) {
-                tcpServer.close()
+                return udpServer to ServerSocket(udpServer.localPort, 1, loopback)
+            } catch (failure: java.net.BindException) {
+                lastPort = udpServer.localPort
+                lastFailure = failure
+                udpServer.close()
             } catch (failure: Exception) {
-                tcpServer.close()
+                udpServer.close()
                 throw failure
             }
         }
-        throw java.net.BindException("Could not reserve the same loopback port for UDP and TCP")
+        throw java.net.BindException("Could not reserve UDP/TCP loopback sockets; last port=$lastPort")
+            .apply { initCause(lastFailure) }
     }
 
     @Test
@@ -627,5 +737,193 @@ class DnsUdpUpstreamClientTest {
             udpResponder.join(1_000)
             tcpResponder.join(1_000)
         }
+    }
+
+    @Test
+    fun adaptiveFallbackRequiresUsableBackupAndRecoversWhenBackupDisappears() = runBlocking {
+        var monotonicMillis = 1_000L
+        val backoff = UdpPrimaryBackoff(monotonicMillis = { monotonicMillis })
+        val primaryServer = LoopbackDnsResponder("adaptive-primary")
+        val secondaryServer = LoopbackDnsResponder("adaptive-secondary")
+        val queryBytes = DnsTestMessages.query(edns = true)
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        primaryServer.responseFlags.set(Int.MIN_VALUE)
+
+        try {
+            secondaryServer.extendedRcode.set(1)
+            repeat(2) {
+                val unusableBackup = runLoopbackSample(
+                    query,
+                    primaryServer.endpoint,
+                    secondaryServer.endpoint,
+                    backoff
+                )
+                assertEquals(2, unusableBackup.attempts)
+                assertEquals(1, unusableBackup.primaryTimeouts)
+                assertEquals(1, unusableBackup.answers)
+                assertEquals(1, unusableBackup.failures)
+                assertEquals(0, unusableBackup.deferredPrimary)
+            }
+
+            val stillPrimaryFirst = runLoopbackSample(
+                query,
+                primaryServer.endpoint,
+                secondaryServer.endpoint,
+                backoff
+            )
+            assertEquals(2, stillPrimaryFirst.attempts)
+            assertEquals(0, stillPrimaryFirst.deferredPrimary)
+
+            secondaryServer.extendedRcode.set(0)
+            repeat(2) {
+                val usableBackup = runLoopbackSample(
+                    query,
+                    primaryServer.endpoint,
+                    secondaryServer.endpoint,
+                    backoff
+                )
+                assertEquals(2, usableBackup.attempts)
+                assertEquals(0, usableBackup.failures)
+                assertEquals(0, usableBackup.deferredPrimary)
+            }
+
+            val preferredBackup = runLoopbackSample(
+                query,
+                primaryServer.endpoint,
+                secondaryServer.endpoint,
+                backoff
+            )
+            assertEquals(1, preferredBackup.attempts)
+            assertEquals(1, preferredBackup.deferredPrimary)
+            assertEquals(0, preferredBackup.failures)
+
+            secondaryServer.responseFlags.set(0x8182)
+            primaryServer.responseFlags.set(Int.MIN_VALUE)
+            val retainedBackupError = runLoopbackSample(
+                query,
+                primaryServer.endpoint,
+                secondaryServer.endpoint,
+                backoff
+            )
+            assertEquals(2, retainedBackupError.attempts)
+            assertEquals(1, retainedBackupError.answers)
+            assertEquals(1, retainedBackupError.failures)
+
+            primaryServer.responseFlags.set(0x8180)
+            val primaryRecoversFromBackupError = runLoopbackSample(
+                query,
+                primaryServer.endpoint,
+                secondaryServer.endpoint,
+                backoff
+            )
+            assertEquals(2, primaryRecoversFromBackupError.attempts)
+            assertEquals(2, primaryRecoversFromBackupError.answers)
+            assertEquals(1, primaryRecoversFromBackupError.deferredPrimary)
+            assertEquals(0, primaryRecoversFromBackupError.failures)
+
+            primaryServer.responseFlags.set(Int.MIN_VALUE)
+            secondaryServer.responseFlags.set(0x8180)
+            repeat(2) {
+                val requalified = runLoopbackSample(
+                    query,
+                    primaryServer.endpoint,
+                    secondaryServer.endpoint,
+                    backoff
+                )
+                assertEquals(2, requalified.attempts)
+                assertEquals(0, requalified.failures)
+            }
+
+            secondaryServer.responseFlags.set(Int.MIN_VALUE)
+            primaryServer.responseFlags.set(0x8180)
+            val fallbackToRecoveredPrimary = runLoopbackSample(
+                query,
+                primaryServer.endpoint,
+                secondaryServer.endpoint,
+                backoff
+            )
+            assertEquals(2, fallbackToRecoveredPrimary.attempts)
+            assertEquals(0, fallbackToRecoveredPrimary.primaryTimeouts)
+            assertEquals(1, fallbackToRecoveredPrimary.secondaryTimeouts)
+            assertEquals(0, fallbackToRecoveredPrimary.failures)
+
+            val recoveredPrimaryFirst = runLoopbackSample(
+                query,
+                primaryServer.endpoint,
+                secondaryServer.endpoint,
+                backoff
+            )
+            assertEquals(1, recoveredPrimaryFirst.attempts)
+            assertEquals(0, recoveredPrimaryFirst.failures)
+
+            System.out.println(
+                "udp backoff loopback: unusable backup remained primary-first; healthy backup used " +
+                    "${preferredBackup.attempts} attempt; after backup loss primary recovered in " +
+                    "${fallbackToRecoveredPrimary.elapsedMillis}ms"
+            )
+        } finally {
+            primaryServer.close()
+            secondaryServer.close()
+        }
+
+        primaryServer.assertNoFailure()
+        secondaryServer.assertNoFailure()
+    }
+
+    @Test
+    fun cancellingExpiredCooldownProbeReleasesItsSingleProbeSlot() = runBlocking {
+        var monotonicMillis = 1_000L
+        val backoff = UdpPrimaryBackoff(monotonicMillis = { monotonicMillis })
+        val primaryServer = LoopbackDnsResponder("cancelled-primary-probe")
+        val secondaryServer = LoopbackDnsResponder("cancelled-secondary-probe")
+        val primary = primaryServer.endpoint
+        val secondary = secondaryServer.endpoint
+        val socket = DatagramSocket()
+        val queryBytes = DnsTestMessages.query()
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val probeObserved = CountDownLatch(1)
+        primaryServer.responseFlags.set(Int.MIN_VALUE)
+
+        try {
+            repeat(2) {
+                val permit = backoff.beginQuery(primary, secondary)
+                backoff.finishQuery(
+                    permit = permit,
+                    primaryAttempted = true,
+                    primaryTimedOut = true,
+                    primaryResponded = false,
+                    primarySucceeded = false,
+                    backupSucceeded = true
+                )
+            }
+            monotonicMillis += 15_000L
+
+            val request = async(Dispatchers.IO) {
+                DnsUdpUpstreamClient.queryWithFallback(
+                    socket = socket,
+                    query = query,
+                    upstreams = listOf(primary, secondary),
+                    deadline = DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 3_000),
+                    primaryBackoff = backoff,
+                    onAttempt = { probeObserved.countDown() }
+                )
+            }
+            assertTrue(probeObserved.await(1, TimeUnit.SECONDS))
+            assertTrue(primaryServer.awaitRequest(1, TimeUnit.SECONDS))
+            request.cancelAndJoin()
+
+            assertTrue(socket.isClosed)
+            val afterCancellation = backoff.beginQuery(primary, secondary)
+            assertFalse(afterCancellation.preferBackup)
+            backoff.abandonQuery(afterCancellation)
+            assertEquals(0, secondaryServer.requests.get())
+        } finally {
+            socket.close()
+            primaryServer.close()
+            secondaryServer.close()
+        }
+
+        primaryServer.assertNoFailure()
+        secondaryServer.assertNoFailure()
     }
 }

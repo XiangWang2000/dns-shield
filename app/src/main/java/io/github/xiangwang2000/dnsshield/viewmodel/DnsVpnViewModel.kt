@@ -3,7 +3,9 @@ package io.github.xiangwang2000.dnsshield.viewmodel
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
+import android.os.Build
 import android.util.Log
 import android.widget.Toast
 import androidx.core.content.ContextCompat
@@ -17,6 +19,7 @@ import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidation
 import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidator
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import io.github.xiangwang2000.dnsshield.data.BypassedApp
+import io.github.xiangwang2000.dnsshield.data.DnsResolverMode
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import io.github.xiangwang2000.dnsshield.service.DnsDiagnosticsSnapshot
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
@@ -24,6 +27,7 @@ import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
 import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
 import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
+import io.github.xiangwang2000.dnsshield.service.IpAddressLiteral
 import io.github.xiangwang2000.dnsshield.service.ResolverCommandRuntime
 import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
 import io.github.xiangwang2000.dnsshield.service.VpnToggleAction
@@ -106,6 +110,12 @@ data class DomainRuleUndoToken(
     val previous: UserDomainRuleEntity?
 )
 
+sealed interface DomainRuleSaveResult {
+    data object Saved : DomainRuleSaveResult
+    data class Conflict(val existingRule: UserDomainRuleEntity?) : DomainRuleSaveResult
+    data class ValidationError(val message: String) : DomainRuleSaveResult
+}
+
 object AppIconCache {
     private val cache = android.util.LruCache<String, Drawable>(128)
 
@@ -173,8 +183,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     private val _resolverNotice = MutableStateFlow<String?>(null)
     private val resolverNoticeLock = Any()
     private var latestResolverNoticeCommand = 0L
-
-    val vpnSettingsModified = MutableStateFlow(false)
+    private val _bypassedApps = MutableStateFlow<List<BypassedApp>?>(null)
 
     private val _infoCardVisible = MutableStateFlow(sharedPrefs.getBoolean("info_card_visible", true))
 
@@ -259,9 +268,40 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     // Raw list of installed apps
     private val _installedApps = MutableStateFlow<List<AppInfo>>(emptyList())
+    private val _appInventoryRevision = MutableStateFlow(0)
+    private val pendingBypassedAppSnapshot = combine(
+        _vpnLifecycleState,
+        _bypassedApps,
+        DnsVpnService.appliedBypassedAppPackageNamesFlow,
+        _appInventoryRevision
+    ) { lifecycleState, savedBypassedApps, appliedBypassedApps, _ ->
+        val shouldShowApplyPrompt = lifecycleState == VpnLifecycleState.RUNNING ||
+            lifecycleState == VpnLifecycleState.FAILED
+        if (shouldShowApplyPrompt && savedBypassedApps != null) {
+            savedBypassedApps.mapTo(mutableSetOf()) { it.packageName } to appliedBypassedApps
+        } else {
+            null
+        }
+    }
+    val vpnSettingsModified = pendingBypassedAppSnapshot.map { snapshot ->
+        if (snapshot == null) {
+            false
+        } else {
+            withContext(Dispatchers.IO) {
+                val packageManager = getApplication<Application>().packageManager
+                val (saved, applied) = snapshot
+                val changed = (saved - applied) + (applied - saved)
+                changed.any { isPackageInstalled(it, packageManager) }
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    // Combined Flow to provide a filtered, reactive app list
-    val filteredApps = combine(_installedApps, _searchQuery) { apps, query ->
+    private val installedAppsWithExclusions = combine(_installedApps, _bypassedApps) { apps, saved ->
+        val bypassedPackages = saved.orEmpty().mapTo(mutableSetOf()) { it.packageName }
+        apps.map { app -> app.copy(isBypassed = app.packageName in bypassedPackages) }
+    }
+
+    val filteredApps = combine(installedAppsWithExclusions, _searchQuery) { apps, query ->
         if (query.isBlank()) {
             apps
         } else {
@@ -278,13 +318,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
     internal var installedAppsLoader: suspend () -> List<AppInfo> = {
         withContext(Dispatchers.IO) {
-            val apps = getInstalledLauncherApps()
-            val currentBypassed = dnsDao.getBypassedAppsList()
-            val bypassedSet = currentBypassed.map { it.packageName }.toSet()
-
-            apps.map { app ->
-                app.copy(isBypassed = app.packageName in bypassedSet)
-            }.sortedBy { it.appName.lowercase() }
+            getInstalledLauncherApps().sortedBy { it.appName.lowercase() }
         }
     }
 
@@ -404,8 +438,9 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     suspend fun saveDomainRule(
         input: String,
         action: DomainRuleAction,
-        includeSubdomains: Boolean
-    ): String? = withContext(Dispatchers.IO) {
+        includeSubdomains: Boolean,
+        expectedRevision: String? = null
+    ): DomainRuleSaveResult = withContext(Dispatchers.IO) {
         val resolver = if (includeSubdomains) {
             publicSuffixResolverOwner.resolverOrNull()
         } else {
@@ -420,29 +455,38 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             )
         ) {
             is UserDomainRuleValidation.Valid -> validation.rule
-            is UserDomainRuleValidation.Invalid -> return@withContext when (validation.reason) {
-                UserDomainRuleValidation.Reason.INVALID_DOMAIN -> "請輸入有效的網域名稱。"
-                UserDomainRuleValidation.Reason.PUBLIC_SUFFIX_RESOLVER_UNAVAILABLE ->
-                    "目前無法驗證公共後綴，請稍後再試。"
-                UserDomainRuleValidation.Reason.PUBLIC_SUFFIX_DOMAIN ->
-                    "公共後綴不能套用到所有子網域。"
-            }
+            is UserDomainRuleValidation.Invalid -> return@withContext DomainRuleSaveResult.ValidationError(
+                when (validation.reason) {
+                    UserDomainRuleValidation.Reason.INVALID_DOMAIN -> "請輸入有效的網域名稱。"
+                    UserDomainRuleValidation.Reason.PUBLIC_SUFFIX_RESOLVER_UNAVAILABLE ->
+                        "目前無法驗證公共後綴，請稍後再試。"
+                    UserDomainRuleValidation.Reason.PUBLIC_SUFFIX_DOMAIN ->
+                        "公共後綴不能套用到所有子網域。"
+                }
+            )
         }
 
+        val entity = UserDomainRuleEntity(
+            domain = rule.domain,
+            action = rule.action.name,
+            includeSubdomains = rule.includeSubdomains
+        )
         try {
-            dnsDao.insertUserDomainRule(
-                UserDomainRuleEntity(
-                    domain = rule.domain,
-                    action = rule.action.name,
-                    includeSubdomains = rule.includeSubdomains
+            if (!dnsDao.saveUserDomainRule(entity, expectedRevision)) {
+                return@withContext DomainRuleSaveResult.Conflict(
+                    dnsDao.getUserDomainRule(rule.domain, rule.includeSubdomains)
                 )
-            )
+            }
             addLog("[網域規則] 已儲存 ${rule.domain}（${rule.action.name}）。")
             requestDomainPolicyReloadIfRunning()
-            null
+            DomainRuleSaveResult.Saved
+        } catch (exception: CancellationException) {
+            throw exception
         } catch (exception: Exception) {
             Log.e("DnsVpnViewModel", "Failed to save user domain rule", exception)
-            "儲存規則失敗：${exception.localizedMessage ?: "資料庫錯誤"}"
+            DomainRuleSaveResult.ValidationError(
+                "儲存規則失敗：${exception.localizedMessage ?: "資料庫錯誤"}"
+            )
         }
     }
 
@@ -519,8 +563,6 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private var hasLoadedApps = false
-
     init {
         // Direct, high-speed StateFlow collections across the same process using clean helper method
         collectServiceFlow(DnsVpnService.lifecycleStateFlow, _vpnLifecycleState)
@@ -532,11 +574,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         collectServiceFlow(DnsVpnService.liveDecisionEventsFlow, _blockedEvents)
         collectServiceFlow(DnsVpnService.rulePolicyStatusFlow, _rulePolicyStatus)
 
-        // Observe bypassed apps list database and re-evaluate installed apps isBypassed status
         viewModelScope.launch {
-            dnsDao.getBypassedAppsFlow().collect { dbBypassedApps ->
-                evaluateAppBypassStatus(dbBypassedApps)
-            }
+            dnsDao.getBypassedAppsFlow().collect { _bypassedApps.value = it }
         }
     }
 
@@ -545,7 +584,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun refreshInstalledAppsIfNeeded() {
-        if (hasLoadedApps || _isLoadingApps.value) return
+        if (_isLoadingApps.value) return
         refreshInstalledApps()
     }
 
@@ -556,11 +595,10 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             try {
                 _installedApps.value = installedAppsLoader()
-                hasLoadedApps = true
+                _appInventoryRevision.value += 1
             } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
-                hasLoadedApps = false
                 Log.e("DnsVpnViewModel", "Failed to load installed apps", exception)
                 _appLoadError.value = "無法載入 App 清單，請再試一次。"
             } finally {
@@ -569,13 +607,13 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun evaluateAppBypassStatus(dbBypassedApps: List<BypassedApp>) {
-        val bypassedSet = dbBypassedApps.map { it.packageName }.toSet()
-        val mapped = _installedApps.value.map { app ->
-            app.copy(isBypassed = app.packageName in bypassedSet)
+    private fun isPackageInstalled(packageName: String, packageManager: PackageManager): Boolean =
+        try {
+            packageManager.getApplicationInfo(packageName, 0)
+            true
+        } catch (_: PackageManager.NameNotFoundException) {
+            false
         }
-        _installedApps.value = mapped
-    }
 
     private fun getInstalledLauncherApps(): List<AppInfo> {
         val pm = getApplication<Application>().packageManager
@@ -617,7 +655,6 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
 
             // If VPN is running, warn that a restart will capture the new split tunnel
             if (_vpnLifecycleState.value == VpnLifecycleState.RUNNING) {
-                vpnSettingsModified.value = true
                 addLog("提示：排除規則已更新。請點擊「立即重啟」以套用新設定。")
             }
         }
@@ -626,9 +663,15 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     fun selectDnsServer(serverId: Int) {
         val resolverNoticeCommand = beginResolverCommandNotice()
         val persisted = AtomicBoolean(false)
+        val unsupportedSystemResolver = AtomicBoolean(false)
         val operations = resolverCommandOperations
         val submission = resolverCommandCoordinator.submit { revision ->
-            if (!operations.setActiveDnsServer(serverId)) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+                dnsDao.getDnsServerById(serverId)?.resolverMode == DnsResolverMode.SYSTEM
+            ) {
+                unsupportedSystemResolver.set(true)
+                ResolverCommandApplyStatus.NOT_SAVED
+            } else if (!operations.setActiveDnsServer(serverId)) {
                 ResolverCommandApplyStatus.NOT_SAVED
             } else {
                 persisted.set(true)
@@ -646,7 +689,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                     when (result.value) {
                         ResolverCommandApplyStatus.NOT_SAVED ->
                             showResolverCommandMessage(
-                                "找不到這組 DNS，請重新選擇。",
+                                if (unsupportedSystemResolver.get()) "需要 Android 10 以上"
+                                else "找不到這組 DNS，請重新選擇。",
                                 resolverNoticeCommand
                             )
                         ResolverCommandApplyStatus.SAVED_UNSYNCED -> {
@@ -684,6 +728,8 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setPlaintextFallback(server: DnsServer, allow: Boolean) {
+        if (server.resolverMode == DnsResolverMode.SYSTEM) return
+
         val resolverNoticeCommand = beginResolverCommandNotice()
         if (!allow && !DohEndpointConfiguration.hasUsableEncryptedEndpoint(server)) {
             val message = DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR
@@ -792,15 +838,23 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     ): String? {
         return withContext(Dispatchers.IO) {
             val trimmedName = name.trim()
-            val trimmedPrimary = primaryIp.trim()
-            val trimmedSec = secondaryIp?.trim()?.let { if (it.isBlank()) null else it }
+            val enteredPrimary = primaryIp.trim()
+            val enteredSecondary = secondaryIp?.trim()?.takeIf(String::isNotEmpty)
+            val trimmedPrimary = IpAddressLiteral.parse(enteredPrimary)?.normalized
+            val trimmedSec = enteredSecondary?.let { IpAddressLiteral.parse(it)?.normalized }
             val trimmedPrimaryDohUrl = primaryDohUrl?.trim()?.takeIf(String::isNotEmpty)
             val trimmedPrimaryBootstrap = primaryDohBootstrapIps?.trim().orEmpty()
             val trimmedSecondaryDohUrl = secondaryDohUrl?.trim()?.takeIf(String::isNotEmpty)
             val trimmedSecondaryBootstrap = secondaryDohBootstrapIps?.trim().orEmpty()
 
-            if (trimmedName.isEmpty() || trimmedPrimary.isEmpty()) {
-                return@withContext "名稱與主要 IP 不可空白"
+            if (trimmedName.isEmpty()) {
+                return@withContext "請輸入伺服器名稱。"
+            }
+            if (trimmedPrimary == null) {
+                return@withContext "主要 DNS 請輸入有效的 IPv4 或 IPv6 位址。"
+            }
+            if (enteredSecondary != null && trimmedSec == null) {
+                return@withContext "備援 DNS 請輸入有效的 IPv4 或 IPv6 位址。"
             }
 
             val dohError = sequenceOf(
@@ -830,14 +884,22 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                 return@withContext DohEndpointConfiguration.STRICT_MODE_REQUIRES_ENDPOINT_ERROR
             }
 
-            val currentServers = dnsServers.value
+            val currentServers = dnsDao.getDnsServersList()
             if (currentServers.any { it.name.equals(trimmedName, ignoreCase = true) }) {
                 return@withContext "DNS 伺服器名稱「$trimmedName」已存在"
             }
-            if (currentServers.any { it.primaryIp == trimmedPrimary && it.secondaryIp == trimmedSec }) {
+            fun canonicalOrOriginalIp(value: String?): String? {
+                val normalized = value?.trim()?.takeIf(String::isNotEmpty) ?: return null
+                return IpAddressLiteral.parse(normalized)?.normalized ?: normalized
+            }
+            if (currentServers.any {
+                    canonicalOrOriginalIp(it.primaryIp) == trimmedPrimary &&
+                        canonicalOrOriginalIp(it.secondaryIp) == trimmedSec
+                }
+            ) {
                 return@withContext "相同的主要與次要 IP 組合已存在於其他伺服器中"
             }
-            if (currentServers.any { it.primaryIp == trimmedPrimary }) {
+            if (currentServers.any { canonicalOrOriginalIp(it.primaryIp) == trimmedPrimary }) {
                 return@withContext "DNS 主要 IP「$trimmedPrimary」已存在"
             }
 
@@ -850,12 +912,12 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                 allowPlaintextFallback = allowPlaintextFallback,
                 primaryDohUrl = trimmedPrimaryDohUrl,
                 primaryDohBootstrapIps = DohEndpointConfiguration
-                    .parseBootstrapIpv4Addresses(trimmedPrimaryBootstrap)
+                    .parseBootstrapIpAddresses(trimmedPrimaryBootstrap)
                     ?.takeIf { it.isNotEmpty() }
                     ?.joinToString(","),
                 secondaryDohUrl = trimmedSecondaryDohUrl,
                 secondaryDohBootstrapIps = DohEndpointConfiguration
-                    .parseBootstrapIpv4Addresses(trimmedSecondaryBootstrap)
+                    .parseBootstrapIpAddresses(trimmedSecondaryBootstrap)
                     ?.takeIf { it.isNotEmpty() }
                     ?.joinToString(",")
             )
@@ -934,7 +996,6 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             when (_vpnLifecycleState.value.toggleAction()) {
                 VpnToggleAction.NONE -> return
                 VpnToggleAction.STOP -> {
-                    vpnSettingsModified.value = false
                     addLog("[安全防護] 已送出關閉防護服務的要求…")
                     val intent = Intent(context, DnsVpnService::class.java).apply {
                         action = DnsVpnService.ACTION_STOP
@@ -942,7 +1003,6 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                     context.startService(intent)
                 }
                 VpnToggleAction.START -> {
-                    vpnSettingsModified.value = false
                     val intent = Intent(context, DnsVpnService::class.java).apply {
                         action = DnsVpnService.ACTION_START
                     }
@@ -958,9 +1018,6 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     fun restartVpn(context: Context) {
         viewModelScope.launch {
             try {
-                // Clear modified layout state
-                vpnSettingsModified.value = false
-
                 // Directly send non-destructive RESTART action to the service
                 val restartIntent = Intent(context, DnsVpnService::class.java).apply {
                     action = DnsVpnService.ACTION_RESTART

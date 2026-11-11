@@ -2,6 +2,7 @@ package io.github.xiangwang2000.dnsshield
 
 import android.app.Activity
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -52,6 +53,7 @@ import io.github.xiangwang2000.dnsshield.blocking.DomainRuleAction
 import io.github.xiangwang2000.dnsshield.blocking.PublicSuffixResolverStatus
 import io.github.xiangwang2000.dnsshield.blocking.RuleBlocklistSource
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
+import io.github.xiangwang2000.dnsshield.data.DnsResolverMode
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
 import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
@@ -60,11 +62,12 @@ import io.github.xiangwang2000.dnsshield.service.DnsDiagnosticsSnapshot
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
 import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
 import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
-import io.github.xiangwang2000.dnsshield.service.isIpv4Literal
+import io.github.xiangwang2000.dnsshield.service.isIpLiteral
 import io.github.xiangwang2000.dnsshield.ui.DomainRulesTab
 import io.github.xiangwang2000.dnsshield.ui.ExemptAppsTab
 import io.github.xiangwang2000.dnsshield.ui.LogsTab
 import io.github.xiangwang2000.dnsshield.ui.theme.*
+import io.github.xiangwang2000.dnsshield.viewmodel.DomainRuleSaveResult
 import io.github.xiangwang2000.dnsshield.viewmodel.DomainRuleUndoToken
 import io.github.xiangwang2000.dnsshield.viewmodel.DnsShieldUiState
 import io.github.xiangwang2000.dnsshield.viewmodel.DnsVpnViewModel
@@ -213,7 +216,7 @@ fun DnsShieldScreen(
     onRestartVpn: () -> Unit,
     onLoadAppsIfNeeded: () -> Unit,
     onDomainRuleSearchChange: (String) -> Unit,
-    onSaveDomainRule: suspend (String, DomainRuleAction, Boolean) -> String?,
+    onSaveDomainRule: suspend (String, DomainRuleAction, Boolean, String?) -> DomainRuleSaveResult,
     onDeleteDomainRule: suspend (UserDomainRuleEntity) -> Unit,
     onAllowBlockedDomain: suspend (String) -> DomainRuleUndoToken,
     onUndoDomainRule: suspend (DomainRuleUndoToken) -> Boolean,
@@ -283,7 +286,8 @@ fun DnsShieldScreen(
                 ApplyRestartBanner(
                     visible = uiState.vpnSettingsModified,
                     onRestart = onRestartVpn,
-                    enabled = uiState.vpnLifecycleState == VpnLifecycleState.RUNNING,
+                    enabled = uiState.vpnLifecycleState == VpnLifecycleState.RUNNING ||
+                        uiState.vpnLifecycleState == VpnLifecycleState.FAILED,
                     modifier = Modifier.widthIn(max = 840.dp).align(Alignment.CenterHorizontally)
                 )
                 if (!useRail) DashboardTabs(selectedTab, { selectedTab = it })
@@ -601,7 +605,7 @@ fun ControlCenterTab(
         item { DnsDiagnosticsCard(uiState.diagnostics) }
         item {
             DisclosureCard("防護範圍與限制", "防護經由本機 VPN 的系統 DNS 查詢。") {
-                Text("僅攔截送往本機 VPN DNS 的 IPv4 UDP／TCP 53 查詢。App 直接指定其他 DNS 位址、使用自帶的 DoH／DoT，或透過 IPv6 DNS 查詢時，都不會被攔截。一般網路流量仍走原本網路。", style = MaterialTheme.typography.bodyMedium)
+                Text("DNS Shield 只處理送往本機 VPN 虛擬 DNS 位址的 IPv4／IPv6 UDP／TCP 53 查詢。App 自行指定其他 DNS 位址、使用自帶的 DoH／DoT，或直接連線到 IP 位址，都不會被攔截；其他網路流量仍走原本網路。", style = MaterialTheme.typography.bodyMedium)
                 Text("DoH 使用 HTTPS 加密；未加密備援使用 UDP/53，回應過大時可能改用 TCP/53。DNS Shield 不在本機驗證 DNSSEC，也無法只封鎖同一網域中的廣告內容。", style = MaterialTheme.typography.bodyMedium)
             }
         }
@@ -622,6 +626,8 @@ private fun DnsServerCard(
     server: DnsServer, isActive: Boolean, onSelect: () -> Unit,
     onSetPlaintextFallback: (Boolean) -> Unit, onDelete: () -> Unit
 ) {
+    val isSystemResolver = server.resolverMode == DnsResolverMode.SYSTEM
+    val canSelect = !isSystemResolver || Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
     OutlinedCard(
         border = androidx.compose.foundation.BorderStroke(
             if (isActive) 2.dp else 1.dp,
@@ -632,15 +638,24 @@ private fun DnsServerCard(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(
-                Modifier.weight(1f).selectable(selected = isActive, role = Role.RadioButton, onClick = onSelect)
+                Modifier.weight(1f).selectable(selected = isActive, enabled = canSelect, role = Role.RadioButton, onClick = onSelect)
                     .padding(12.dp).testTag("select_dns_${server.id}"),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                RadioButton(selected = isActive, onClick = null)
+                RadioButton(selected = isActive, onClick = null, enabled = canSelect)
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(server.name, style = MaterialTheme.typography.titleSmall)
-                    Text(buildString { append(server.primaryIp); server.secondaryIp?.let { append(" · "); append(it) } },
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (isSystemResolver) {
+                        Text("跟隨目前網路的 DNS。加密由 Android 的私人 DNS 設定管理。",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (!canSelect) {
+                            Text("需要 Android 10 以上", style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.tertiary)
+                        }
+                    } else {
+                        Text(buildString { append(server.primaryIp); server.secondaryIp?.let { append(" · "); append(it) } },
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     if (isActive || server.isCustom) {
                         Text(if (isActive) "已選用" else "自訂 DNS",
                             style = MaterialTheme.typography.labelMedium,
@@ -654,7 +669,7 @@ private fun DnsServerCard(
                 }
             }
         }
-        if (isActive) {
+        if (isActive && !isSystemResolver) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Row(
                 Modifier.fillMaxWidth().toggleable(value = server.allowPlaintextFallback, role = Role.Switch, onValueChange = onSetPlaintextFallback)
@@ -736,12 +751,17 @@ private fun DnsDiagnosticsCard(diagnostics: DnsDiagnosticsSnapshot) {
             "累積查詢失敗 ${diagnostics.failed}（超載 ${diagnostics.overloaded}）· 拒絕 ${diagnostics.rejected}",
             "快取命中 ${diagnostics.cacheHits} · 合併重複查詢 ${diagnostics.coalesced}",
             "上游傳輸：DoH 已排程 ${diagnostics.dohCallsQueued} · UDP 已送出 ${diagnostics.udpAttempts} · TCP ${diagnostics.tcpAttempts}",
-            "UDP 備援 ${diagnostics.fallbackAttempts} · 次要 DNS 重試 ${diagnostics.udpRetryAttempts}",
+            "UDP 備援 ${diagnostics.fallbackAttempts} · UDP 重試 ${diagnostics.udpRetryAttempts}",
+            "UDP 回覆：主要 ${diagnostics.primaryUdpAnswers} · 備援 ${diagnostics.secondaryUdpAnswers}",
+            "UDP 逾時：主要 ${diagnostics.primaryUdpTimeouts} · 備援 ${diagnostics.secondaryUdpTimeouts} · 先用備援 ${diagnostics.primaryUdpDeferredToBackup}",
             "待處理 ${diagnostics.pending} · 最高 ${diagnostics.peakPending}",
             if (diagnostics.latency.sampleCount == 0) "查詢延遲：尚無資料"
             else "最近 ${diagnostics.latency.sampleCount} 筆延遲：P50 ${diagnostics.latency.p50Millis} ms · P95 ${diagnostics.latency.p95Millis} ms"
         )
         lines.forEach { Text(it, style = MaterialTheme.typography.bodyMedium) }
+        if (diagnostics.systemAttempts > 0) {
+            Text("系統 DNS ${diagnostics.systemAttempts} 次", style = MaterialTheme.typography.bodyMedium)
+        }
         Text("失敗數為累積查詢失敗，不代表目前仍無法連線。統計保存在記憶體，App 程序結束後會重設。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -811,8 +831,8 @@ fun AddDnsDialog(
     val scope = rememberCoroutineScope()
     val formScrollState = rememberScrollState()
     val nameError = if (attempted && name.isBlank()) "請輸入伺服器名稱。" else null
-    val primaryError = if (attempted && !isIpv4Literal(primaryIp.trim())) "請輸入有效的 IPv4 位址。" else null
-    val secondaryError = if (attempted && secondaryIp.isNotBlank() && !isIpv4Literal(secondaryIp.trim())) "請輸入有效的 IPv4 位址。" else null
+    val primaryError = if (attempted && !isIpLiteral(primaryIp.trim())) "請輸入有效的 IPv4 或 IPv6 位址。" else null
+    val secondaryError = if (attempted && secondaryIp.isNotBlank() && !isIpLiteral(secondaryIp.trim())) "請輸入有效的 IPv4 或 IPv6 位址。" else null
     val primaryDohError = if (attempted) DohEndpointConfiguration.validationError(primaryDohUrl, primaryBootstrapIps, !allowPlaintextFallback) else null
     val secondaryDohError = if (attempted) DohEndpointConfiguration.validationError(secondaryDohUrl, secondaryBootstrapIps, !allowPlaintextFallback) else null
     AlertDialog(
@@ -821,7 +841,7 @@ fun AddDnsDialog(
         onDismissRequest = { if (!isSaving) onDismiss() },
         title = { Text("新增 DNS 解析器") },
         text = {
-            Column(Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(formScrollState), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.fillMaxWidth().heightIn(max = 480.dp).testTag("dialog_dns_form").verticalScroll(formScrollState), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 saveError?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag("dialog_dns_save_error"))
@@ -838,17 +858,19 @@ fun AddDnsDialog(
                     }
                     Switch(checked = allowPlaintextFallback, onCheckedChange = null, enabled = !isSaving, modifier = Modifier.testTag("dialog_plaintext_fallback_switch"))
                 }
-                DnsFormField(primaryIp, { primaryIp = it; saveError = null }, "主要 DNS IPv4", "8.8.8.8", primaryError, isSaving, "dialog_dns_primary_input", KeyboardType.Decimal)
-                DnsFormField(secondaryIp, { secondaryIp = it; saveError = null }, "備援 DNS IPv4（選填）", "8.8.4.4", secondaryError, isSaving, "dialog_dns_secondary_input", KeyboardType.Decimal)
-                Text("DoH 加密連線", style = MaterialTheme.typography.titleSmall)
-                Text("Google、Cloudflare、AdGuard、Quad9 的常用 IPv4 位址會自動對應 DoH。其他解析器請填 HTTPS 網址。未設定 DoH 時，只能使用未加密 DNS。",
+                Text("主要與備援 DNS 都可輸入 IPv4 或 IPv6，例如 8.8.8.8 或 2001:4860:4860::8888。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                DnsFormField(primaryDohUrl, { primaryDohUrl = it; saveError = null }, "主要 DoH 網址（選填）", "https://resolver.example/dns-query", primaryDohError, isSaving, "dialog_dns_doh_input", KeyboardType.Uri)
-                DnsFormField(primaryBootstrapIps, { primaryBootstrapIps = it; saveError = null }, "主要 DoH 連線 IPv4（選填）", "203.0.113.53, 203.0.113.54", null, isSaving, "dialog_dns_bootstrap_input")
-                Text("連線 IPv4（Bootstrap）用來找到 DoH 伺服器；多個位址請用逗號分隔。僅加密模式下，自訂 DoH 主機名稱必須填寫。",
+                DnsFormField(primaryIp, { primaryIp = it; saveError = null }, "主要 DNS", "8.8.8.8", primaryError, isSaving, "dialog_dns_primary_input", KeyboardType.Ascii)
+                DnsFormField(secondaryIp, { secondaryIp = it; saveError = null }, "備援 DNS（選填）", "8.8.4.4", secondaryError, isSaving, "dialog_dns_secondary_input", KeyboardType.Ascii)
+                Text("DoH 加密連線（選填）", style = MaterialTheme.typography.titleSmall)
+                Text("Google、Cloudflare、AdGuard、Quad9 的常用 IPv4／IPv6 位址會自動對應到 DoH。其他解析器請填 HTTPS 網址；未設定 DoH 時，只有允許未加密備援才會使用未加密 DNS。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                DnsFormField(secondaryDohUrl, { secondaryDohUrl = it; saveError = null }, "備援 DoH 網址（選填）", "https://backup.example/dns-query", secondaryDohError, isSaving, "dialog_dns_secondary_doh_input", KeyboardType.Uri)
-                DnsFormField(secondaryBootstrapIps, { secondaryBootstrapIps = it; saveError = null }, "備援 DoH 連線 IPv4（選填）", "203.0.113.55", null, isSaving, "dialog_dns_secondary_bootstrap_input")
+                DnsFormField(primaryDohUrl, { primaryDohUrl = it; saveError = null }, "主要 DoH 網址", "https://resolver.example/dns-query", primaryDohError, isSaving, "dialog_dns_doh_input", KeyboardType.Uri)
+                DnsFormField(primaryBootstrapIps, { primaryBootstrapIps = it; saveError = null }, "主要 DoH 連線 IP", "203.0.113.53, 2001:db8::53", null, isSaving, "dialog_dns_bootstrap_input")
+                Text("Bootstrap 可輸入 IPv4 或 IPv6，用來連線到 DoH 主機；多個位址請用逗號或空白分隔。僅加密模式下，自訂 DoH 主機名稱必須設定。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                DnsFormField(secondaryDohUrl, { secondaryDohUrl = it; saveError = null }, "備援 DoH 網址", "https://backup.example/dns-query", secondaryDohError, isSaving, "dialog_dns_secondary_doh_input", KeyboardType.Uri)
+                DnsFormField(secondaryBootstrapIps, { secondaryBootstrapIps = it; saveError = null }, "備援 DoH 連線 IP", "203.0.113.55, 2001:db8::55", null, isSaving, "dialog_dns_secondary_bootstrap_input")
             }
         },
         confirmButton = {
@@ -857,8 +879,8 @@ fun AddDnsDialog(
                 onClick = {
                     if (isSaving) return@TextButton
                     attempted = true
-                    if (name.isBlank() || !isIpv4Literal(primaryIp.trim()) ||
-                        (secondaryIp.isNotBlank() && !isIpv4Literal(secondaryIp.trim())) ||
+                    if (name.isBlank() || !isIpLiteral(primaryIp.trim()) ||
+                        (secondaryIp.isNotBlank() && !isIpLiteral(secondaryIp.trim())) ||
                         DohEndpointConfiguration.validationError(primaryDohUrl, primaryBootstrapIps, !allowPlaintextFallback) != null ||
                         DohEndpointConfiguration.validationError(secondaryDohUrl, secondaryBootstrapIps, !allowPlaintextFallback) != null
                     ) {

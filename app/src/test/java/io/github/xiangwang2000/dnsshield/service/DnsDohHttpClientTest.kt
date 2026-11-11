@@ -1,6 +1,7 @@
 package io.github.xiangwang2000.dnsshield.service
 
 import com.sun.net.httpserver.HttpServer
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -30,8 +31,10 @@ class DnsDohHttpClientTest {
         val body = AtomicReference(valid)
         val requests = AtomicInteger()
         val logged = mutableListOf<String>()
+        val url = "https://dns.example.test/private-path-token/dns-query?key=private-query-token"
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             requests.incrementAndGet()
+            if (status.get() == 0) throw IOException("Could not connect to ${chain.request().url}")
             Response.Builder()
                 .request(chain.request())
                 .protocol(Protocol.HTTP_1_1)
@@ -41,15 +44,18 @@ class DnsDohHttpClientTest {
                 .body(body.get().toResponseBody("application/dns-message".toMediaType()))
                 .build()
         }.build().forDohEndpoint(DnsDohEndpoint("https://dns.example.test/dns-query", "dns.example.test", emptyList(), true))
-        val url = "https://dns.example.test/dns-query"
         suspend fun lookup() = client.lookupDoh(
             url,
             query,
             DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 1_000)
-        ) { message, _ -> synchronized(logged) { logged += message } }
+        ) { message -> synchronized(logged) { logged += message } }
         try {
             assertNull(lookup())
-            assertEquals(true, synchronized(logged) { logged.any { "HTTP 503" in it } })
+            assertEquals(listOf("DoH HTTP 503 from dns.example.test"), logged.toList())
+
+            status.set(0)
+            assertNull(lookup())
+            assertEquals("DoH request failed for dns.example.test: IOException", logged.last())
 
             status.set(200)
             body.set(DnsTestMessages.response(queryBytes, name = "wrong.example"))
@@ -57,7 +63,7 @@ class DnsDohHttpClientTest {
 
             body.set(valid)
             assertContentEquals(valid, lookup())
-            assertEquals(3, requests.get())
+            assertEquals(4, requests.get())
         } finally {
             client.connectionPool.evictAll()
             client.dispatcher.executorService.shutdownNow()

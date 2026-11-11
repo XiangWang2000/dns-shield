@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.5.0 - 2026-11-11
+
+### Added
+
+- 支援送往本機虛擬 IPv4／IPv6 DNS 位址的 UDP／TCP 53 查詢，主要／備援解析器與 DoH bootstrap 支援 IPv4、IPv6 位址。
+- 新增可選的「系統 DNS」解析器（Android 10 以上），跟隨目前網路的 Android 系統解析器；DNS 加密由 Android「私人 DNS」設定管理。
+- 支援客戶端 EDNS UDP payload size，回應上限依 EDNS 宣告與 VPN MTU 計算；符合條件的系統 DNS 查詢遇到特定 Android resolver 錯誤或無效回應時，會以 4,096 bytes 的 EDNS payload 重試。
+
+### Changed
+
+- 合併 1Hosts Lite 與 AdGuard DNS Filter 的簡單網域規則，隨 APK 提供 247,497 筆封鎖規則。發行版附清單來源、授權及重建工具。
+- 更新 Public Suffix List，辨識新增或調整的共享網域邊界。
+- 手動新增網域規則若會覆蓋相同範圍的允許或封鎖規則，會先顯示原規則並要求確認。
+
+### Fixed
+
+- 重新進入排除 App 頁面會刷新清單。排除設定仍待套用時，重啟失敗會保留提示。
+- DoH 錯誤診斷只記錄主機名稱、HTTP 狀態或例外類型，避免把完整自訂網址寫入 Logcat。
+
+### Known limits
+
+- 一般外部 DNS、App 自行使用的 DoH／DoT 與直接 IP 連線仍不在攔截範圍。在沒有 464XLAT 的 IPv6-only 網路，所選解析器須可經 IPv6 連線；App 不提供 DNS64 合成或 NAT64 閘道。
+- 「系統 DNS」僅能在 Android 10 以上選用，且是否加密由 Android「私人 DNS」設定決定；DNS Shield 不會變更該系統設定。
+
 ## 1.4.0 - 2026-10-30
 
 ### Changed

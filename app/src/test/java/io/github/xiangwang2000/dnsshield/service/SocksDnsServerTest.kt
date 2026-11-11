@@ -43,10 +43,17 @@ class SocksDnsServerTest {
     }
 
     @Test
-    fun onlyAcceptsConnectToIpv4DnsEndpoint() {
+    fun onlyAcceptsConnectToVirtualDnsEndpoints() {
         withServer { server ->
             assertEquals(2, requestStatus(server, 1, 1, byteArrayOf(1, 1, 1, 1, 0, 53)))
             assertEquals(2, requestStatus(server, 1, 1, byteArrayOf(10, 0, 0, 1, 0, 54)))
+            assertEquals(0, requestStatus(server, 1, 1, byteArrayOf(10, 0, 0, 1, 0, 53)))
+            val dnsIpv6 = byteArrayOf(0xfd.toByte(), 0x29, 0x1a, 0x5d, 0x7c, 0x0d, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+            assertEquals(0, requestStatus(server, 1, 4, dnsIpv6 + byteArrayOf(0, 53)))
+            assertEquals(2, requestStatus(server, 1, 4, dnsIpv6.copyOf().also { it[15] = 2 } + byteArrayOf(0, 53)))
+            assertEquals(2, requestStatus(server, 1, 4, dnsIpv6 + byteArrayOf(0, 54)))
+            val mappedIpv4 = ByteArray(10) + byteArrayOf(-1, -1, 10, 0, 0, 1)
+            assertEquals(2, requestStatus(server, 1, 4, mappedIpv4 + byteArrayOf(0, 53)))
             assertEquals(
                 8,
                 requestStatus(server, 1, 3, byteArrayOf(3) + "dns".toByteArray() + byteArrayOf(0, 53))

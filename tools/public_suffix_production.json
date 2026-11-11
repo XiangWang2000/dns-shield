@@ -1,13 +1,13 @@
 {
-  "artifact_sha256": "401b3ed16ed28eb9a8362a93f8f054462fa16bdce26a0e7eaa6c5a3cb5a6eb70",
-  "artifact_size": 153740,
-  "exact_rules": 9950,
+  "artifact_sha256": "b37b9d3acb34bb8158fe541db2fd8ace27487452059ce6c9fe86532af7008aa3",
+  "artifact_size": 159876,
+  "exact_rules": 10076,
   "exception_rules": 8,
-  "git_blob_sha1": "52b981034da22eb87ee6cc719cba4d5561a7d351",
+  "git_blob_sha1": "369b6c37621c2f297130160ef9f1a1b67150b26f",
   "idna_version": "3.18",
-  "normalized_sha256": "72d07fea544b74d920be2394d4c5fbb38dd3f5f3ccac299e27809009bac1c550",
-  "normalized_size": 144382,
+  "normalized_sha256": "bd72f205259fc1565b71b559732e13a1c857c3389bf15cd40589cd59c1967354",
+  "normalized_size": 150423,
   "schema_version": 1,
-  "source_revision": "e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20",
-  "wildcard_rules": 281
+  "source_revision": "73f8cc701c084fe07d888ec552b2f0b53281a674",
+  "wildcard_rules": 312
 }

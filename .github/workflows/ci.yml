@@ -129,6 +129,39 @@ jobs:
           & .\verify.ps1 @verification
         shell: pwsh
 
+      - name: Build and verify signed Release APK
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true' && matrix.partition == 'core'
+        run: |
+          $keystorePath = Join-Path $env:RUNNER_TEMP 'dns-shield-ci-release.p12'
+          $testPassword = [guid]::NewGuid().ToString('N')
+          & keytool -genkeypair -alias ci-release -keyalg RSA -keysize 2048 -validity 2 `
+            -dname 'CN=DNS Shield CI Test' -storetype PKCS12 -keystore $keystorePath `
+            -storepass $testPassword -keypass $testPassword -noprompt
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the temporary CI signing key.' }
+
+          $env:KEYSTORE_PATH = $keystorePath
+          $env:STORE_PASSWORD = $testPassword
+          $env:KEY_ALIAS = 'ci-release'
+          $env:KEY_PASSWORD = $testPassword
+          $gradleWrapper = if ($IsWindows) { '.\gradlew.bat' } else { './gradlew' }
+          & $gradleWrapper --no-daemon --console=plain :app:assembleRelease
+          if ($LASTEXITCODE -ne 0) { throw 'Release APK build failed.' }
+
+          $buildTools = Get-ChildItem -LiteralPath (Join-Path $env:ANDROID_HOME 'build-tools') -Directory |
+            Sort-Object LastWriteTime -Descending
+          $signerName = if ($IsWindows) { 'apksigner.bat' } else { 'apksigner' }
+          $apksigner = $buildTools | ForEach-Object { Join-Path $_.FullName $signerName } |
+            Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $apksigner) { throw 'Could not find apksigner in the Android SDK.' }
+
+          $apkPath = Join-Path $PWD 'app/build/outputs/apk/release/app-release.apk'
+          $verification = (& $apksigner verify --verbose --print-certs $apkPath 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw 'Release APK signature verification failed.' }
+          . (Join-Path $PWD 'tools/release-guards.ps1')
+          $null = Get-CertificateSha256Digests -VerificationOutput $verification -ApkPath $apkPath
+          'A Release APK was built and verified with an ephemeral CI signing certificate.' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+        shell: pwsh
+
       - name: Stop CI Gradle daemons
         if: always() && steps.java.outcome == 'success'
         run: ./gradlew --stop

@@ -5,6 +5,7 @@
 /.idea/
 /.agents/
 /.codex/
+/.codex-remote-attachments/
 /.tokf-home/
 /AGENTS.md
 .DS_Store

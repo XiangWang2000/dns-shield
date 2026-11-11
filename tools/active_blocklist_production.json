@@ -1,13 +1,13 @@
 {
-  "artifact_sha256": "14f1b7c3200836d2f914698a1b3a0424f01025b1b883481f5888ea1e329767f2",
-  "artifact_size": 817952,
-  "entry_count": 102241,
-  "parsed_domains": 102241,
-  "schema_version": 1,
-  "source_name": "badmojr/1Hosts Lite",
-  "source_revision": "7a4588e87bcf7e86e0b8169d391b8422bd3c5d36",
-  "source_date": "2026-09-03",
-  "source_sha256": "6d6e4a087e501696b2996b888fd220590335b6bfc2ee375046abe74b95b45d9f",
-  "source_size": 2041076,
-  "unique_domains": 102241
+  "artifact_sha256": "92dc1d6de0a7c0dbb3f8bb59ab6b8151ad39b30b518a5d4d52d4fbbfa51104eb",
+  "artifact_size": 1980000,
+  "entry_count": 247497,
+  "parsed_domains": 247497,
+  "schema_version": 2,
+  "source_date": "2026-11-05",
+  "source_name": "1Hosts Lite + AdGuard DNS Filter",
+  "source_revision": "7a4588e87bcf7e86e0b8169d391b8422bd3c5d36+bef5669f914c1d2419e732feeefde79fcdca0eab",
+  "source_sha256": "016e956d467eb5b7e9b4e1368c511900644b64d8ae5f9f71bd5d0eff85d1c73e",
+  "source_size": 5164290,
+  "unique_domains": 247497
 }

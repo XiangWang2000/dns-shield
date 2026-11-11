@@ -100,5 +100,21 @@ class DownloadActiveBlocklistSourceTest(unittest.TestCase):
                 urlopen.assert_not_called()
 
 
+    def test_schema2_download_uses_the_pinned_raw_source_url(self) -> None:
+        source_manifest = TOOLS_DIR / "active_blocklist_source.json"
+        contents = json.loads(source_manifest.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "merged-source.txt"
+            with patch(
+                "download_active_blocklist_source.urllib.request.urlopen",
+                return_value=FakeResponse(b"wrong"),
+            ) as urlopen:
+                with self.assertRaisesRegex(ValueError, "size mismatch"):
+                    download_source(source_manifest, output)
+
+            urlopen.assert_called_once_with(contents["sources"][0]["source_url"], timeout=30)
+            self.assertFalse(output.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

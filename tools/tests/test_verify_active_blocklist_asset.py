@@ -69,5 +69,32 @@ class VerifyActiveBlocklistAssetTest(unittest.TestCase):
                 verify_asset(manifest_path, artifact_path)
 
 
+    def test_accepts_pinned_schema2_contract_before_artifact_validation(self) -> None:
+        production_manifest = TOOLS_DIR / "active_blocklist_production.json"
+        source_manifest = TOOLS_DIR / "active_blocklist_source.json"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            artifact_path = Path(temporary_directory) / "active.bin"
+            artifact_path.write_bytes(b"")
+
+            with self.assertRaisesRegex(ValueError, "Artifact size mismatch"):
+                verify_asset(production_manifest, artifact_path, source_manifest)
+
+    def test_rejects_schema2_source_drift_before_reading_artifact(self) -> None:
+        source_manifest = TOOLS_DIR / "active_blocklist_source.json"
+        production = json.loads(
+            (TOOLS_DIR / "active_blocklist_production.json").read_text(encoding="utf-8")
+        )
+        production["source_revision"] = "0" * 40
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            production_path = Path(temporary_directory) / "production.json"
+            production_path.write_text(json.dumps(production), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Production/source manifest mismatch"):
+                verify_asset(
+                    production_path,
+                    Path(temporary_directory) / "missing.bin",
+                    source_manifest,
+                )
+
 if __name__ == "__main__":
     unittest.main()

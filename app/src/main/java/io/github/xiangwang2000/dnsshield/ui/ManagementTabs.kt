@@ -114,6 +114,7 @@ import io.github.xiangwang2000.dnsshield.ui.theme.CyberSky
 import io.github.xiangwang2000.dnsshield.ui.theme.DarkSurface
 import io.github.xiangwang2000.dnsshield.viewmodel.AppIconCache
 import io.github.xiangwang2000.dnsshield.viewmodel.AppInfo
+import io.github.xiangwang2000.dnsshield.viewmodel.DomainRuleSaveResult
 import io.github.xiangwang2000.dnsshield.viewmodel.DomainRuleUndoToken
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -397,7 +398,7 @@ fun DomainRulesTab(
     rules: List<UserDomainRuleEntity>,
     searchQuery: String,
     onSearchChange: (String) -> Unit,
-    onSaveRule: suspend (String, DomainRuleAction, Boolean) -> String?,
+    onSaveRule: suspend (String, DomainRuleAction, Boolean, String?) -> DomainRuleSaveResult,
     onDeleteRule: suspend (UserDomainRuleEntity) -> Unit
 ) {
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
@@ -406,6 +407,8 @@ fun DomainRulesTab(
     var includeSubdomains by rememberSaveable { mutableStateOf(false) }
     var validationError by remember { mutableStateOf<String?>(null) }
     var isSaving by remember { mutableStateOf(false) }
+    var showRuleConflict by remember { mutableStateOf(false) }
+    var conflictingRule by remember { mutableStateOf<UserDomainRuleEntity?>(null) }
     var pendingDeleteRule by remember { mutableStateOf<UserDomainRuleEntity?>(null) }
     var deleteError by remember { mutableStateOf<String?>(null) }
     var isDeleting by remember { mutableStateOf(false) }
@@ -587,11 +590,41 @@ fun DomainRulesTab(
             modifier = Modifier.imePadding().semantics { testTagsAsResourceId = true },
             properties = DialogProperties(decorFitsSystemWindows = false),
             onDismissRequest = {
-                if (!isSaving) showAddDialog = false
+                if (!isSaving) {
+                    showAddDialog = false
+                    showRuleConflict = false
+                    conflictingRule = null
+                }
             },
-            title = { Text("新增網域規則") },
+            title = {
+                Text(if (showRuleConflict) "確認規則變更" else "新增網域規則")
+            },
             text = {
-                Column(
+                if (showRuleConflict) {
+                    val existingRule = conflictingRule
+                    val existingAction = existingRule?.action?.let {
+                        when (it) {
+                            DomainRuleAction.BLOCK.name -> "封鎖"
+                            DomainRuleAction.ALLOW.name -> "允許"
+                            else -> it
+                        }
+                    }
+                    val existingScope = if (existingRule?.includeSubdomains == true) {
+                        "包含子網域"
+                    } else {
+                        "僅此網域"
+                    }
+                    val requestedAction = if (selectedAction == DomainRuleAction.BLOCK) "封鎖" else "允許"
+                    val requestedScope = if (includeSubdomains) "包含子網域" else "僅此網域"
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (existingRule == null) {
+                            Text("原規則已不存在。")
+                        } else {
+                            Text("「" + existingRule.domain + "」已存在" + existingAction + "規則（" + existingScope + "）。")
+                        }
+                        Text("確認後會將「" + domainInput + "」設為" + requestedAction + "（" + requestedScope + "）。")
+                    }
+                } else Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 480.dp)
@@ -703,29 +736,47 @@ fun DomainRulesTab(
                         validationError = null
                         scope.launch {
                             try {
-                                validationError = onSaveRule(
-                                    domainInput,
-                                    selectedAction,
-                                    includeSubdomains
-                                )
-                                if (validationError == null) {
-                                    showAddDialog = false
-                                    domainInput = ""
-                                    includeSubdomains = false
-                                    selectedAction = DomainRuleAction.ALLOW
+                                when (
+                                    val result = onSaveRule(
+                                        domainInput,
+                                        selectedAction,
+                                        includeSubdomains,
+                                        if (showRuleConflict) conflictingRule?.revision else null
+                                    )
+                                ) {
+                                    DomainRuleSaveResult.Saved -> {
+                                        showAddDialog = false
+                                        showRuleConflict = false
+                                        conflictingRule = null
+                                        domainInput = ""
+                                        includeSubdomains = false
+                                        selectedAction = DomainRuleAction.ALLOW
+                                    }
+                                    is DomainRuleSaveResult.Conflict -> {
+                                        conflictingRule = result.existingRule
+                                        showRuleConflict = true
+                                    }
+                                    is DomainRuleSaveResult.ValidationError -> {
+                                        validationError = result.message
+                                        showRuleConflict = false
+                                    }
                                 }
                             } catch (exception: CancellationException) {
                                 throw exception
                             } catch (exception: Exception) {
                                 validationError = "儲存失敗：" +
                                     (exception.localizedMessage ?: "請稍後再試")
+                                showRuleConflict = false
                             } finally {
                                 isSaving = false
                             }
                         }
                     },
                     enabled = !isSaving,
-                    modifier = Modifier.testTag("save_domain_rule_button")
+                    modifier = Modifier.testTag(
+                        if (showRuleConflict) "confirm_replace_domain_rule_button"
+                        else "save_domain_rule_button"
+                    )
                 ) {
                     if (isSaving) {
                         CircularProgressIndicator(
@@ -733,18 +784,34 @@ fun DomainRulesTab(
                             strokeWidth = 2.dp
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("儲存中")
+                        Text(if (showRuleConflict) "套用中" else "儲存中")
                     } else {
-                        Text("儲存")
+                        Text(
+                            when {
+                                !showRuleConflict -> "儲存"
+                                conflictingRule == null -> "新增規則"
+                                else -> "確認取代"
+                            }
+                        )
                     }
                 }
             },
             dismissButton = {
                 TextButton(
-                    onClick = { if (!isSaving) showAddDialog = false },
+                    onClick = {
+                        if (!isSaving) {
+                            if (showRuleConflict) {
+                                showRuleConflict = false
+                                conflictingRule = null
+                                validationError = null
+                            } else {
+                                showAddDialog = false
+                            }
+                        }
+                    },
                     enabled = !isSaving
                 ) {
-                    Text("取消")
+                    Text(if (showRuleConflict) "返回修改" else "取消")
                 }
             }
         )

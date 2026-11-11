@@ -27,9 +27,9 @@ internal data class ParsedIpv4UdpDnsQuery(
     val sourceIp: ByteArray,
     val destinationIp: ByteArray,
     val sourcePort: Int,
-    val payload: ByteArray,
-    val query: ParsedDnsQuery
-)
+    override val payload: ByteArray,
+    override val query: ParsedDnsQuery
+) : DnsClientQuery
 
 internal data class ParsedIpv4UdpDnsErrorResponse(
     val clientIp: ByteArray,

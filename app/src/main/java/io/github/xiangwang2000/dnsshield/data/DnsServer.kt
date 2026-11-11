@@ -4,6 +4,8 @@ import androidx.room.Entity
 import androidx.room.ColumnInfo
 import androidx.room.PrimaryKey
 
+enum class DnsResolverMode { CONFIGURED, SYSTEM }
+
 @Entity(tableName = "dns_servers")
 data class DnsServer(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
@@ -16,5 +18,6 @@ data class DnsServer(
     val primaryDohUrl: String? = null,
     val primaryDohBootstrapIps: String? = null,
     val secondaryDohUrl: String? = null,
-    val secondaryDohBootstrapIps: String? = null
+    val secondaryDohBootstrapIps: String? = null,
+    @ColumnInfo(defaultValue = "'CONFIGURED'") val resolverMode: DnsResolverMode = DnsResolverMode.CONFIGURED
 )
