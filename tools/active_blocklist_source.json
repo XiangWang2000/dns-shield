@@ -1,12 +1,61 @@
 {
-  "git_blob_sha1": "cb9cbb56e45fb4219e0a45de0f32e67cc16f6540",
-  "license": "MPL-2.0",
-  "license_url": "https://www.mozilla.org/MPL/2.0/",
-  "schema_version": 1,
-  "source_name": "badmojr/1Hosts Lite",
-  "source_path": "Lite/domains.wildcards",
-  "source_revision": "7a4588e87bcf7e86e0b8169d391b8422bd3c5d36",
-  "source_sha256": "6d6e4a087e501696b2996b888fd220590335b6bfc2ee375046abe74b95b45d9f",
-  "source_size": 2041076,
-  "source_url": "https://raw.githubusercontent.com/badmojr/1Hosts/7a4588e87bcf7e86e0b8169d391b8422bd3c5d36/Lite/domains.wildcards"
+  "derivation": {
+    "adguard_block_rules": "Exact ||domain^ rules only.",
+    "adguard_exception_rules": "Exact @@||domain^ rules only.",
+    "advanced_adguard_rules": "Ignored; no full AdGuard engine is executed.",
+    "algorithm": "dns-shield-merged-adblock-hosts-v1",
+    "base_exclusion": "Exclude a candidate that equals a base domain or has a base domain as any ancestor.",
+    "builtin_exclusion": "Exclude candidates matched by the pinned current BuiltInDomainMatcher semantics.",
+    "canonical_encoding": "ASCII",
+    "canonical_line_endings": "LF",
+    "canonical_serialization": "Sorted unique domains, one per line, trailing LF.",
+    "counts": {
+      "base_domains": 102241,
+      "base_parsed_domains": 102241,
+      "excluded_by_base": 40682,
+      "excluded_by_builtin_matcher": 1772,
+      "excluded_by_simple_exceptions": 0,
+      "extra_domains": 145256,
+      "ignored_noncomment_rule_lines": 876,
+      "merged_domains": 247497,
+      "merged_hashes": 247497,
+      "simple_block_domains": 187710,
+      "simple_block_rule_lines": 187710,
+      "simple_exception_domains": 11,
+      "simple_exception_rule_lines": 11
+    },
+    "exception_order": "Apply simple exceptions after base and built-in exclusions."
+  },
+  "schema_version": 2,
+  "source_date": "2026-11-05",
+  "source_name": "1Hosts Lite + AdGuard DNS Filter",
+  "source_revision": "7a4588e87bcf7e86e0b8169d391b8422bd3c5d36+bef5669f914c1d2419e732feeefde79fcdca0eab",
+  "source_sha256": "016e956d467eb5b7e9b4e1368c511900644b64d8ae5f9f71bd5d0eff85d1c73e",
+  "source_size": 5164290,
+  "sources": [
+    {
+      "git_blob_sha1": "cb9cbb56e45fb4219e0a45de0f32e67cc16f6540",
+      "license": "MPL-2.0",
+      "license_url": "https://www.mozilla.org/MPL/2.0/",
+      "source_date": "2026-09-03",
+      "source_name": "badmojr/1Hosts Lite",
+      "source_path": "Lite/domains.wildcards",
+      "source_revision": "7a4588e87bcf7e86e0b8169d391b8422bd3c5d36",
+      "source_sha256": "6d6e4a087e501696b2996b888fd220590335b6bfc2ee375046abe74b95b45d9f",
+      "source_size": 2041076,
+      "source_url": "https://raw.githubusercontent.com/badmojr/1Hosts/7a4588e87bcf7e86e0b8169d391b8422bd3c5d36/Lite/domains.wildcards"
+    },
+    {
+      "git_blob_sha1": "f25eff73fdcab1e93a5657f7cfbe4ffb7384024f",
+      "license": "GPL-3.0",
+      "license_url": "https://github.com/AdguardTeam/AdGuardSDNSFilter/blob/7b09ea4210e3c480f5e8f2dc528d3b751317276e/LICENSE",
+      "source_date": "2026-11-05",
+      "source_name": "AdguardTeam/AdGuardSDNSFilter",
+      "source_path": "Filters/filter.txt",
+      "source_revision": "bef5669f914c1d2419e732feeefde79fcdca0eab",
+      "source_sha256": "2bfb2cb0e71439de8d0cbbd44cb91716561d6ef7592026ea5d26718b19400ee3",
+      "source_size": 4609962,
+      "source_url": "https://raw.githubusercontent.com/AdguardTeam/AdGuardSDNSFilter/bef5669f914c1d2419e732feeefde79fcdca0eab/Filters/filter.txt"
+    }
+  ]
 }

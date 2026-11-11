@@ -8,17 +8,24 @@ DNS Shield keeps domain policy separate from the VPN lifecycle so precedence and
 
 1. Normalize the queried domain with `lowercase().trim()`.
 2. Allow blank and `unknown` values without invoking policy components.
-3. Check `DomainAllowlist`; an allowlist hit bypasses every blocker.
-4. Ask each `DomainMatcher` in order and stop at the first blocking result.
-5. Allow the domain when no blocker matches.
+3. Check the Room-backed user rules; the most-specific match returns ALLOW or BLOCK before any other policy component.
+4. Check `DomainAllowlist`; an allowlist hit bypasses every blocker.
+5. Ask each `DomainMatcher` in order and stop at the first blocking result.
+6. Allow the domain when no blocker matches.
 
 The service-level `blockDecisionCache` remains outside this composition and caches the final policy decision using both the normalized domain and the exact published policy assembly.
 
-## Current allowlist semantics
+## Exact allowlist semantics
 
 `ExactDomainAllowlist` matches only the normalized domain stored in the set. Allowing `example.com` does not allow `sub.example.com`, `lookalike-example.com`, or any parent domain.
 
-This conservative behavior is intentional. User-managed persistence and any future parent-aware allowlist semantics remain separate reviewed policy changes.
+This exact-only component is separate from user rules, which can explicitly include subdomains and are described below.
+
+## Room-backed user rules
+
+The `user_domain_rules` Room table stores ALLOW or BLOCK rules with an exact-domain or include-subdomains scope. Rules are retained across app restarts. The unique key is `(domain, includeSubdomains)`, so a domain can have one rule for each scope. The UI asks for confirmation before changing the action of an existing rule with the same domain and scope; revision checks prevent a stale edit from replacing a newer rule.
+
+User rules are normalized to lowercase ASCII domain names. A rule that includes subdomains must pass the Public Suffix List check, so a public suffix cannot be selected as a parent rule. The most-specific matching domain wins; for the same domain, an exact rule takes precedence over its include-subdomains rule for the apex. A matching ALLOW bypasses the exact allowlist and every blocker, while a matching BLOCK overrides them.
 
 ## Bounded parent-domain matching
 
@@ -70,7 +77,7 @@ The runtime source does not create directories, download a blocklist, or replace
 
 `ReloadableDomainPolicy` stores one complete `DomainPolicyAssembly` in an atomic reference. DNS readers therefore observe either the previous matcher and status or the replacement matcher and status; they never observe a partially updated policy.
 
-`DnsVpnService` assembles and installs runtime policy on each tunnel start, including starts reached through `ACTION_RESTART`. One lazy `ProductionBlocklistAssetLoader` and one lazy `PublicSuffixResolverOwner` belong to the service instance. The production blocklist bytes and resolver are verified once and reused by later policy reloads in the same service lifecycle. With no valid compiled blocklist, the resolver owner is never touched.
+`DnsVpnService` assembles and installs runtime policy on each tunnel start, including starts reached through `ACTION_RESTART`. It includes the current Room rule snapshot; saving or deleting a rule while the VPN is running requests a policy reload. One lazy `ProductionBlocklistAssetLoader` and one lazy `PublicSuffixResolverOwner` belong to the service instance. The production blocklist bytes and resolver are verified once and reused by later policy reloads in the same service lifecycle. With no valid compiled blocklist, the resolver owner is never touched.
 
 The installation callback clears DNS responses, in-flight requests, and block decisions before the replacement assembly is published. Missing or rejected blocklists still publish a built-in-only fallback assembly. A Public Suffix load rejection keeps a valid compiled blocklist exact-only.
 
@@ -80,4 +87,4 @@ Installers are serialized, while domain lookups remain lock-free and delegate th
 
 ## Current scope
 
-The production APK packages a pinned, verified 102,241-entry 1Hosts Lite compiled blocklist and the reviewed Public Suffix artifact used for bounded parent matching. The repository still does not ship a runtime remote-update flow, user-managed allowlist persistence, blocking-policy UI, or Room schema change. A private app-files `active.bin` remains an explicit local override; without one, the packaged production list is active by default.
+The production APK packages a pinned, verified 247,497-entry compiled blocklist derived from 1Hosts Lite and simple AdGuard DNS Filter rules and the reviewed Public Suffix artifact used for bounded parent matching. The app includes a UI for Room-backed exact and include-subdomains ALLOW/BLOCK rules; the repository does not ship a runtime remote-update flow for the packaged blocklist. A private app-files `active.bin` remains an explicit local override; without one, the packaged production list is active by default.

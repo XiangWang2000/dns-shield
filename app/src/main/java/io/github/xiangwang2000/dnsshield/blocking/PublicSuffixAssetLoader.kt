@@ -9,7 +9,7 @@ import java.security.MessageDigest
 /**
  * Loads and validates one compiled Public Suffix artifact from Android assets.
  *
- * The loader is deliberately not wired into runtime policy yet. A loader instance caches the
+ * A loader instance caches the
  * successfully parsed resolver so callers do not repeatedly read and materialize the same rules.
  */
 class PublicSuffixAssetLoader internal constructor(
@@ -52,13 +52,13 @@ internal data class PublicSuffixArtifactContract(
 
 internal object ProductionPublicSuffixArtifact {
     val contract = PublicSuffixArtifactContract(
-        artifactSize = 153_740,
+        artifactSize = 159_876,
         artifactSha256 =
-            "401b3ed16ed28eb9a8362a93f8f054462fa16bdce26a0e7eaa6c5a3cb5a6eb70",
+            "b37b9d3acb34bb8158fe541db2fd8ace27487452059ce6c9fe86532af7008aa3",
         normalizedSourceSha256 =
-            "72d07fea544b74d920be2394d4c5fbb38dd3f5f3ccac299e27809009bac1c550",
-        exactRules = 9_950,
-        wildcardRules = 281,
+            "bd72f205259fc1565b71b559732e13a1c857c3389bf15cd40589cd59c1967354",
+        exactRules = 10_076,
+        wildcardRules = 312,
         exceptionRules = 8
     )
 

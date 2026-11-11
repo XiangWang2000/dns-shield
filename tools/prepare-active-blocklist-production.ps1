@@ -36,8 +36,8 @@ $stageDirectory = Join-Path $repoRoot "build/active-blocklist.prepare.$PID"
 New-Item -ItemType Directory -Force -Path $stageDirectory | Out-Null
 try {
     if ([string]::IsNullOrWhiteSpace($Source)) {
-        $sourcePath = Join-Path $stageDirectory "1hosts-lite.domains.txt"
-        Invoke-PythonStep "Downloading pinned production blocklist source..." @(
+        $sourcePath = Join-Path $stageDirectory "merged-active-source.txt"
+        Invoke-PythonStep "Downloading pinned merged production blocklist sources..." @(
             $downloadScript,
             "--manifest", $sourceManifestPath,
             "--output", $sourcePath

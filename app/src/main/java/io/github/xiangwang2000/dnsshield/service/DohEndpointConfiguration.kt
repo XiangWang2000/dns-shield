@@ -21,22 +21,39 @@ internal object DohEndpointConfiguration {
     private val defaultUrlByIp = mapOf(
         "8.8.8.8" to "https://dns.google/dns-query",
         "8.8.4.4" to "https://dns.google/dns-query",
+        "2001:4860:4860::8888" to "https://dns.google/dns-query",
+        "2001:4860:4860::8844" to "https://dns.google/dns-query",
         "1.1.1.1" to "https://cloudflare-dns.com/dns-query",
         "1.0.0.1" to "https://cloudflare-dns.com/dns-query",
+        "2606:4700:4700::1111" to "https://cloudflare-dns.com/dns-query",
+        "2606:4700:4700::1001" to "https://cloudflare-dns.com/dns-query",
         "94.140.14.14" to "https://dns.adguard-dns.com/dns-query",
         "94.140.15.15" to "https://dns.adguard-dns.com/dns-query",
+        "2a10:50c0::ad1:ff" to "https://dns.adguard-dns.com/dns-query",
+        "2a10:50c0::ad2:ff" to "https://dns.adguard-dns.com/dns-query",
         "9.9.9.9" to "https://dns.quad9.net/dns-query",
-        "149.112.112.112" to "https://dns.quad9.net/dns-query"
+        "149.112.112.112" to "https://dns.quad9.net/dns-query",
+        "2620:fe::fe" to "https://dns.quad9.net/dns-query",
+        "2620:fe::9" to "https://dns.quad9.net/dns-query"
     )
 
     val builtInBootstrapAddresses = mapOf(
-        "dns.google" to listOf("8.8.8.8", "8.8.4.4"),
-        "cloudflare-dns.com" to listOf("1.1.1.1", "1.0.0.1"),
-        "dns.adguard-dns.com" to listOf("94.140.14.14", "94.140.15.15"),
-        "dns.quad9.net" to listOf("9.9.9.9", "149.112.112.112")
+        "dns.google" to listOf(
+            "8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844"
+        ),
+        "cloudflare-dns.com" to listOf(
+            "1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"
+        ),
+        "dns.adguard-dns.com" to listOf(
+            "94.140.14.14", "94.140.15.15", "2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff"
+        ),
+        "dns.quad9.net" to listOf(
+            "9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"
+        )
     )
 
-    fun defaultUrlForIp(ip: String): String? = defaultUrlByIp[ip]
+    fun defaultUrlForIp(ip: String): String? =
+        defaultUrlByIp[ip] ?: IpAddressLiteral.parse(ip)?.normalized?.let(defaultUrlByIp::get)
 
     fun endpoints(server: DnsServer): List<DnsDohEndpoint> = endpoints(
         server.primaryIp,
@@ -88,7 +105,7 @@ internal object DohEndpointConfiguration {
             ?: defaultUrlForIp(resolverIp)
             ?: return null
         val parsedUrl = parseHttpsUrl(url) ?: return null
-        val explicitAddresses = parseBootstrapIpv4Addresses(configuredBootstrapIps)
+        val explicitAddresses = parseBootstrapIpAddresses(configuredBootstrapIps)
             ?: return null
         val addresses = if (isCustom) {
             explicitAddresses
@@ -111,19 +128,20 @@ internal object DohEndpointConfiguration {
 
         val parsedUrl = parseHttpsUrl(url)
             ?: return "DoH URL 必須是有效的 HTTPS 網址，且不可含帳密或片段"
-        val bootstrapAddresses = parseBootstrapIpv4Addresses(bootstrap)
-            ?: return "Bootstrap 僅接受逗號分隔的 IPv4 位址"
+        val bootstrapAddresses = parseBootstrapIpAddresses(bootstrap)
+            ?: return "Bootstrap 請輸入 IPv4 或 IPv6 位址，以逗號或空白分隔；不支援中括號或範圍 ID。"
         if (strict && !isIpLiteral(parsedUrl.host) && bootstrapAddresses.isEmpty()) {
-            return "僅加密模式的自訂 DoH 主機名稱必須設定 Bootstrap IPv4 位址"
+            return "僅加密模式下，自訂 DoH 主機名稱需要 Bootstrap IP 位址。"
         }
         return null
     }
 
-    fun parseBootstrapIpv4Addresses(value: String?): List<String>? {
+    fun parseBootstrapIpAddresses(value: String?): List<String>? {
         val text = value?.trim().orEmpty()
         if (text.isEmpty()) return emptyList()
         val addresses = text.split(Regex("[,\\s]+")).filter(String::isNotEmpty)
-        return addresses.takeIf { it.all(::isIpv4Literal) }?.distinct()
+        val normalized = addresses.map { IpAddressLiteral.parse(it)?.normalized ?: return null }
+        return normalized.distinct()
     }
 
     private fun parseHttpsUrl(value: String): HttpUrl? {
@@ -138,12 +156,7 @@ internal object DohEndpointConfiguration {
 }
 
 internal fun isIpv4Literal(value: String): Boolean {
-    val parts = value.split('.')
-    return parts.size == 4 && parts.all { part ->
-        part.isNotEmpty() && part.length <= 3 && part.all(Char::isDigit) &&
-            part.toIntOrNull()?.let { it in 0..255 } == true
-    }
+    return IpAddressLiteral.isIpv4(value)
 }
 
-internal fun isIpLiteral(hostname: String): Boolean =
-    isIpv4Literal(hostname) || (hostname.contains(':') && hostname.matches(Regex("[0-9a-fA-F:%.]+")))
+internal fun isIpLiteral(value: String): Boolean = IpAddressLiteral.parse(value) != null

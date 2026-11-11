@@ -27,14 +27,14 @@ class ProductionPublicSuffixMainAssetInstrumentedTest {
         assertSame(first, second)
         assertEquals(
             PublicSuffixResolverStatus.Loaded(
-                exactRules = 9_950,
-                wildcardRules = 281,
+                exactRules = 10_076,
+                wildcardRules = 312,
                 exceptionRules = 8
             ),
             owner.status()
         )
         assertEquals(
-            "72d07fea544b74d920be2394d4c5fbb38dd3f5f3ccac299e27809009bac1c550",
+            "bd72f205259fc1565b71b559732e13a1c857c3389bf15cd40589cd59c1967354",
             first.sourceSha256Hex
         )
 
@@ -49,6 +49,8 @@ class ProductionPublicSuffixMainAssetInstrumentedTest {
             "a.b.example.co.uk" to "example.co.uk",
             "ads.tenant.github.io" to "tenant.github.io",
             "cdn.site.blogspot.com" to "site.blogspot.com",
+            "db.aivencloud.com" to null,
+            "www.tenant.db.aivencloud.com" to "tenant.db.aivencloud.com",
             "a.b.ck" to "a.b.ck",
             "a.www.ck" to "www.ck",
             "a.city.kawasaki.jp" to "city.kawasaki.jp",

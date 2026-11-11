@@ -17,6 +17,7 @@ from build_blocklist import (
     HEADER_SIZE,
     MAGIC,
 )
+from merge_active_blocklist_source import validate_production_manifest
 
 
 @dataclass(frozen=True)
@@ -34,20 +35,26 @@ def verify_asset(
     source_manifest_path: Path | None = None,
 ) -> ActiveBlocklistVerificationReport:
     manifest = json.loads(production_manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != 1:
-        raise ValueError(
-            f"Unsupported production manifest schema: {manifest.get('schema_version')}"
-        )
-    if source_manifest_path is not None:
-        source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
-        if source_manifest.get("schema_version") != 1:
-            raise ValueError(
-                "Unsupported source manifest schema: "
-                f"{source_manifest.get('schema_version')}"
-            )
-        for field in ("source_revision", "source_sha256", "source_size"):
-            if manifest[field] != source_manifest[field]:
-                raise ValueError(f"Production/source manifest mismatch for {field}")
+    source_manifest = None
+    schema_version = manifest.get("schema_version")
+    if schema_version == 1:
+        if source_manifest_path is not None:
+            source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+            if source_manifest.get("schema_version") != 1:
+                raise ValueError(
+                    "Unsupported source manifest schema: "
+                    f"{source_manifest.get('schema_version')}"
+                )
+            for field in ("source_revision", "source_sha256", "source_size"):
+                if manifest[field] != source_manifest[field]:
+                    raise ValueError(f"Production/source manifest mismatch for {field}")
+    elif schema_version == 2:
+        if source_manifest_path is not None:
+            source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+        validate_production_manifest(manifest, source_manifest)
+    else:
+        raise ValueError(f"Unsupported production manifest schema: {schema_version}")
+
     artifact = asset_path.read_bytes()
     artifact_sha256 = hashlib.sha256(artifact).hexdigest()
 

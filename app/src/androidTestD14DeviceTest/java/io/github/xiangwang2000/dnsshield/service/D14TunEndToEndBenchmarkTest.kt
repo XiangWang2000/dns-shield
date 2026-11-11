@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Debug
 import android.os.Process
 import android.os.SystemClock
+import android.os.Trace
 import androidx.core.content.ContextCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -130,6 +131,53 @@ class D14TunEndToEndBenchmarkTest {
                 .put("upstream_requests_for_domain", upstream.count(cacheDomain)))
 
             if (!manualHandoff) {
+                val warmCacheLatencies = DoubleArray(WARM_CACHE_SAMPLES)
+                Trace.beginSection("D14 warm cache phase")
+                val allocatedBytes = try {
+                    measureWarmCache(cacheDomain, warmCacheLatencies)
+                } finally {
+                    Trace.endSection()
+                }
+                latencySamples["warm_cache_hit"] = warmCacheLatencies.toMutableList()
+                assertEquals("Warm cache hits must stay local.", 1, upstream.count(cacheDomain))
+                waitForDiagnostics { it.cacheHits >= afterCache.cacheHits + WARM_CACHE_WARMUP + WARM_CACHE_SAMPLES }
+                scenarioResults.put("warm_cache_hit", JSONObject()
+                    .put("passed", true)
+                    .put("upstream_requests_for_domain", upstream.count(cacheDomain))
+                    .put("process_allocated_bytes_per_query", allocatedBytes ?: JSONObject.NULL))
+
+                val coldDomains = (0 until COLD_CACHE_WARMUP + COLD_CACHE_SAMPLES).map {
+                    "d14-cold-$runId-${it.toString().padStart(4, '0')}.example.invalid"
+                }
+                val coldBefore = DnsVpnService.d14DiagnosticsSnapshot()
+                val coldCacheLatencies = DoubleArray(COLD_CACHE_SAMPLES)
+                Trace.beginSection("D14 cold cache phase")
+                val coldAllocatedBytes = try {
+                    measureColdCache(coldDomains, coldCacheLatencies)
+                } finally {
+                    Trace.endSection()
+                }
+                latencySamples["cold_cache_miss"] = coldCacheLatencies.toMutableList()
+                val afterColdCache = waitForDiagnostics {
+                    it.received >= coldBefore.received + COLD_CACHE_WARMUP + COLD_CACHE_SAMPLES
+                }
+                assertEquals(
+                    "Cold-cache queries must not produce answer cache hits.",
+                    0L,
+                    afterColdCache.cacheHits - coldBefore.cacheHits
+                )
+                coldDomains.forEach { domain ->
+                    assertTrue("Missing fake-upstream request for $domain", upstream.waitForCount(domain, 1, 2_000L))
+                    assertEquals("Cold-cache domain $domain should reach the upstream exactly once.", 1, upstream.count(domain))
+                }
+                scenarioResults.put("cold_cache_miss", JSONObject()
+                    .put("passed", true)
+                    .put("warmup_queries", COLD_CACHE_WARMUP)
+                    .put("samples", COLD_CACHE_SAMPLES)
+                    .put("upstream_requests", coldDomains.sumOf(upstream::count))
+                    .put("answer_cache_hit_delta", afterColdCache.cacheHits - coldBefore.cacheHits)
+                    .put("process_allocated_bytes_per_query", coldAllocatedBytes ?: JSONObject.NULL))
+
                 val blockedUpstreamBefore = upstream.totalRequests.get()
                 val blocked = sendQuery("doubleclick.net", 0x1403)
                 assertEquals("Built-in blocked domain should return NXDOMAIN.", 3, responseCode(blocked.response))
@@ -417,6 +465,102 @@ class D14TunEndToEndBenchmarkTest {
                 elapsedMillis = (SystemClock.elapsedRealtimeNanos() - start) / 1_000_000.0
             )
         }
+    }
+
+    private fun measureWarmCache(domain: String, latencies: DoubleArray): Double? {
+        val query = buildQuery(domain, 0)
+        val request = DatagramPacket(query, query.size, InetAddress.getByName(DnsVpnService.DUMMY_DNS_IP), 53)
+        val buffer = ByteArray(2_048)
+        val response = DatagramPacket(buffer, buffer.size)
+        DatagramSocket().use { socket ->
+            socket.soTimeout = 2_000
+            fun exchange(transactionId: Int) = exchangeAndValidate(socket, request, query, response, buffer, transactionId)
+
+            repeat(WARM_CACHE_WARMUP) { exchange(0x7000 + it) }
+            val allocatedBefore = runtimeStat("art.gc.bytes-allocated")
+            for (index in latencies.indices) {
+                latencies[index] = exchange(0x7100 + index)
+            }
+            val allocatedAfter = runtimeStat("art.gc.bytes-allocated")
+            return if (allocatedBefore != null && allocatedAfter != null) {
+                (allocatedAfter - allocatedBefore).toDouble() / WARM_CACHE_SAMPLES
+            } else {
+                null
+            }
+        }
+    }
+
+    private fun measureColdCache(domains: List<String>, latencies: DoubleArray): Double? {
+        require(domains.size == COLD_CACHE_WARMUP + latencies.size)
+        val queries = domains.map { buildQuery(it, 0) }
+        assertEquals("Cold-cache DNS queries must have a constant wire size.", 1, queries.map { it.size }.distinct().size)
+        assertEquals("Cold-cache queries must use independent domains.", domains.size, domains.distinct().size)
+        val requests = queries.map { query ->
+            DatagramPacket(query, query.size, InetAddress.getByName(DnsVpnService.DUMMY_DNS_IP), 53)
+        }
+        val buffer = ByteArray(2_048)
+        val response = DatagramPacket(buffer, buffer.size)
+        DatagramSocket().use { socket ->
+            socket.soTimeout = 2_000
+            fun exchange(index: Int) = exchangeAndValidate(
+                socket,
+                requests[index],
+                queries[index],
+                response,
+                buffer,
+                0x8000 + index
+            )
+
+            repeat(COLD_CACHE_WARMUP) { exchange(it) }
+            val allocatedBefore = runtimeStat("art.gc.bytes-allocated")
+            for (index in latencies.indices) {
+                latencies[index] = exchange(COLD_CACHE_WARMUP + index)
+            }
+            val allocatedAfter = runtimeStat("art.gc.bytes-allocated")
+            return if (allocatedBefore != null && allocatedAfter != null) {
+                (allocatedAfter - allocatedBefore).toDouble() / COLD_CACHE_SAMPLES
+            } else {
+                null
+            }
+        }
+    }
+
+    private fun exchangeAndValidate(
+        socket: DatagramSocket,
+        request: DatagramPacket,
+        query: ByteArray,
+        response: DatagramPacket,
+        buffer: ByteArray,
+        transactionId: Int
+    ): Double {
+        query[0] = (transactionId ushr 8).toByte()
+        query[1] = transactionId.toByte()
+        response.length = buffer.size
+        val started = SystemClock.elapsedRealtimeNanos()
+        socket.send(request)
+        try {
+            socket.receive(response)
+        } catch (timeout: SocketTimeoutException) {
+            clientTimeouts.incrementAndGet()
+            throw timeout
+        }
+        val elapsed = SystemClock.elapsedRealtimeNanos() - started
+        val answerOffset = query.size
+        assertTrue(
+            "Expected one complete compressed A record.",
+            response.length == answerOffset + 16 &&
+                unsignedShort(buffer, answerOffset) == 0xC00C &&
+                unsignedShort(buffer, answerOffset + 2) == 1 && // A
+                unsignedShort(buffer, answerOffset + 4) == 1 && // IN
+                unsignedShort(buffer, answerOffset + 10) == 4
+        )
+        assertTrue(
+            "Expected the loopback fixture answer 203.0.113.7.",
+            unsignedShort(buffer, answerOffset + 12) == 0xCB00 &&
+                unsignedShort(buffer, answerOffset + 14) == 0x7107
+        )
+        assertDnsAnswer(buffer, transactionId)
+        return elapsed / 1_000_000.0
     }
 
     private fun sendConcurrentQueries(domains: List<String>, firstTransactionId: Int): List<QueryResult> =
@@ -887,6 +1031,10 @@ class D14TunEndToEndBenchmarkTest {
     private companion object {
         const val VPN_CONSENT_TIMEOUT_MS = 120_000L
         const val NETWORK_CHANGE_DEBOUNCE_MS = 750L
+        const val WARM_CACHE_WARMUP = 200
+        const val WARM_CACHE_SAMPLES = 1_000
+        const val COLD_CACHE_WARMUP = 200
+        const val COLD_CACHE_SAMPLES = 1_000
         const val UNIQUE_MISS_SAMPLES = 12
         const val COALESCED_CLIENTS = 8
         const val COALESCED_UPSTREAM_DELAY_MS = 400L

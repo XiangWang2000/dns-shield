@@ -6,6 +6,7 @@ internal enum class DnsTransport {
     ENCRYPTED_HTTPS,
     PLAINTEXT_UDP,
     PLAINTEXT_TCP,
+    SYSTEM,
     UNAVAILABLE
 }
 

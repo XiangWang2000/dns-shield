@@ -8,6 +8,7 @@ import android.system.StructPollfd
 import java.io.Closeable
 import java.io.FileDescriptor
 import java.io.IOException
+import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal object NativeDnsTcp {
@@ -43,7 +44,8 @@ internal class NativeDnsTcpRuntime(
             val config = """
                 tunnel:
                   mtu: 1500
-                  ipv4: 10.0.0.2
+                  ipv4: '${DnsVpnAddresses.IPV4_CLIENT}'
+                  ipv6: '${DnsVpnAddresses.IPV6_CLIENT}'
                 socks5:
                   address: 127.0.0.1
                   port: ${bridge.port}
@@ -134,12 +136,48 @@ internal class NativeDnsTcpRuntime(
     }
 }
 
-internal fun isDnsTcpPacket(packet: ByteArray, length: Int): Boolean {
-    if (length !in 40..1500 || length > packet.size || packet[0].toInt() ushr 4 and 15 != 4) return false
-    val header = (packet[0].toInt() and 15) * 4
-    fun u16(offset: Int) = ((packet[offset].toInt() and 255) shl 8) or (packet[offset + 1].toInt() and 255)
-    if (header < 20 || header + 20 > length || u16(2) != length || u16(6) and 0xbfff != 0) return false
-    if (packet[9].toInt() and 255 != 6 || !packet.copyOfRange(16, 20).contentEquals(byteArrayOf(10, 0, 0, 1))) return false
-    val tcpHeader = (packet[header + 12].toInt() ushr 4 and 15) * 4
-    return u16(header) != 0 && u16(header + 2) == 53 && tcpHeader >= 20 && header + tcpHeader <= length
+private val IPV4_DNS_BYTES = InetAddress.getByName(DnsVpnAddresses.IPV4_DNS).address
+private val IPV6_DNS_BYTES = InetAddress.getByName(DnsVpnAddresses.IPV6_DNS).address
+
+internal fun isDnsTcpPacket(packet: ByteArray, readLength: Int): Boolean {
+    if (readLength !in 40..1500 || readLength > packet.size) return false
+    return when (packet[0].toInt() ushr 4 and 15) {
+        4 -> isDnsIpv4TcpPacket(packet, readLength)
+        6 -> isDnsIpv6TcpPacket(packet, readLength)
+        else -> false
+    }
 }
+
+private fun isDnsIpv4TcpPacket(packet: ByteArray, readLength: Int): Boolean {
+    val headerLength = (packet[0].toInt() and 15) * 4
+    if (headerLength < 20 || headerLength > readLength - 20 || readU16(packet, 2) != readLength ||
+        readU16(packet, 6) and 0xbfff != 0 || packet[9].toInt() and 255 != 6 ||
+        !matchesAt(packet, 16, IPV4_DNS_BYTES)
+    ) return false
+    return isDnsTcpHeader(packet, headerLength, readLength)
+}
+
+private fun isDnsIpv6TcpPacket(packet: ByteArray, readLength: Int): Boolean {
+    if (!matchesAt(packet, 24, IPV6_DNS_BYTES)) return false
+    val parsed = Ipv6TransportHeaderParser.parse(packet, readLength)
+    return parsed is Ipv6TransportHeaderParseResult.Transport && parsed.protocol == 6 &&
+        isDnsTcpHeader(packet, parsed.offset, parsed.totalLength)
+}
+
+private fun isDnsTcpHeader(packet: ByteArray, offset: Int, readLength: Int): Boolean {
+    if (offset > readLength - 20) return false
+    val tcpHeaderLength = (packet[offset + 12].toInt() ushr 4 and 15) * 4
+    return readU16(packet, offset) != 0 && readU16(packet, offset + 2) == DNS_PORT &&
+        tcpHeaderLength >= 20 && tcpHeaderLength <= readLength - offset
+}
+
+private fun readU16(packet: ByteArray, offset: Int): Int =
+    ((packet[offset].toInt() and 255) shl 8) or (packet[offset + 1].toInt() and 255)
+
+private fun matchesAt(packet: ByteArray, offset: Int, expected: ByteArray): Boolean {
+    if (expected.size > packet.size - offset) return false
+    for (index in expected.indices) if (packet[offset + index] != expected[index]) return false
+    return true
+}
+
+private const val DNS_PORT = 53

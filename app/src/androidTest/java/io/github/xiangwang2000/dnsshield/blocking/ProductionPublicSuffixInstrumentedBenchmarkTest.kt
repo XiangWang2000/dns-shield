@@ -100,12 +100,12 @@ class ProductionPublicSuffixInstrumentedBenchmarkTest {
             lookupP95Nanos = percentile(lookupSamples, 0.95)
         )
 
-        assertEquals(153_740, report.artifactBytes)
-        assertEquals(9_950, report.exactRules)
-        assertEquals(281, report.wildcardRules)
+        assertEquals(159_876, report.artifactBytes)
+        assertEquals(10_076, report.exactRules)
+        assertEquals(312, report.wildcardRules)
         assertEquals(8, report.exceptionRules)
         assertEquals(
-            "72d07fea544b74d920be2394d4c5fbb38dd3f5f3ccac299e27809009bac1c550",
+            "bd72f205259fc1565b71b559732e13a1c857c3389bf15cd40589cd59c1967354",
             report.sourceSha256
         )
 

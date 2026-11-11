@@ -253,8 +253,8 @@ class RuntimeDomainPolicyInstrumentedBenchmarkTest {
         )
         assertEquals(
             PublicSuffixResolverStatus.Loaded(
-                exactRules = 9_950,
-                wildcardRules = 281,
+                exactRules = 10_076,
+                wildcardRules = 312,
                 exceptionRules = 8
             ),
             resolverOwner.status()

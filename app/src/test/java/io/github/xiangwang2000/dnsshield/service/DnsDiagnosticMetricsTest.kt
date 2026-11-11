@@ -67,6 +67,31 @@ class DnsDiagnosticMetricsTest {
     }
 
     @Test
+    fun udpDiagnosticsCountByResolverAndResetWithTheSession() {
+        val metrics = DnsDiagnosticMetrics()
+        val primary = metrics.begin(0L)
+        val secondary = metrics.begin(0L)
+        val deferred = metrics.begin(0L)
+
+        metrics.recordUdpTimeout(primary, isPrimary = true)
+        metrics.recordUdpTimeout(secondary, isPrimary = false)
+        metrics.recordUdpAnswer(primary, isPrimary = true)
+        metrics.recordUdpAnswer(secondary, isPrimary = false)
+        metrics.recordUdpPrimaryDeferred(deferred)
+
+        val snapshot = metrics.snapshot()
+        assertEquals(1L, snapshot.primaryUdpTimeouts)
+        assertEquals(1L, snapshot.secondaryUdpTimeouts)
+        assertEquals(1L, snapshot.primaryUdpAnswers)
+        assertEquals(1L, snapshot.secondaryUdpAnswers)
+        assertEquals(1L, snapshot.primaryUdpDeferredToBackup)
+
+        metrics.reset()
+        metrics.recordUdpTimeout(primary, isPrimary = true)
+        assertEquals(DnsDiagnosticsSnapshot(), metrics.snapshot())
+    }
+
+    @Test
     fun latencyStorageAndPercentilesStayWithinFixedWindow() {
         val metrics = DnsDiagnosticMetrics()
         val sampleCount = DnsDiagnosticMetrics.LATENCY_WINDOW_SIZE + 10

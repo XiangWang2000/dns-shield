@@ -58,6 +58,65 @@ class DohEndpointConfigurationTest {
                 strict = true
             )
         )
+        assertNull(
+            DohEndpointConfiguration.validationError(
+                configuredUrl = "https://resolver.example/dns-query",
+                configuredBootstrapIps = "192.0.2.1 2001:db8::1",
+                strict = true
+            )
+        )
+        assertNotNull(
+            DohEndpointConfiguration.validationError(
+                configuredUrl = "https://resolver.example/dns-query",
+                configuredBootstrapIps = "[2001:db8::1]",
+                strict = true
+            )
+        )
+        assertNotNull(
+            DohEndpointConfiguration.validationError(
+                configuredUrl = "https://resolver.example/dns-query",
+                configuredBootstrapIps = "fe80::1%wlan0",
+                strict = true
+            )
+        )
+    }
+
+    @Test
+    fun bootstrapListsNormalizeAndDeduplicateBothAddressFamilies() {
+        val addresses = DohEndpointConfiguration.parseBootstrapIpAddresses(
+            " 192.000.002.001, 2001:0DB8:0:0:0:0:0:1 192.0.2.1 ::ffff:192.0.2.1,::ffff:c000:201 "
+        )
+
+        assertEquals(listOf("192.0.2.1", "2001:db8::1", "::ffff:c000:201"), addresses)
+        assertNull(DohEndpointConfiguration.parseBootstrapIpAddresses("resolver.example"))
+        assertNull(DohEndpointConfiguration.parseBootstrapIpAddresses("https://192.0.2.1"))
+    }
+
+    @Test
+    fun ipv6LiteralDohUrlRetainsHttpsUrlAndResolvesWithoutBootstrap() {
+        val configuredUrl = "https://[2001:db8::1]/dns-query"
+        assertNull(DohEndpointConfiguration.validationError(configuredUrl, "", strict = true))
+        assertNotNull(
+            DohEndpointConfiguration.validationError(
+                configuredUrl = "http://[2001:db8::1]/dns-query",
+                configuredBootstrapIps = "",
+                strict = true
+            )
+        )
+        val endpoint = requireNotNull(
+            DohEndpointConfiguration.endpoint(
+                configuredUrl = configuredUrl,
+                configuredBootstrapIps = "",
+                resolverIp = "203.0.113.53"
+            )
+        )
+
+        assertEquals(configuredUrl, endpoint.url)
+        assertEquals("2001:db8::1", endpoint.hostname)
+        assertTrue(endpoint.canResolveHost)
+        val address = DohBootstrapDns.forEndpoint(endpoint).lookup(endpoint.hostname).single()
+        assertTrue(address is java.net.Inet6Address)
+        assertEquals("2001:db8::1", IpAddressLiteral.parse(requireNotNull(address.hostAddress))?.normalized)
     }
 
     @Test
@@ -91,6 +150,33 @@ class DohEndpointConfigurationTest {
         assertEquals(2, endpoints.size)
         assertTrue(endpoints.all { it.url == "https://dns.quad9.net/dns-query" })
         assertTrue(endpoints.all { it.canResolveHost })
+    }
+
+    @Test
+    fun builtInIpv6ProviderAliasesKeepTheirExistingEncryptedProfiles() {
+        val expectedUrls = mapOf(
+            "2001:4860:4860::8888" to "https://dns.google/dns-query",
+            "2001:4860:4860::8844" to "https://dns.google/dns-query",
+            "2606:4700:4700::1111" to "https://cloudflare-dns.com/dns-query",
+            "2606:4700:4700::1001" to "https://cloudflare-dns.com/dns-query",
+            "2a10:50c0::ad1:ff" to "https://dns.adguard-dns.com/dns-query",
+            "2a10:50c0::ad2:ff" to "https://dns.adguard-dns.com/dns-query",
+            "2620:fe::fe" to "https://dns.quad9.net/dns-query",
+            "2620:fe::9" to "https://dns.quad9.net/dns-query"
+        )
+
+        expectedUrls.forEach { (ip, url) ->
+            assertTrue(isIpLiteral(ip))
+            assertEquals(url, DohEndpointConfiguration.defaultUrlForIp(ip))
+            val endpoint = requireNotNull(DohEndpointConfiguration.endpoint(null, null, ip))
+            assertEquals(url, endpoint.url)
+            assertTrue(endpoint.canResolveHost)
+            assertTrue(endpoint.bootstrapAddresses.contains(ip))
+        }
+        assertEquals(
+            expectedUrls.getValue("2001:4860:4860::8888"),
+            DohEndpointConfiguration.defaultUrlForIp("2001:4860:4860:0:0:0:0:8888")
+        )
     }
 
     @Test

@@ -54,6 +54,21 @@ internal fun isCurrentUnderlyingNetworkCallback(
     isVpnRunning: Boolean
 ): Boolean = token == currentToken && registeredToken == token && isVpnRunning
 
+/** The first selected route can skip settling if it confirms the validated pre-VPN route. */
+internal class StartupNetworkConfirmation(private var expectedNetworkId: Long?) {
+    fun confirmsFirstRoute(state: UnderlyingNetworkSnapshot): Boolean {
+        val expected = expectedNetworkId ?: return false
+        val selected = state.selectedNetworkId
+        if (state.connectivity == UnderlyingNetworkConnectivity.UNKNOWN &&
+            (selected == null || selected == expected)
+        ) {
+            return false
+        }
+        expectedNetworkId = null
+        return state.connectivity == UnderlyingNetworkConnectivity.ONLINE && selected == expected
+    }
+}
+
 /** Tracks internet-capable non-VPN networks without treating the app's VPN as its own underlay. */
 internal class UnderlyingNetworkStateReducer {
     private data class NetworkState(
@@ -74,6 +89,7 @@ internal class UnderlyingNetworkStateReducer {
     )
 
     private val networks = HashMap<Long, NetworkState>()
+    private val ipContexts = HashMap<Long, UnderlyingNetworkIpContext>()
     private var selectedNetworkId: Long? = null
     private var selectedTransportMask = 0
     private var selectedByTransportMask = false
@@ -92,6 +108,9 @@ internal class UnderlyingNetworkStateReducer {
 
         val previousSnapshot = snapshot
         val previousRoute = effectiveRoute()
+        if (facts.lost || (!facts.hasInternet && !facts.hasCaptivePortal)) {
+            ipContexts.remove(facts.networkId)
+        }
 
         val previousNetwork = networks[facts.networkId]
         val nextNetwork = if (facts.lost || (!facts.hasInternet && !facts.hasCaptivePortal)) {
@@ -115,6 +134,18 @@ internal class UnderlyingNetworkStateReducer {
             selectedTransportMask = networks[selectedNetworkId]?.transportMask ?: 0
         }
         return publishSnapshot(previousSnapshot, previousRoute, conservativeCandidateChange = true)
+    }
+
+    @Synchronized
+    fun updateIpContext(
+        networkId: Long,
+        context: UnderlyingNetworkIpContext
+    ): UnderlyingNetworkTransition? {
+        val previousContext = ipContexts[networkId]
+        if (previousContext == context) return null
+        ipContexts[networkId] = context
+        if (previousContext == null || selectedNetworkId != networkId) return null
+        return UnderlyingNetworkTransition(snapshot, snapshot, effectiveRouteChanged = true, shouldFenceDnsState = true)
     }
 
     @Synchronized
@@ -170,6 +201,7 @@ internal class UnderlyingNetworkStateReducer {
     @Synchronized
     fun clear() {
         networks.clear()
+        ipContexts.clear()
         selectedNetworkId = null
         selectedTransportMask = 0
         selectedByTransportMask = false

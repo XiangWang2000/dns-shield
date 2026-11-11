@@ -2,8 +2,11 @@ package io.github.xiangwang2000.dnsshield.ui
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.InputDevice
+import android.view.MotionEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,6 +29,7 @@ import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
 import io.github.xiangwang2000.dnsshield.blocking.RuleBlocklistSource
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.viewmodel.AppInfo
+import io.github.xiangwang2000.dnsshield.viewmodel.DomainRuleSaveResult
 import io.github.xiangwang2000.dnsshield.viewmodel.DomainRuleUndoToken
 import java.io.File
 import io.github.xiangwang2000.dnsshield.ui.theme.MyApplicationTheme
@@ -71,6 +75,31 @@ class DashboardUsabilityInstrumentedTest {
         assertTrue(requireNode("dialog_confirm_button").isEnabled)
     }
 
+    @Test
+    fun customDnsFormAcceptsIpv6PrimaryAndBackupAddresses() {
+        val attempts = AtomicInteger()
+        val result = CompletableDeferred<String?>()
+        val primaryIpv6 = "2001:4860:4860::8888"
+        val secondaryIpv6 = "2606:4700:4700::1001"
+        render(onAddDns = { attempts.incrementAndGet(); result.await() })
+        clickVisible("add_dns_button", "control_center_list")
+        setText("dialog_dns_name_input", "IPv6 resolver")
+        scrollFormFieldIntoView("dialog_dns_primary_input", "dialog_dns_form")
+        setText("dialog_dns_primary_input", primaryIpv6)
+        assertTrue(textIn(requireNode("dialog_dns_primary_input")).contains(primaryIpv6))
+        scrollFormFieldIntoView("dialog_dns_secondary_input", "dialog_dns_form")
+        setText("dialog_dns_secondary_input", secondaryIpv6)
+        assertTrue(textIn(requireNode("dialog_dns_secondary_input")).contains(secondaryIpv6))
+        capture("ipv6-resolver-form.png")
+        click("dialog_confirm_button")
+
+        waitUntil { attempts.get() == 1 }
+        assertNull(findNode("dialog_dns_save_error"))
+        result.complete(null)
+        waitUntil { findNode("dialog_confirm_button") == null }
+        assertEquals(1, attempts.get())
+    }
+
     // The Boolean accessor is needed on the supported API 24-35 devices.
     @Suppress("DEPRECATION")
     @Test
@@ -90,7 +119,7 @@ class DashboardUsabilityInstrumentedTest {
     @Test
     fun domainRuleSaveCannotRepeatAndFailureKeepsInput() {
         val attempts = AtomicInteger()
-        val result = CompletableDeferred<String?>()
+        val result = CompletableDeferred<DomainRuleSaveResult>()
         render(onSaveRule = { attempts.incrementAndGet(); result.await() })
         click("tab_domain_rules")
         click("add_domain_rule_button")
@@ -99,10 +128,40 @@ class DashboardUsabilityInstrumentedTest {
         waitUntil { attempts.get() == 1 }
         waitUntil { !requireNode("save_domain_rule_button").isEnabled }
         assertFalse(requireNode("save_domain_rule_button").isEnabled)
-        result.complete("規則無法儲存，請稍後再試。")
+        result.complete(DomainRuleSaveResult.ValidationError("規則無法儲存，請稍後再試。"))
         waitUntil { requireNode("save_domain_rule_button").isEnabled }
         assertTrue(textIn(requireNode("domain_rule_input")).contains("example.com"))
         assertEquals(1, attempts.get())
+    }
+
+    @Test
+    fun oppositeManualRuleRequiresConfirmationAndRevisionMatch() {
+        val attempts = AtomicInteger()
+        val existing = UserDomainRuleEntity(
+            domain = "example.com",
+            action = "BLOCK",
+            includeSubdomains = false,
+            revision = "existing-revision"
+        )
+        val revisions = mutableListOf<String?>()
+        render(onSaveRule = { expectedRevision ->
+            revisions += expectedRevision
+            if (attempts.incrementAndGet() == 1) {
+                DomainRuleSaveResult.Conflict(existing)
+            } else {
+                DomainRuleSaveResult.Saved
+            }
+        })
+        click("tab_domain_rules")
+        click("add_domain_rule_button")
+        setText("domain_rule_input", "example.com")
+        click("save_domain_rule_button")
+        waitUntil { countText("「example.com」已存在封鎖規則（僅此網域）。") == 1 }
+        assertEquals(1, attempts.get())
+        click("confirm_replace_domain_rule_button")
+        waitUntil { findNode("confirm_replace_domain_rule_button") == null }
+        assertEquals(2, attempts.get())
+        assertEquals(listOf(null, "existing-revision"), revisions)
     }
 
     @Test
@@ -354,7 +413,7 @@ class DashboardUsabilityInstrumentedTest {
         onSelect: () -> Unit = {},
         onFallback: () -> Unit = {},
         onRetryApps: () -> Unit = {},
-        onSaveRule: suspend () -> String? = { null },
+        onSaveRule: suspend (String?) -> DomainRuleSaveResult = { DomainRuleSaveResult.Saved },
         state: MutableState<DnsShieldUiState>? = null,
         onAllowDomain: suspend (String) -> DomainRuleUndoToken = { error("Unused by this scenario") },
         onUndoRule: suspend (DomainRuleUndoToken) -> Boolean = { false }
@@ -383,7 +442,7 @@ class DashboardUsabilityInstrumentedTest {
                             onLoadAppsIfNeeded = {},
                             onRetryLoadApps = onRetryApps,
                             onDomainRuleSearchChange = {},
-                            onSaveDomainRule = { _, _, _ -> onSaveRule() },
+                            onSaveDomainRule = { _, _, _, expectedRevision -> onSaveRule(expectedRevision) },
                             onDeleteDomainRule = {},
                             onAllowBlockedDomain = onAllowDomain,
                             onUndoDomainRule = onUndoRule,
@@ -464,6 +523,42 @@ class DashboardUsabilityInstrumentedTest {
                 requireNode(scrollTag).performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
             }
             SystemClock.sleep(100)
+        }
+        dumpFailure("cannot-reach-" + tag)
+        fail("Cannot reach " + tag + " in " + scrollTag)
+    }
+
+    private fun scrollFormFieldIntoView(tag: String, scrollTag: String) {
+        val laterFields = listOf(
+            "dialog_dns_doh_input", "dialog_dns_bootstrap_input",
+            "dialog_dns_secondary_doh_input", "dialog_dns_secondary_bootstrap_input"
+        )
+        val deadline = SystemClock.uptimeMillis() + 10_000
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (findNode(tag)?.isVisibleToUser == true) return
+            val bounds = Rect().also { requireNode(scrollTag).getBoundsInScreen(it) }
+            val step = minOf(100, bounds.height() / 4).coerceAtLeast(1)
+            val x = (bounds.left + 8).toFloat()
+            val startY = bounds.centerY().toFloat()
+            // Both DNS address fields precede the DoH fields. Return if a previous drag passed them.
+            val passed = laterFields.any { findNode(it)?.isVisibleToUser == true }
+            val endY = startY + if (passed) step else -step
+            val downTime = SystemClock.uptimeMillis()
+            fun send(action: Int, y: Float) {
+                val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
+                    .apply { source = InputDevice.SOURCE_TOUCHSCREEN }
+                try { instrumentation.sendPointerSync(event) } finally { event.recycle() }
+            }
+            send(MotionEvent.ACTION_DOWN, startY)
+            repeat(5) { index ->
+                send(MotionEvent.ACTION_MOVE, startY + (endY - startY) * ((index + 1) / 5f))
+                SystemClock.sleep(45)
+            }
+            // Give the velocity tracker a stationary move before releasing the drag.
+            send(MotionEvent.ACTION_MOVE, endY)
+            SystemClock.sleep(70)
+            send(MotionEvent.ACTION_UP, endY)
+            SystemClock.sleep(150)
         }
         dumpFailure("cannot-reach-" + tag)
         fail("Cannot reach " + tag + " in " + scrollTag)

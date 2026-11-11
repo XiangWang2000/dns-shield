@@ -29,7 +29,9 @@ internal object DnsUdpUpstreamClient {
         attemptTimeoutMillis: Long = DEFAULT_ATTEMPT_TIMEOUT_MILLIS,
         ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
         onAttempt: () -> Unit = {},
-        receiveBufferAllocator: (Int) -> ByteArray = { ByteArray(it) }
+        receiveBufferAllocator: (Int) -> ByteArray = { ByteArray(it) },
+        onTimeout: () -> Unit = {},
+        onAnswer: (responseCode: Int) -> Unit = {}
     ): ByteArray? {
         val startedAtNanos = System.nanoTime()
         val remainingMillis = deadline.remainingMillis(startedAtNanos)
@@ -51,7 +53,9 @@ internal object DnsUdpUpstreamClient {
                         port,
                         attemptDeadlineNanos,
                         onAttempt,
-                        receiveBufferAllocator
+                        receiveBufferAllocator,
+                        onTimeout,
+                        onAnswer
                     )
                 }
                 if (continuation.isActive) continuation.resumeWith(result)
@@ -67,58 +71,153 @@ internal object DnsUdpUpstreamClient {
         onAttempt: () -> Unit = {},
         onRetry: () -> Unit = {},
         tcpQuery: suspend (DnsUdpUpstreamEndpoint) -> ByteArray? = { null },
-        receiveBufferAllocator: (Int) -> ByteArray = { ByteArray(it) }
+        receiveBufferAllocator: (Int) -> ByteArray = { ByteArray(it) },
+        primaryBackoff: UdpPrimaryBackoff? = null,
+        onTimeout: (isPrimary: Boolean) -> Unit = {},
+        onAnswer: (isPrimary: Boolean) -> Unit = {},
+        onPrimaryDeferred: () -> Unit = {}
     ): DnsResolutionOutcome? {
         var lastFailure: Exception? = null
         var lastTruncatedResponse: ByteArray? = null
+        var preferredBackupError: DnsResolutionOutcome? = null
         var receiveBuffer: ByteArray? = null
+        val primary = upstreams.firstOrNull()
+        val secondary = upstreams.getOrNull(1)
+        val permit = if (primary != null && secondary != null) {
+            primaryBackoff?.beginQuery(primary, secondary)
+        } else {
+            null
+        }
+        val preferBackup = permit?.preferBackup == true
+        var primaryAttempted = false
+        var primaryTimedOut = false
+        var primaryResponded = false
+        var primarySucceeded = false
+        var backupSucceeded = false
+        var cancelled = false
+        var udpSendCount = 0
         val queryReceiveBufferAllocator: (Int) -> ByteArray = { size ->
             receiveBuffer ?: receiveBufferAllocator(size).also { receiveBuffer = it }
         }
-        upstreams.forEachIndexed { index, upstream ->
-            val remainingMillis = deadline.remainingMillis()
-            if (remainingMillis <= 0L) return null
+        try {
+            for (attemptNumber in upstreams.indices) {
+                val index = if (preferBackup && attemptNumber < 2) 1 - attemptNumber else attemptNumber
+                val upstream = upstreams[index]
+                val isPrimary = index == 0
+                val remainingMillis = deadline.remainingMillis()
+                if (remainingMillis <= 0L) return preferredBackupError
 
-            val remainingAttempts = upstreams.size - index
-            val attemptBudgetMillis = minOf(
-                DEFAULT_ATTEMPT_TIMEOUT_MILLIS,
-                if (remainingAttempts == 1) remainingMillis else maxOf(1L, remainingMillis / remainingAttempts)
-            )
-            try {
-                val response = query(
-                    socket = socket,
-                    query = query,
-                    server = upstream.address,
-                    port = upstream.port,
-                    deadline = deadline,
-                    attemptTimeoutMillis = attemptBudgetMillis,
-                    onAttempt = {
-                        onAttempt()
-                        if (index > 0) onRetry()
-                    },
-                    receiveBufferAllocator = queryReceiveBufferAllocator
+                val remainingAttempts = upstreams.size - attemptNumber
+                val attemptBudgetMillis = minOf(
+                    DEFAULT_ATTEMPT_TIMEOUT_MILLIS,
+                    if (remainingAttempts == 1) remainingMillis else maxOf(1L, remainingMillis / remainingAttempts)
                 )
-                if (response != null) {
-                    if (DnsMessageValidator.isTruncatedResponse(response, query)) {
-                        if (DnsMessageValidator.isValidResponse(response, query)) {
-                            lastTruncatedResponse = response
+                var udpResponseCode = -1
+                try {
+                    val response = query(
+                        socket = socket,
+                        query = query,
+                        server = upstream.address,
+                        port = upstream.port,
+                        deadline = deadline,
+                        attemptTimeoutMillis = attemptBudgetMillis,
+                        onAttempt = {
+                            onAttempt()
+                            if (isPrimary) primaryAttempted = true
+                            if (udpSendCount++ > 0) onRetry()
+                            if (preferBackup && attemptNumber == 0 && !isPrimary) onPrimaryDeferred()
+                        },
+                        receiveBufferAllocator = queryReceiveBufferAllocator,
+                        onTimeout = {
+                            onTimeout(isPrimary)
+                            if (isPrimary) primaryTimedOut = true
+                        },
+                        onAnswer = { responseCode ->
+                            udpResponseCode = responseCode
+                            onAnswer(isPrimary)
                         }
-                        if (deadline.remainingMillis() > 0L) {
-                            val tcpResponse = tcpQuery(upstream)
-                            if (tcpResponse != null && DnsMessageValidator.isValidResponse(tcpResponse, query)) {
-                                return DnsResolutionOutcome(tcpResponse, DnsTransport.PLAINTEXT_TCP)
+                    )
+                    if (response != null) {
+                        if (DnsMessageValidator.isTruncatedResponse(response, query)) {
+                            if (permit?.enabled == true && isPrimary) primaryResponded = true
+                            if (DnsMessageValidator.isValidResponse(response, query)) {
+                                lastTruncatedResponse = response
+                            }
+                            if (deadline.remainingMillis() > 0L) {
+                                val tcpResponse = tcpQuery(upstream)
+                                if (tcpResponse != null) {
+                                    val tcpResponseCode = DnsMessageValidator.validatedResponseCode(tcpResponse, query)
+                                    if (tcpResponseCode >= 0) {
+                                        val tcpTruncated = tcpResponse[2].toInt() and 0x02 != 0
+                                        val successfulTcpOutcome = !tcpTruncated &&
+                                            isSuccessfulDnsResponseCode(tcpResponseCode)
+                                        if (permit?.enabled == true && !tcpTruncated &&
+                                            isSuccessfulDnsResponseCode(tcpResponseCode)
+                                        ) {
+                                            if (isPrimary) primarySucceeded = true else backupSucceeded = true
+                                        }
+                                        val outcome = DnsResolutionOutcome(tcpResponse, DnsTransport.PLAINTEXT_TCP)
+                                        if (preferBackup && attemptNumber == 0 && !isPrimary) {
+                                            if (tcpTruncated) continue
+                                            if (!successfulTcpOutcome) {
+                                                preferredBackupError = outcome
+                                                continue
+                                            }
+                                        }
+                                        if (preferredBackupError != null && !successfulTcpOutcome) {
+                                            return preferredBackupError
+                                        }
+                                        return outcome
+                                    }
+                                }
+                            }
+                        } else {
+                            if (permit?.enabled == true) {
+                                if (isPrimary) {
+                                    primaryResponded = true
+                                    if (isSuccessfulDnsResponseCode(udpResponseCode)) primarySucceeded = true
+                                } else if (isSuccessfulDnsResponseCode(udpResponseCode)) {
+                                    backupSucceeded = true
+                                }
+                            }
+                            val outcome = DnsResolutionOutcome(response, DnsTransport.PLAINTEXT_UDP)
+                            if (preferBackup && attemptNumber == 0 && !isPrimary &&
+                                !isSuccessfulDnsResponseCode(udpResponseCode)
+                            ) {
+                                preferredBackupError = outcome
+                            } else if (preferredBackupError != null &&
+                                !isSuccessfulDnsResponseCode(udpResponseCode)
+                            ) {
+                                return preferredBackupError
+                            } else {
+                                return outcome
                             }
                         }
-                    } else {
-                        return DnsResolutionOutcome(response, DnsTransport.PLAINTEXT_UDP)
                     }
+                } catch (exception: CancellationException) {
+                    cancelled = true
+                    throw exception
+                } catch (exception: Exception) {
+                    lastFailure = exception
                 }
-            } catch (exception: CancellationException) {
-                throw exception
-            } catch (exception: Exception) {
-                lastFailure = exception
+            }
+        } finally {
+            if (permit != null && primaryBackoff != null) {
+                if (cancelled) {
+                    primaryBackoff.abandonQuery(permit)
+                } else {
+                    primaryBackoff.finishQuery(
+                        permit = permit,
+                        primaryAttempted = primaryAttempted,
+                        primaryTimedOut = primaryTimedOut,
+                        primaryResponded = primaryResponded,
+                        primarySucceeded = primarySucceeded,
+                        backupSucceeded = backupSucceeded
+                    )
+                }
             }
         }
+        preferredBackupError?.let { return it }
         lastTruncatedResponse?.let { return DnsResolutionOutcome(it, DnsTransport.PLAINTEXT_UDP) }
         lastFailure?.let { throw it }
         return null
@@ -144,7 +243,9 @@ internal object DnsUdpUpstreamClient {
         port: Int,
         deadlineNanos: Long,
         onAttempt: () -> Unit = {},
-        receiveBufferAllocator: (Int) -> ByteArray = { ByteArray(it) }
+        receiveBufferAllocator: (Int) -> ByteArray = { ByteArray(it) },
+        onTimeout: () -> Unit = {},
+        onAnswer: (responseCode: Int) -> Unit = {}
     ): ByteArray? {
         if (deadlineNanos - System.nanoTime() <= 0L) return null
 
@@ -159,7 +260,10 @@ internal object DnsUdpUpstreamClient {
         }
         while (true) {
             val remainingNanos = deadlineNanos - System.nanoTime()
-            if (remainingNanos <= 0L) return null
+            if (remainingNanos <= 0L) {
+                onTimeout()
+                return null
+            }
             val remainingMillis = ((remainingNanos + 999_999L) / 1_000_000L)
                 .coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
             socket.soTimeout = remainingMillis
@@ -168,6 +272,7 @@ internal object DnsUdpUpstreamClient {
             try {
                 socket.receive(responsePacket)
             } catch (_: SocketTimeoutException) {
+                onTimeout()
                 return null
             }
 
@@ -180,9 +285,15 @@ internal object DnsUdpUpstreamClient {
                 continue
             }
             if (DnsMessageValidator.isTruncatedResponse(response, query)) return response
-            if (response.size <= query.maxUdpResponseBytes && DnsMessageValidator.isValidResponse(response, query)) {
-                return response
+            if (response.size <= query.maxUdpResponseBytes) {
+                val responseCode = DnsMessageValidator.validatedResponseCode(response, query)
+                if (responseCode >= 0) {
+                    onAnswer(responseCode)
+                    return response
+                }
             }
         }
     }
+
+    private fun isSuccessfulDnsResponseCode(responseCode: Int): Boolean = responseCode == 0 || responseCode == 3
 }

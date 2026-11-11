@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -38,12 +39,14 @@ import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidation
 import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleValidator
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
 import io.github.xiangwang2000.dnsshield.data.BypassedApp
+import io.github.xiangwang2000.dnsshield.data.DnsResolverMode
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import java.nio.channels.Channels
 import java.io.FileInputStream
@@ -125,14 +128,16 @@ class DnsVpnService : VpnService() {
         private const val MEMORY_TRIM_CLEAR_CACHE_LEVEL = 60
         private const val NETWORK_CHANGE_DEBOUNCE_MS = 500L
 
-        const val VPN_IP = "10.0.0.2"
-        const val DUMMY_DNS_IP = "10.0.0.1"
+        const val VPN_IP = DnsVpnAddresses.IPV4_CLIENT
+        const val DUMMY_DNS_IP = DnsVpnAddresses.IPV4_DNS
         internal const val D14_TEST_PREFS_NAME = "d14_device_test"
         internal const val D14_TEST_UPSTREAM_HOST_KEY = "upstream_host"
         internal const val D14_TEST_UPSTREAM_PORT_KEY = "upstream_port"
 
         // Publish one lifecycle state for the UI and service notification.
         val lifecycleStateFlow = MutableStateFlow(VpnLifecycleState.STOPPED)
+        private val _appliedBypassedAppPackageNamesFlow = MutableStateFlow<Set<String>>(emptySet())
+        val appliedBypassedAppPackageNamesFlow = _appliedBypassedAppPackageNamesFlow.asStateFlow()
         private val _underlyingNetworkConnectivityFlow =
             MutableStateFlow(UnderlyingNetworkConnectivity.UNKNOWN)
         val underlyingNetworkConnectivityFlow = _underlyingNetworkConnectivityFlow.asStateFlow()
@@ -174,6 +179,13 @@ class DnsVpnService : VpnService() {
             plaintextFenceCleanupScope.launch {
                 plaintextFallbackFence.closeSocketsIfStillStrict(resolverId, revision)
             }
+        }
+
+        @Volatile private var d08StartupBenchmarkIsolation = false
+
+        internal fun setD08StartupBenchmarkIsolation(enabled: Boolean) {
+            check(BuildConfig.APPLICATION_ID.endsWith(".d08test"))
+            d08StartupBenchmarkIsolation = enabled
         }
 
         internal fun setD08TestPlaintextFallbackPolicy(resolverId: Int, allowed: Boolean) {
@@ -432,13 +444,9 @@ class DnsVpnService : VpnService() {
             scheduleLogFlush()
         }
 
-        private fun logDnsTransportFailure(message: String, error: Throwable? = null) {
+        private fun logDnsTransportFailure(message: String) {
             if (!isUiForeground) return
-            if (error == null) {
-                Log.e(TAG, message)
-            } else {
-                Log.e(TAG, message, error)
-            }
+            Log.e(TAG, message)
         }
 
         fun clearLogs() {
@@ -702,6 +710,7 @@ class DnsVpnService : VpnService() {
             val queueBarrier: Deferred<Unit>
         ) : LifecycleCommand()
         data class ClearLogs(val startId: Int) : LifecycleCommand()
+        data class NetworkAddressConflict(val callbackToken: Long) : LifecycleCommand()
         data class TunnelEnded(
             val generation: Long,
             val descriptor: ParcelFileDescriptor,
@@ -712,8 +721,12 @@ class DnsVpnService : VpnService() {
 
     private data class DnsStateSnapshot(
         val server: DnsServer,
+        val dohEndpoints: List<DnsDohEndpoint>,
+        val udpEndpoints: List<DnsUdpUpstreamEndpoint>,
+        val udpPrimaryBackoff: UdpPrimaryBackoff,
         val resolverGeneration: Int,
         val underlyingNetworkGeneration: Long,
+        val systemDnsNetwork: Network?,
         val policyAssembly: DomainPolicyAssembly
     )
 
@@ -722,7 +735,9 @@ class DnsVpnService : VpnService() {
         val manager: ConnectivityManager,
         val underlyingCallback: ConnectivityManager.NetworkCallback,
         val defaultCallback: ConnectivityManager.NetworkCallback,
-        val bestMatchingCallback: ConnectivityManager.NetworkCallback?
+        val bestMatchingCallback: ConnectivityManager.NetworkCallback?,
+        val startupConfirmation: StartupNetworkConfirmation,
+        val startupNetworkReady: CompletableDeferred<Unit>?
     ) {
         val callbacks: List<ConnectivityManager.NetworkCallback>
             get() = listOfNotNull(underlyingCallback, defaultCallback, bestMatchingCallback)
@@ -731,8 +746,12 @@ class DnsVpnService : VpnService() {
     private val dnsStateLock = Any()
     private var resolverGeneration = 0
     private var underlyingNetworkGeneration = 0L
+    private var systemDnsNetwork: Network? = null
     private var underlyingNetworkChangePending = false
     private val networkReadiness = DnsNetworkReadiness()
+    private val systemDnsRouteWaiters = Semaphore(
+        MAX_CONCURRENT_DNS_QUERIES * (1 + MAX_COALESCED_DNS_QUERY_WAITERS)
+    )
     private val queryAdmission = BoundedDnsQueryAdmission<DnsQueryKey>(
         maxUniqueKeys = MAX_CONCURRENT_DNS_QUERIES,
         maxWaitersPerKey = MAX_COALESCED_DNS_QUERY_WAITERS
@@ -755,6 +774,8 @@ class DnsVpnService : VpnService() {
     @Volatile private var tunnelGeneration = 0L
 
     private val dohFailureBackoff = DohFailureBackoff()
+    // Replaced under dnsStateLock when either the resolver or the network generation changes.
+    private var udpPrimaryBackoff = UdpPrimaryBackoff()
     private val backgroundFailureLogLimiter = MonotonicIntervalGate(intervalMillis = 5_000)
     private val successfulTransportLogPolicy = BackgroundDnsLogPolicy()
 
@@ -778,9 +799,23 @@ class DnsVpnService : VpnService() {
         secondaryIp = "8.8.4.4"
     )
 
-    private fun updateResolverState(server: DnsServer) {
+    private var upstreamDohEndpoints = DohEndpointConfiguration.endpoints(upstreamDnsServer)
+    private var upstreamUdpEndpoints = udpEndpoints(upstreamDnsServer, BuildConfig.DNS_UPSTREAM_PORT)
+
+    private fun updateResolverState(
+        server: DnsServer,
+        udpPort: Int = d14DeviceTestUpstream()?.second ?: BuildConfig.DNS_UPSTREAM_PORT
+    ) {
+        check(server.resolverMode != DnsResolverMode.SYSTEM || Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            "系統 DNS 需要 Android 10 以上，請選擇其他 DNS。"
+        }
+        val endpoints = DohEndpointConfiguration.endpoints(server)
+        val udpEndpoints = udpEndpoints(server, udpPort)
         synchronized(dnsStateLock) {
             upstreamDnsServer = server
+            upstreamDohEndpoints = endpoints
+            upstreamUdpEndpoints = udpEndpoints
+            udpPrimaryBackoff = UdpPrimaryBackoff()
             resolverGeneration++
             clearDnsStateLocked()
             dohFailureBackoff.resetForGeneration(
@@ -919,8 +954,12 @@ class DnsVpnService : VpnService() {
     private fun snapshotDnsState(): DnsStateSnapshot = synchronized(dnsStateLock) {
         DnsStateSnapshot(
             server = upstreamDnsServer,
+            dohEndpoints = upstreamDohEndpoints,
+            udpEndpoints = upstreamUdpEndpoints,
+            udpPrimaryBackoff = udpPrimaryBackoff,
             resolverGeneration = resolverGeneration,
             underlyingNetworkGeneration = underlyingNetworkGeneration,
+            systemDnsNetwork = systemDnsNetwork,
             policyAssembly = domainPolicy.snapshot()
         )
     }
@@ -935,17 +974,78 @@ class DnsVpnService : VpnService() {
             domainPolicy.snapshot() === state.policyAssembly
     }
 
-    private fun registerUnderlyingNetworkCallback() {
+    // A startup snapshot is needed before the network callbacks are registered (min API 24).
+    @Suppress("DEPRECATION")
+    private fun hasUnderlyingIpv6AddressConflict(): Boolean {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return false
+        return manager.allNetworks.any { network ->
+            val capabilities = manager.getNetworkCapabilities(network)
+            capabilities != null && !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                manager.getLinkProperties(network)?.let(::hasVirtualIpv6AddressConflict) == true
+        }
+    }
+
+    private fun hasVirtualIpv6AddressConflict(properties: LinkProperties): Boolean {
+        if (properties.linkAddresses.any { link ->
+                val address = link.address.address
+                address.size == 16 && DnsVpnAddresses.overlapsIpv6Prefix(address, link.prefixLength)
+            }) return true
+        // A default route covers everything; only explicit underlay prefixes conflict.
+        return properties.routes.any { route ->
+            val prefix = route.destination
+            val address = prefix.address.address
+            prefix.prefixLength > 0 && address.size == 16 &&
+                DnsVpnAddresses.overlapsIpv6Prefix(address, prefix.prefixLength)
+        }
+    }
+
+    private fun validatedDefaultNetworkBeforeVpn(): Long? {
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return null
+        val network = manager.activeNetwork ?: return null
+        val capabilities = manager.getNetworkCapabilities(network) ?: return null
+        val facts = networkFacts(network, capabilities)
+        return facts.networkId.takeIf {
+            !facts.isVpn && facts.hasInternet && facts.isValidated && !facts.hasCaptivePortal &&
+                manager.activeNetwork == network
+        }
+    }
+
+    private fun registerUnderlyingNetworkCallback(startupValidatedNetworkId: Long?): Deferred<Unit>? {
         val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         if (manager == null) {
             addLog("[網路狀態] 無法監看網路變更；DNS 伺服器設定維持不變。")
-            return
+            return null
         }
 
         val registration = synchronized(networkCallbackLock) {
-            if (networkCallbackRegistration != null) return
+            if (networkCallbackRegistration != null) return null
             val token = ++networkCallbackToken
             val underlyingCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                    if (hasVirtualIpv6AddressConflict(linkProperties)) {
+                        enqueueLifecycleCommand(LifecycleCommand.NetworkAddressConflict(token))
+                    }
+                    val context = UnderlyingNetworkIpContext.of(
+                        linkAddresses = linkProperties.linkAddresses.map { it.toString() },
+                        routes = linkProperties.routes.map { it.toString() },
+                        dnsServers = linkProperties.dnsServers.mapNotNull { it.hostAddress },
+                        nat64Prefix = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            linkProperties.nat64Prefix?.toString()
+                        } else null,
+                        privateDnsActive = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                            linkProperties.isPrivateDnsActive,
+                        privateDnsServerName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            linkProperties.privateDnsServerName
+                        } else null
+                    )
+                    onUnderlyingNetworkChange(token) { reducer ->
+                        reducer.updateIpContext(network.networkHandle, context).also { transition ->
+                            if (BuildConfig.DEBUG) Log.d(TAG,
+                                "IP context network=${network.networkHandle} selected=${reducer.snapshot().selectedNetworkId} fence=${transition?.shouldFenceDnsState == true}")
+                        }
+                    }
+                }
+
                 override fun onCapabilitiesChanged(
                     network: Network,
                     networkCapabilities: NetworkCapabilities
@@ -1042,7 +1142,9 @@ class DnsVpnService : VpnService() {
                 manager,
                 underlyingCallback,
                 defaultCallback,
-                bestMatchingCallback
+                bestMatchingCallback,
+                StartupNetworkConfirmation(startupValidatedNetworkId),
+                startupValidatedNetworkId?.let { CompletableDeferred<Unit>() }
             ).also {
                 networkCallbackRegistration = it
             }
@@ -1079,7 +1181,9 @@ class DnsVpnService : VpnService() {
             unregisterUnderlyingNetworkCallback()
             Log.w(TAG, "Unable to register the underlying network callback", exception)
             addLog("[網路狀態] 無法監看網路變更；DNS 伺服器設定維持不變。")
+            return null
         }
+        return registration.startupNetworkReady
     }
 
     private fun networkFacts(
@@ -1125,17 +1229,20 @@ class DnsVpnService : VpnService() {
         val transition: UnderlyingNetworkTransition
         val generation: Long
         val dnsStateFenced: Boolean
+        val startupRouteConfirmed: Boolean
         synchronized(underlyingNetworkEventLock) {
+            val registration = networkCallbackRegistration ?: return
             if (
                 !isCurrentUnderlyingNetworkCallback(
                     token = token,
                     currentToken = networkCallbackToken,
-                    registeredToken = networkCallbackRegistration?.token,
+                    registeredToken = registration.token,
                     isVpnRunning = isVpnRunning
                 )
             ) return
 
             transition = update(underlyingNetworkReducer) ?: return
+            startupRouteConfirmed = registration.startupConfirmation.confirmsFirstRoute(transition.current)
             _underlyingNetworkConnectivityFlow.value = transition.current.connectivity
             if (BuildConfig.D14_DEVICE_TEST) {
                 d14UnderlyingNetworkSnapshot.set(transition.current)
@@ -1146,6 +1253,13 @@ class DnsVpnService : VpnService() {
             dnsStateFenced = transition.runIfDnsStateFenceRequired {
                 currentGeneration = synchronized(dnsStateLock) {
                     underlyingNetworkGeneration++
+                    systemDnsNetwork = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        when (transition.current.connectivity) {
+                            UnderlyingNetworkConnectivity.OFFLINE, UnderlyingNetworkConnectivity.UNKNOWN -> null
+                            else -> transition.current.selectedNetworkId?.let { Network.fromNetworkHandle(it) }
+                        }
+                    } else null
+                    udpPrimaryBackoff = UdpPrimaryBackoff()
                     underlyingNetworkChangePending = true
                     networkReadiness.signalChange()
                     clearDnsAnswerCacheLocked()
@@ -1166,7 +1280,8 @@ class DnsVpnService : VpnService() {
             token = token,
             state = transition.current,
             generation = generation,
-            dnsStateFenced = dnsStateFenced
+            dnsStateFenced = dnsStateFenced,
+            startupRouteConfirmed = startupRouteConfirmed
         )
     }
 
@@ -1178,15 +1293,20 @@ class DnsVpnService : VpnService() {
         token: Long,
         state: UnderlyingNetworkSnapshot,
         generation: Long,
-        dnsStateFenced: Boolean
+        dnsStateFenced: Boolean,
+        startupRouteConfirmed: Boolean = false
     ) {
         synchronized(networkCallbackLock) {
-            if (token != networkCallbackToken || networkCallbackRegistration?.token != token) return
-            val routeChangePending = synchronized(dnsStateLock) { underlyingNetworkChangePending }
+            val registration = networkCallbackRegistration ?: return
+            if (token != networkCallbackToken || registration.token != token) return
+            val routeChangePending = synchronized(dnsStateLock) {
+                if (generation != underlyingNetworkGeneration) return
+                underlyingNetworkChangePending
+            }
             if (!shouldReplaceNetworkStatusDebounce(routeChangePending, dnsStateFenced)) return
             networkStatusDebounceJob?.cancel()
             networkStatusDebounceJob = serviceScope.launch {
-                delay(NETWORK_CHANGE_DEBOUNCE_MS)
+                if (!startupRouteConfirmed) delay(NETWORK_CHANGE_DEBOUNCE_MS)
                 if (token != networkCallbackToken || !isVpnRunning) return@launch
                 if (generation != currentUnderlyingNetworkGeneration()) return@launch
                 val currentState = underlyingNetworkReducer.snapshot()
@@ -1227,6 +1347,7 @@ class DnsVpnService : VpnService() {
                         } else {
                             underlyingNetworkChangePending = false
                             networkReadiness.signalChange()
+                            registration.startupNetworkReady?.complete(Unit)
                             true
                         }
                     }
@@ -1284,6 +1405,7 @@ class DnsVpnService : VpnService() {
             networkRecoveryTracker.clear()
         }
         synchronized(dnsStateLock) {
+            systemDnsNetwork = null
             underlyingNetworkChangePending = false
             networkReadiness.signalChange()
         }
@@ -1380,8 +1502,9 @@ class DnsVpnService : VpnService() {
                                             server.allowPlaintextFallback
                                         )
                                         if (upstreamDnsServer != server) updateResolverState(server)
-                                        activeDnsFlow.value = "${server.name} (${server.primaryIp})"
-                                        addLog("[DNS 變更同步] 已即時套用新 DNS 設定：${server.name} (${server.primaryIp})")
+                                        val label = resolverDisplayName(server)
+                                        activeDnsFlow.value = label
+                                        addLog("[DNS 變更同步] 已即時套用新 DNS 設定：$label")
                                     }
                                 )
                                 if (applied == false) {
@@ -1399,6 +1522,15 @@ class DnsVpnService : VpnService() {
                             stopSelfIfIdle(command.startId)
                         }
                         is LifecycleCommand.TunnelEnded -> handleTunnelEnded(command)
+                        is LifecycleCommand.NetworkAddressConflict -> {
+                            val current = synchronized(networkCallbackLock) {
+                                networkCallbackRegistration?.token == command.callbackToken
+                            }
+                            if (current && hasUnderlyingIpv6AddressConflict()) {
+                                stopVpn(VpnLifecycleState.FAILED)
+                                addLog("[防護異常] 虛擬 IPv6 DNS 位址與目前網路衝突，請切換網路後重新啟動防護。")
+                            }
+                        }
                     }
                 } finally {
                     completeLifecycleCommand()
@@ -1639,10 +1771,11 @@ class DnsVpnService : VpnService() {
                         resolverRevision,
                         candidate.allowPlaintextFallback
                     )
-                    updateResolverState(candidate)
+                    updateResolverState(candidate, testUpstream?.second ?: BuildConfig.DNS_UPSTREAM_PORT)
                     dnsTransportStatusFlow.value = "尚無上游查詢"
-                    activeDnsFlow.value = "${candidate.name} (${candidate.primaryIp})"
-                    addLog("Database loaded. Upstream DNS: ${candidate.name} (${candidate.primaryIp})")
+                    val label = resolverDisplayName(candidate)
+                    activeDnsFlow.value = label
+                    addLog("Database loaded. Upstream DNS: $label")
                     true
                 } == true
                 if (applied) {
@@ -1656,25 +1789,33 @@ class DnsVpnService : VpnService() {
                 addLog("Loaded " + bypassedList.size + " apps to exempt/bypass DNS VPN")
             }
 
+            check(!hasUnderlyingIpv6AddressConflict()) {
+                "虛擬 IPv6 DNS 位址與目前網路衝突，請切換網路後重新啟動防護。"
+            }
             // Keep establish() on the service dispatcher so destruction cannot race descriptor ownership.
             val builder = Builder()
                 .setSession("DNS Shield")
                 .setBlocking(true)
-                // This DNS-only tunnel handles IPv4; pass IPv6 through the underlying network.
+                // Only the two virtual DNS host routes enter this tunnel.
                 .allowFamily(android.system.OsConstants.AF_INET6)
                 .setMtu(DnsResponsePacketBuilder.TUN_MTU_BYTES)
                 .addAddress(VPN_IP, 32)
                 .addRoute(DUMMY_DNS_IP, 32)
                 .addDnsServer(DUMMY_DNS_IP)
+                .addAddress(DnsVpnAddresses.IPV6_CLIENT, 128)
+                .addRoute(DnsVpnAddresses.IPV6_DNS, 128)
+                .addDnsServer(DnsVpnAddresses.IPV6_DNS)
 
-            if (BuildConfig.D14_DEVICE_TEST) {
+            val appliedBypassedAppPackageNames = mutableSetOf<String>()
+            if (BuildConfig.D14_DEVICE_TEST || d08StartupBenchmarkIsolation) {
                 builder.addAllowedApplication(packageName)
                 runCatching { builder.addAllowedApplication("$packageName.test") }
-                addLog("D14 device validation VPN is limited to $packageName")
+                addLog("Device validation VPN is limited to $packageName")
             } else {
                 for (app in bypassedList) {
                     try {
                         builder.addDisallowedApplication(app.packageName)
+                        appliedBypassedAppPackageNames.add(app.packageName)
                         addLog("Exempted app: " + app.appName + " (" + app.packageName + ")")
                     } catch (exception: PackageManager.NameNotFoundException) {
                         Log.w(TAG, "Exempted app package not found on device: " + app.packageName)
@@ -1689,6 +1830,7 @@ class DnsVpnService : VpnService() {
                 abandonSupersededStartup()
                 return
             }
+            val startupValidatedNetworkId = validatedDefaultNetworkBeforeVpn()
             val descriptor = establishVpnTunnel(
                 establish = { builder.establish() },
                 onUnavailable = {
@@ -1725,15 +1867,23 @@ class DnsVpnService : VpnService() {
             tunnelInputOwner = inputOwner
             tunnelParentJob = activeJob
             tunnelScope = activeTunnelScope
+            _appliedBypassedAppPackageNamesFlow.value = appliedBypassedAppPackageNames.toSet()
             updateLifecycleState(VpnLifecycleState.RUNNING)
-            registerUnderlyingNetworkCallback()
+            val startupNetworkReady = registerUnderlyingNetworkCallback(startupValidatedNetworkId)
             addLog("[防護成功] 安全 DNS 防護已成功啟動並建立通道。")
 
             val activeNotification = createNotification(notificationText(VpnLifecycleState.RUNNING))
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .notify(NOTIFICATION_ID, activeNotification)
             addLog("VPN Interface Established. Reading packets...")
-            activeTunnelScope.launch { runTunnel(descriptor, generation, inputOwner) }
+            activeTunnelScope.launch {
+                // Keep startup packets in the TUN until the first route fence has settled.
+                // Taking DNS snapshots sooner could let initial callbacks cancel those queries.
+                if (startupNetworkReady != null) {
+                    withTimeoutOrNull(NETWORK_CHANGE_DEBOUNCE_MS) { startupNetworkReady.await() }
+                }
+                runTunnel(descriptor, generation, inputOwner)
+            }
             establishedFd = null
         } catch (exception: CancellationException) {
             unregisterUnderlyingNetworkCallback()
@@ -1817,6 +1967,10 @@ class DnsVpnService : VpnService() {
     }
     private fun handlePacket(packet: ByteArray, length: Int, outputStream: FileOutputStream) {
         val receivedAtNanos = System.nanoTime()
+        if (length in 1..packet.size && (packet[0].toInt() ushr 4 and 15) == 6) {
+            handleIpv6Packet(packet, length, receivedAtNanos, outputStream)
+            return
+        }
         when (val parsed = DnsIpv4UdpQueryParser.parse(packet, length)) {
             is Ipv4UdpDnsParseResult.Query -> {
                 val dnsPacket = parsed.packet
@@ -1848,6 +2002,35 @@ class DnsVpnService : VpnService() {
         }
     }
 
+    private fun handleIpv6Packet(
+        packet: ByteArray,
+        length: Int,
+        receivedAtNanos: Long,
+        outputStream: FileOutputStream
+    ) {
+        when (val parsed = DnsIpv6UdpQueryParser.parse(packet, length)) {
+            is Ipv6UdpDnsParseResult.Query -> {
+                val dnsPacket = parsed.packet
+                handleDnsQuery(dnsPacket, receivedAtNanos, DnsResponseWriter { response ->
+                    sendResponsePacket(response, dnsPacket.sourceIp, dnsPacket.destinationIp,
+                        dnsPacket.sourcePort, outputStream, query = dnsPacket.query)
+                })
+            }
+            Ipv6UdpDnsParseResult.NotDns -> return
+            is Ipv6UdpDnsParseResult.Rejected -> {
+                val request = beginDnsRequest(receivedAtNanos)
+                try {
+                    parsed.dnsErrorResponse?.let { response ->
+                        sendResponsePacket(response.dnsPayload, response.clientIp,
+                            response.resolverIp, response.clientPort, outputStream)
+                    }
+                } finally {
+                    completeDnsRequest(request, DnsClientTerminalOutcome.REJECTED)
+                }
+            }
+        }
+    }
+
     private suspend fun handleTcpQuery(payload: ByteArray, send: (ByteArray) -> Unit) {
         val receivedAtNanos = System.nanoTime()
         val parsed = DnsMessageValidator.parseQuery(payload)
@@ -1862,8 +2045,7 @@ class DnsVpnService : VpnService() {
         }
         val query = (parsed as DnsQueryParseResult.Valid).query
         val result = kotlinx.coroutines.CompletableDeferred<ByteArray>()
-        val packet = ParsedIpv4UdpDnsQuery(byteArrayOf(10, 0, 0, 2),
-            byteArrayOf(10, 0, 0, 1), 53, payload, query)
+        val packet = ParsedTcpDnsQuery(payload, query)
         handleDnsQuery(packet, receivedAtNanos, DnsResponseWriter {
             // Commit one immutable response while the resolver-state lock is held.
             // Stream I/O happens below so a slow TCP peer cannot hold that lock.
@@ -1874,12 +2056,20 @@ class DnsVpnService : VpnService() {
     }
 
     private fun handleDnsQuery(
-        dnsPacket: ParsedIpv4UdpDnsQuery,
+        dnsPacket: DnsClientQuery,
         receivedAtNanos: Long,
-        responseWriter: DnsResponseWriter
+        responseWriter: DnsResponseWriter,
+        request: DnsDiagnosticMetrics.Request = beginDnsRequest(receivedAtNanos),
+        resumedFrom: DnsStateSnapshot? = null
     ) {
-        val request = beginDnsRequest(receivedAtNanos)
         val dnsState = snapshotDnsState()
+        if (resumedFrom != null &&
+            (dnsState.resolverGeneration != resumedFrom.resolverGeneration ||
+                dnsState.policyAssembly !== resumedFrom.policyAssembly)
+        ) {
+            failDnsQuery(dnsPacket, responseWriter, request)
+            return
+        }
         val queryKey = DnsQueryKey(
             bytes = dnsPacket.payload,
             resolverGeneration = dnsState.resolverGeneration,
@@ -1890,10 +2080,51 @@ class DnsVpnService : VpnService() {
 
         val activeScope = tunnelScope
         if (activeScope == null || !activeScope.isActive) {
-            sendServFailResponse(dnsPacket, responseWriter)
-            completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
+            failDnsQuery(dnsPacket, responseWriter, request)
             return
         }
+
+        if (resumedFrom == null && dnsState.server.resolverMode == DnsResolverMode.SYSTEM &&
+            dnsState.systemDnsNetwork == null
+        ) {
+            // Always-on can bring up the tunnel before Android selects an underlay.
+            // These queries have not been sent, so they can use the next route and
+            // must take a new snapshot without extending their original deadline.
+            if (!systemDnsRouteWaiters.tryAcquire()) {
+                rejectDnsOverload(dnsPacket, responseWriter, request)
+                return
+            }
+            val deadline = DnsRequestDeadline.fromReceivedAt(receivedAtNanos)
+            activeScope.launch {
+                val ready = networkReadiness.awaitReady(deadline) {
+                    synchronized(dnsStateLock) {
+                        when {
+                            resolverGeneration != dnsState.resolverGeneration ||
+                                domainPolicy.snapshot() !== dnsState.policyAssembly ->
+                                DnsNetworkReadiness.State.STALE
+                            systemDnsNetwork == null || underlyingNetworkChangePending ->
+                                DnsNetworkReadiness.State.WAITING
+                            else -> DnsNetworkReadiness.State.READY
+                        }
+                    }
+                }
+                if (ready) {
+                    handleDnsQuery(dnsPacket, receivedAtNanos, responseWriter, request, resumedFrom = dnsState)
+                } else {
+                    failDnsQuery(dnsPacket, responseWriter, request)
+                }
+            }.invokeOnCompletion { completion ->
+                systemDnsRouteWaiters.release()
+                if (completion != null) completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
+            }
+            return
+        }
+
+        if (!isCurrentDnsState(dnsState)) {
+            failDnsQuery(dnsPacket, responseWriter, request)
+            return
+        }
+        recordUserAllowedDomain(dnsPacket.query.question.domainName ?: "Unknown", dnsState)
 
         val lease = when (val admission = queryAdmission.tryAdmit(queryKey)) {
             is DnsQueryAdmission.Leader -> admission.lease
@@ -1902,14 +2133,7 @@ class DnsVpnService : VpnService() {
                 admission.lease
             }
             DnsQueryAdmission.Rejected -> {
-                recordOverload(request)
-                sendServFailResponse(dnsPacket, responseWriter)
-                completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
-                if (isUiForeground || backgroundFailureLogLimiter.tryAcquire()) {
-                    addDnsQueryLog(important = true) {
-                        "✗ 有界請求容量已滿 [ID=${formatTxId(dnsPacket.payload)}]，已立即回覆 SERVFAIL"
-                    }
-                }
+                rejectDnsOverload(dnsPacket, responseWriter, request)
                 return
             }
         }
@@ -1963,8 +2187,32 @@ class DnsVpnService : VpnService() {
         }
         requestJob.start()
     }
+
+    private fun failDnsQuery(
+        packet: DnsClientQuery,
+        responseWriter: DnsResponseWriter,
+        request: DnsDiagnosticMetrics.Request
+    ) {
+        sendServFailResponse(packet, responseWriter)
+        completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
+    }
+
+    private fun rejectDnsOverload(
+        packet: DnsClientQuery,
+        responseWriter: DnsResponseWriter,
+        request: DnsDiagnosticMetrics.Request
+    ) {
+        recordOverload(request)
+        failDnsQuery(packet, responseWriter, request)
+        if (isUiForeground || backgroundFailureLogLimiter.tryAcquire()) {
+            addDnsQueryLog(important = true) {
+                "✗ 有界請求容量已滿 [ID=${formatTxId(packet.payload)}]，已立即回覆 SERVFAIL"
+            }
+        }
+    }
+
     private fun tryHandleFastPath(
-        dnsPacket: ParsedIpv4UdpDnsQuery,
+        dnsPacket: DnsClientQuery,
         dnsState: DnsStateSnapshot,
         queryKey: DnsQueryKey,
         request: DnsDiagnosticMetrics.Request,
@@ -2002,15 +2250,7 @@ class DnsVpnService : VpnService() {
             completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
             return true
         }
-        if (!isBlocked) {
-            if (!isCurrentDnsState(dnsState)) {
-                sendServFailResponse(dnsPacket, responseWriter)
-                completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
-                return true
-            }
-            recordUserAllowedDomain(domain, dnsState)
-            return false
-        }
+        if (!isBlocked) return false
 
         val blockedResponse = DnsMessageValidator.buildNxDomainResponse(dnsPacket.query)
         if (!sendResolvedResponseIfCurrent(dnsPacket, dnsState, blockedResponse, responseWriter)) {
@@ -2035,7 +2275,7 @@ class DnsVpnService : VpnService() {
     }
 
     private fun sendResolvedResponseIfCurrent(
-        dnsPacket: ParsedIpv4UdpDnsQuery,
+        dnsPacket: DnsClientQuery,
         dnsState: DnsStateSnapshot,
         response: ByteArray,
         responseWriter: DnsResponseWriter
@@ -2048,7 +2288,7 @@ class DnsVpnService : VpnService() {
     )
 
     private fun sendServFailResponse(
-        dnsPacket: ParsedIpv4UdpDnsQuery,
+        dnsPacket: DnsClientQuery,
         responseWriter: DnsResponseWriter
     ) {
         recordNetworkRecoveryFailure()
@@ -2085,7 +2325,7 @@ class DnsVpnService : VpnService() {
                 deadline = deadline,
                 attemptTimeoutMillis = attemptTimeoutMillis,
                 onCallQueued = { recordTransportAttempt(metricsRequest, DnsUpstreamTransport.DOH_CALL_QUEUED) },
-                logFailure = { message, error -> logDnsTransportFailure(message, error) }
+                logFailure = ::logDnsTransportFailure
             )
     }
 
@@ -2104,17 +2344,22 @@ class DnsVpnService : VpnService() {
             DnsMessageValidator.truncateResponseForClient(
                 responseForClient,
                 dnsQuery,
-                DnsMessageValidator.maxClientUdpResponseBytes(dnsQuery)
+                DnsMessageValidator.maxClientUdpResponseBytes(
+                    dnsQuery, ipHeaderBytes = if (clientIp.size == 16) 40 else 20
+                )
             ) ?: DnsMessageValidator.buildServFailResponse(dnsQuery)
         } ?: responseData
-        val responseIpPacket = DnsResponsePacketBuilder.build(
-            srcIp = mockDnsIp, // 10.0.0.1
-            dstIp = clientIp,   // Client IP
-            srcPort = 53,
-            dstPort = clientPort,
-            payload = clientResponse,
-            transactionIdSource = transactionIdSource
-        )
+        val responseIpPacket = if (clientIp.size == 16) {
+            DnsIpv6ResponsePacketBuilder.build(
+                srcIp = mockDnsIp, dstIp = clientIp, srcPort = 53, dstPort = clientPort,
+                payload = clientResponse, transactionIdSource = transactionIdSource
+            )
+        } else {
+            DnsResponsePacketBuilder.build(
+                srcIp = mockDnsIp, dstIp = clientIp, srcPort = 53, dstPort = clientPort,
+                payload = clientResponse, transactionIdSource = transactionIdSource
+            )
+        }
 
         try {
             synchronized(outputStream) {
@@ -2127,7 +2372,7 @@ class DnsVpnService : VpnService() {
     }
 
     private suspend fun forwardAdmittedDnsQuery(
-        dnsPacket: ParsedIpv4UdpDnsQuery,
+        dnsPacket: DnsClientQuery,
         dnsState: DnsStateSnapshot,
         queryKey: DnsQueryKey,
         deadline: DnsRequestDeadline,
@@ -2205,25 +2450,27 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private fun upstreamEndpoint(address: String) = DnsUdpUpstreamEndpoint(
-        InetAddress.getByName(address),
-        d14DeviceTestUpstream()?.second ?: BuildConfig.DNS_UPSTREAM_PORT
-    )
+    private fun resolverDisplayName(server: DnsServer): String =
+        if (server.resolverMode == DnsResolverMode.SYSTEM) server.name else "${server.name} (${server.primaryIp})"
 
-    private suspend fun resolveUpstreamQuery(
-        dnsPayload: ByteArray,
+    private fun udpEndpoints(server: DnsServer, port: Int): List<DnsUdpUpstreamEndpoint> =
+        listOfNotNull(server.primaryIp, server.secondaryIp).map { address ->
+            val literal = IpAddressLiteral.parse(address) ?: return emptyList()
+            DnsUdpUpstreamEndpoint(literal.toInetAddress(), port)
+        }
+
+    private suspend fun resolveConfiguredUpstreamQuery(
         query: ParsedDnsQuery,
-        domain: String,
         dnsState: DnsStateSnapshot,
         deadline: DnsRequestDeadline,
         request: DnsDiagnosticMetrics.Request
-    ): ByteArray? {
-        val endpoints = DohEndpointConfiguration.endpoints(dnsState.server)
+    ): DnsResolutionOutcome {
+        val endpoints = dnsState.dohEndpoints
         val backoffGeneration = DohFailureBackoff.Generation(
             resolverGeneration = dnsState.resolverGeneration,
             networkGeneration = dnsState.underlyingNetworkGeneration
         )
-        val outcome = DnsTransportPolicy.resolve(
+        return DnsTransportPolicy.resolve(
             allowPlaintextFallback = dnsState.server.allowPlaintextFallback,
             endpoints = endpoints,
             deadline = deadline,
@@ -2239,7 +2486,9 @@ class DnsVpnService : VpnService() {
                         throw exception
                     } catch (exception: Exception) {
                         dohFailureBackoff.recordFailure(endpoint, backoffGeneration)
-                        logDnsTransportFailure("DoH resolution failed for ${endpoint.url}", exception)
+                        logDnsTransportFailure(
+                            "DoH request failed for ${endpoint.hostname}: ${exception.javaClass.simpleName}"
+                        )
                         null
                     }
                     if (response == null) {
@@ -2269,19 +2518,17 @@ class DnsVpnService : VpnService() {
                     )
                     try {
                         if (!protect(socket)) throw IOException("Failed to protect DNS UDP socket from the VPN.")
-                        val upstreams = buildList {
-                            add(upstreamEndpoint(dnsState.server.primaryIp))
-                            dnsState.server.secondaryIp?.let { address ->
-                                add(upstreamEndpoint(address))
-                            }
-                        }
                         DnsUdpUpstreamClient.queryWithFallback(
                             socket = socket,
                             query = query,
-                            upstreams = upstreams,
+                            upstreams = dnsState.udpEndpoints,
                             deadline = deadline,
                             onAttempt = { recordTransportAttempt(request, DnsUpstreamTransport.UDP) },
                             onRetry = { recordUdpRetryAttempt(request) },
+                            primaryBackoff = dnsState.udpPrimaryBackoff,
+                            onTimeout = { diagnosticMetrics.recordUdpTimeout(request, it) },
+                            onAnswer = { diagnosticMetrics.recordUdpAnswer(request, it) },
+                            onPrimaryDeferred = { diagnosticMetrics.recordUdpPrimaryDeferred(request) },
                             tcpQuery = { upstream ->
                                 if (!dnsState.server.allowPlaintextFallback ||
                                     !plaintextFallbackFence.allows(dnsState.server.id) ||
@@ -2348,17 +2595,46 @@ class DnsVpnService : VpnService() {
                 }
             }
         )
+    }
+
+    private suspend fun resolveUpstreamQuery(
+        dnsPayload: ByteArray,
+        query: ParsedDnsQuery,
+        domain: String,
+        dnsState: DnsStateSnapshot,
+        deadline: DnsRequestDeadline,
+        request: DnsDiagnosticMetrics.Request
+    ): ByteArray? {
+        val usesSystemDns = dnsState.server.resolverMode == DnsResolverMode.SYSTEM
+        val outcome = if (usesSystemDns) {
+            val network = dnsState.systemDnsNetwork
+            val response = if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && network != null && isCurrentDnsState(dnsState)
+            ) {
+                lookupSystemDns(
+                    network = network,
+                    query = query,
+                    deadline = deadline,
+                    onAttempt = { recordTransportAttempt(request, DnsUpstreamTransport.SYSTEM) },
+                    logFailure = ::logDnsTransportFailure
+                )
+            } else null
+            DnsResolutionOutcome(response, if (response != null) DnsTransport.SYSTEM else DnsTransport.UNAVAILABLE)
+        } else {
+            resolveConfiguredUpstreamQuery(query, dnsState, deadline, request)
+        }
 
         if (!isCurrentDnsState(dnsState)) return null
         when (outcome.transport) {
             DnsTransport.ENCRYPTED_HTTPS -> dnsTransportStatusFlow.value = "DoH 加密"
             DnsTransport.PLAINTEXT_UDP -> dnsTransportStatusFlow.value = "UDP/53 明文降級"
             DnsTransport.PLAINTEXT_TCP -> dnsTransportStatusFlow.value = "TCP/53 明文降級"
+            DnsTransport.SYSTEM -> dnsTransportStatusFlow.value = "系統 DNS"
             DnsTransport.UNAVAILABLE -> {
-                dnsTransportStatusFlow.value = if (dnsState.server.allowPlaintextFallback) {
-                    "上游不可用 · SERVFAIL"
-                } else {
-                    "僅加密 · DoH 不可用 · SERVFAIL"
+                dnsTransportStatusFlow.value = when {
+                    usesSystemDns -> "系統 DNS 無法解析 · SERVFAIL"
+                    dnsState.server.allowPlaintextFallback -> "上游不可用 · SERVFAIL"
+                    else -> "僅加密 · DoH 不可用 · SERVFAIL"
                 }
             }
         }
@@ -2373,13 +2649,15 @@ class DnsVpnService : VpnService() {
                 when (outcome.transport) {
                     DnsTransport.ENCRYPTED_HTTPS ->
                         "🌐 [DoH 解析] [ID=${formatTxId(dnsPayload)}]: 透過 HTTPS 解析 $domain"
-                    DnsTransport.PLAINTEXT_UDP -> if (endpoints.isEmpty()) {
+                    DnsTransport.PLAINTEXT_UDP -> if (dnsState.dohEndpoints.isEmpty()) {
                         "🌐 [DNS 明文] [ID=${formatTxId(dnsPayload)}]: 此解析器使用傳統 DNS，以 UDP/53 解析 $domain"
                     } else {
                         "⚠️ [DNS 降級] [ID=${formatTxId(dnsPayload)}]: 本次 DoH 未取得可用回應，改用 UDP/53 解析 $domain"
                     }
                     DnsTransport.PLAINTEXT_TCP ->
                         "⚠️ [DNS 明文] [ID=${formatTxId(dnsPayload)}]: UDP 回應遭截短，改用 TCP/53 解析 $domain"
+                    DnsTransport.SYSTEM ->
+                        "🌐 [系統 DNS] [ID=${formatTxId(dnsPayload)}]: 透過 Android 解析 $domain"
                     DnsTransport.UNAVAILABLE -> error("Unavailable outcomes are not successful resolution logs")
                 }
             }
@@ -2389,6 +2667,7 @@ class DnsVpnService : VpnService() {
                     DnsTransport.ENCRYPTED_HTTPS -> "DoH 加密"
                     DnsTransport.PLAINTEXT_UDP -> "UDP/53 明文"
                     DnsTransport.PLAINTEXT_TCP -> "TCP/53 明文"
+                    DnsTransport.SYSTEM -> "系統 DNS"
                     DnsTransport.UNAVAILABLE -> error("Unavailable outcomes cannot produce a success summary")
                 }
                 "📋 [DNS 傳輸摘要] 上次通知後合併了 ${summary.coalescedEventCount} 筆背景明文查詢或傳輸／解析器變更；本次解析器 #${summary.latestResolverId} 使用 $transport。"

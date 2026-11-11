@@ -80,7 +80,7 @@ internal object DnsMessageValidator {
             return DnsQueryParseResult.Rejected(RejectionReason.QUESTION_COUNT)
         }
 
-        val parsedQuestion = parseQuestion(message, HEADER_BYTES)
+        val parsedQuestion = parseQuestion(message, HEADER_BYTES, includeDomainName = true)
             ?: return DnsQueryParseResult.Rejected(RejectionReason.INVALID_QUESTION)
         val answerCount = readUnsignedShort(message, 6)
         val authorityCount = readUnsignedShort(message, 8)
@@ -109,26 +109,68 @@ internal object DnsMessageValidator {
         )
     }
 
-    fun isValidResponse(response: ByteArray, query: ParsedDnsQuery): Boolean {
-        if (response.size < HEADER_BYTES || response.size > MAX_DNS_RESPONSE_BYTES) return false
-        if (readUnsignedShort(response, 0) != query.transactionId) return false
+    fun isValidResponse(response: ByteArray, query: ParsedDnsQuery): Boolean =
+        validatedResponseCode(response, query) >= 0
+
+    /** Returns the wire RCODE, including EDNS extended RCODE, or -1 for an invalid response. */
+    internal fun validatedResponseCode(response: ByteArray, query: ParsedDnsQuery): Int =
+        validatedResponseCode(response, query) { _, _, _, _ -> }
+
+    private inline fun validatedResponseCode(
+        response: ByteArray,
+        query: ParsedDnsQuery,
+        onOptRecord: (ParsedRecord, Int, Int, Int) -> Unit
+    ): Int {
+        if (response.size < HEADER_BYTES || response.size > MAX_DNS_RESPONSE_BYTES) return -1
+        if (readUnsignedShort(response, 0) != query.transactionId) return -1
 
         val flags = readUnsignedShort(response, 2)
-        if (flags and 0x8000 == 0 || flags ushr 11 and 0x0F != query.opcode) return false
-        if (readUnsignedShort(response, 4) != 1) return false
+        if (flags and 0x8000 == 0 || flags ushr 11 and 0x0F != query.opcode) return -1
+        if (readUnsignedShort(response, 4) != 1) return -1
 
-        val parsedQuestion = parseQuestion(response, HEADER_BYTES) ?: return false
-        if (!query.question.matches(parsedQuestion.question)) return false
+        val questionEnd = matchingUncompressedQuestionEnd(response, query.question) ?: run {
+            val parsedQuestion = parseQuestion(response, HEADER_BYTES) ?: return -1
+            if (!query.question.matches(parsedQuestion.question)) return -1
+            parsedQuestion.nextOffset
+        }
 
+        var hasOptRecord = false
+        var extendedRcode = 0
         val endOffset = skipRecords(
             response,
-            parsedQuestion.nextOffset,
+            questionEnd,
             readUnsignedShort(response, 6),
             readUnsignedShort(response, 8),
             readUnsignedShort(response, 10)
-        ) ?: return false
-        if (endOffset != response.size) return false
-        return !containsOptRecord(response) || containsOptRecord(query.wire)
+        ) { record, recordOffset, section, index ->
+            hasOptRecord = true
+            extendedRcode = ((record.ttlSeconds ushr 24) and 0xFFL).toInt()
+            onOptRecord(record, recordOffset, section, index)
+        } ?: return -1
+        if (endOffset != response.size) return -1
+        if (hasOptRecord && !containsOptRecord(query.wire)) return -1
+
+        return (extendedRcode shl 4) or (flags and 0x000F)
+    }
+
+    // An exact, uncompressed match can reuse the parsed query labels.
+    // Other wire encodings and case differences go through the full parser.
+    private fun matchingUncompressedQuestionEnd(response: ByteArray, question: DnsQuestion): Int? {
+        var offset = HEADER_BYTES
+        for (label in question.labels) {
+            val labelStart = offset + 1
+            val labelEnd = labelStart + label.size
+            if (labelEnd > response.size || response[offset].toInt() != label.size) return null
+            for (index in label.indices) {
+                if (response[labelStart + index] != label[index]) return null
+            }
+            offset = labelEnd
+        }
+        if (offset > response.size - 5 || response[offset] != 0.toByte()) return null
+        if (readUnsignedShort(response, offset + 1) != question.type ||
+            readUnsignedShort(response, offset + 3) != question.clazz
+        ) return null
+        return offset + 5
     }
 
     fun isTruncatedResponse(response: ByteArray, query: ParsedDnsQuery): Boolean {
@@ -142,9 +184,11 @@ internal object DnsMessageValidator {
 
     fun maxClientUdpResponseBytes(
         query: ParsedDnsQuery,
-        tunMtuBytes: Int = DnsResponsePacketBuilder.TUN_MTU_BYTES
+        tunMtuBytes: Int = DnsResponsePacketBuilder.TUN_MTU_BYTES,
+        ipHeaderBytes: Int = DnsResponsePacketBuilder.IPV4_HEADER_BYTES
     ): Int {
-        val udpPayloadLimit = tunMtuBytes - DnsResponsePacketBuilder.IPV4_HEADER_BYTES -
+        require(ipHeaderBytes == 20 || ipHeaderBytes == 40)
+        val udpPayloadLimit = tunMtuBytes - ipHeaderBytes -
             DnsResponsePacketBuilder.UDP_HEADER_BYTES
         require(udpPayloadLimit >= 512)
         return minOf(query.maxUdpResponseBytes, udpPayloadLimit)
@@ -242,6 +286,121 @@ internal object DnsMessageValidator {
         query.udpPayloadSizeOffset?.let { writeUnsignedShort(wire, it, query.maxUdpResponseBytes) }
     }
 
+    internal fun withEdnsForSystemRetry(query: ParsedDnsQuery): ParsedDnsQuery? {
+        if (isPureQuestionSingleOptEdnsQuery(query)) {
+            val optClassOffset = query.udpPayloadSizeOffset ?: return null
+            val wire = query.wire.copyOf().also { packet ->
+                writeUnsignedShort(packet, optClassOffset, MAX_UDP_RESPONSE_BYTES)
+            }
+            return ParsedDnsQuery(
+                wire = wire,
+                question = query.question,
+                questionEndOffset = query.questionEndOffset,
+                opcode = query.opcode,
+                maxUdpResponseBytes = MAX_UDP_RESPONSE_BYTES,
+                udpPayloadSizeOffset = optClassOffset
+            )
+        }
+        if (!isPureQuestionClassicQuery(query)) return null
+
+        val optOffset = query.wire.size
+        val wire = query.wire.copyOf(optOffset + 11)
+        writeUnsignedShort(wire, 10, 1)
+        writeUnsignedShort(wire, optOffset + 1, 41)
+        writeUnsignedShort(wire, optOffset + 3, MAX_UDP_RESPONSE_BYTES)
+
+        return ParsedDnsQuery(
+            wire = wire,
+            question = query.question,
+            questionEndOffset = query.questionEndOffset,
+            opcode = query.opcode,
+            maxUdpResponseBytes = MAX_UDP_RESPONSE_BYTES,
+            udpPayloadSizeOffset = optOffset + 3
+        )
+    }
+
+    internal fun withoutSyntheticEdns(
+        response: ByteArray,
+        retryQuery: ParsedDnsQuery,
+        originalQuery: ParsedDnsQuery
+    ): ByteArray? {
+        if (!isSyntheticEdnsRetryOf(retryQuery, originalQuery)) return null
+
+        var optRecordOffset = -1
+        var optAdditionalIndex = -1
+        var hasUnsupportedVersion = false
+        val responseCode = validatedResponseCode(response, retryQuery) { record, offset, section, index ->
+            if (section == 2) {
+                optRecordOffset = offset
+                optAdditionalIndex = index
+                hasUnsupportedVersion = ((record.ttlSeconds ushr 16) and 0xFFL) != 0L
+            }
+        }
+        if (responseCode !in 0..0x0F || hasUnsupportedVersion) return null
+
+        // Removing the OPT and later optional records keeps retained compression offsets.
+        val clientResponse = if (optRecordOffset >= 0) {
+            if (optAdditionalIndex < 0) return null
+            response.copyOfRange(0, optRecordOffset).also { wire ->
+                writeUnsignedShort(wire, 10, optAdditionalIndex)
+            }
+        } else {
+            response
+        }
+
+        return clientResponse.takeIf { validatedResponseCode(it, originalQuery) in 0..0x0F }
+    }
+
+    private fun isPureQuestionClassicQuery(query: ParsedDnsQuery): Boolean {
+        val wire = query.wire
+        return isPureQuestionQuery(query) && wire.size <= MAX_QUERY_MESSAGE_BYTES - 11 &&
+            query.udpPayloadSizeOffset == null && query.questionEndOffset == wire.size &&
+            readUnsignedShort(wire, 10) == 0
+    }
+
+    private fun isPureQuestionSingleOptEdnsQuery(query: ParsedDnsQuery): Boolean {
+        val wire = query.wire
+        val optClassOffset = query.udpPayloadSizeOffset ?: return false
+        if (!isPureQuestionQuery(query) || query.maxUdpResponseBytes >= MAX_UDP_RESPONSE_BYTES ||
+            query.questionEndOffset >= wire.size || readUnsignedShort(wire, 10) != 1 ||
+            optClassOffset < query.questionEndOffset + 3 || optClassOffset > wire.size - 8
+        ) return false
+
+        return readUnsignedShort(wire, optClassOffset - 2) == 41 &&
+            readUnsignedShort(wire, optClassOffset) < MAX_UDP_RESPONSE_BYTES
+    }
+
+    private fun isPureQuestionQuery(query: ParsedDnsQuery): Boolean {
+        val wire = query.wire
+        if (wire.size < HEADER_BYTES || wire.size > MAX_QUERY_MESSAGE_BYTES ||
+            query.questionEndOffset !in HEADER_BYTES..wire.size
+        ) return false
+        val flags = readUnsignedShort(wire, 2)
+        return query.opcode == 0 && flags and 0xF800 == 0 && readUnsignedShort(wire, 4) == 1 &&
+            readUnsignedShort(wire, 6) == 0 && readUnsignedShort(wire, 8) == 0
+    }
+
+    private fun isSyntheticEdnsRetryOf(retryQuery: ParsedDnsQuery, originalQuery: ParsedDnsQuery): Boolean {
+        if (!isPureQuestionClassicQuery(originalQuery) || retryQuery.opcode != originalQuery.opcode ||
+            !retryQuery.question.matches(originalQuery.question) ||
+            retryQuery.questionEndOffset != originalQuery.questionEndOffset ||
+            retryQuery.maxUdpResponseBytes != MAX_UDP_RESPONSE_BYTES ||
+            retryQuery.udpPayloadSizeOffset != originalQuery.wire.size + 3
+        ) return false
+
+        val optOffset = originalQuery.wire.size
+        val wire = retryQuery.wire
+        if (wire.size != optOffset + 11) return false
+        for (index in 0 until optOffset) {
+            if (index != 10 && index != 11 && wire[index] != originalQuery.wire[index]) return false
+        }
+        return readUnsignedShort(wire, 10) == 1 && wire[optOffset] == 0.toByte() &&
+            readUnsignedShort(wire, optOffset + 1) == 41 &&
+            readUnsignedShort(wire, optOffset + 3) == MAX_UDP_RESPONSE_BYTES &&
+            readUnsignedInt(wire, optOffset + 5) == 0L &&
+            readUnsignedShort(wire, optOffset + 9) == 0
+    }
+
     fun buildNxDomainResponse(query: ParsedDnsQuery): ByteArray = buildErrorResponse(query, rcode = 3)
 
     fun buildServFailResponse(query: ParsedDnsQuery): ByteArray = buildErrorResponse(query, rcode = 2)
@@ -287,7 +446,7 @@ internal object DnsMessageValidator {
         return response
     }
 
-    private data class ParsedName(val labels: List<ByteArray>, val nextOffset: Int)
+    private data class ParsedName(val nextOffset: Int, val isRoot: Boolean)
     private data class ParsedQuestion(val question: DnsQuestion, val nextOffset: Int)
     private data class ParsedRecord(
         val type: Int,
@@ -301,34 +460,43 @@ internal object DnsMessageValidator {
     )
     private data class OptUdpPayload(val size: Int, val classOffset: Int)
 
-    private fun parseQuestion(message: ByteArray, offset: Int): ParsedQuestion? {
-        val name = parseName(message, offset) ?: return null
+    private fun parseQuestion(
+        message: ByteArray,
+        offset: Int,
+        includeDomainName: Boolean = false
+    ): ParsedQuestion? {
+        val labels = ArrayList<ByteArray>()
+        val name = parseName(message, offset, labels) ?: return null
         if (name.nextOffset > message.size - 4) return null
         val type = readUnsignedShort(message, name.nextOffset)
         val clazz = readUnsignedShort(message, name.nextOffset + 2)
         return ParsedQuestion(
-            question = DnsQuestion(name.labels, type, clazz, toDomainName(name.labels)),
+            question = DnsQuestion(labels, type, clazz, if (includeDomainName) toDomainName(labels) else null),
             nextOffset = name.nextOffset + 4
         )
     }
 
-    private fun parseName(message: ByteArray, offset: Int): ParsedName? {
+    // Record validation only needs the end offset and whether the expanded name is root.
+    private fun parseName(
+        message: ByteArray,
+        offset: Int,
+        labels: MutableList<ByteArray>? = null
+    ): ParsedName? {
         if (offset !in message.indices) return null
 
-        val labels = ArrayList<ByteArray>()
-        val visitedOffsets = HashSet<Int>()
         var position = offset
         var nextOffset = -1
         var expandedLength = 1
         var pointerHops = 0
 
+        // Revisiting an offset repeats the same path. The step and pointer-hop limits reject cycles.
         repeat(MAX_NAME_STEPS) {
-            if (position !in message.indices || !visitedOffsets.add(position)) return null
+            if (position !in message.indices) return null
             val length = message[position].toInt() and 0xFF
             when {
                 length == 0 -> {
                     if (nextOffset < 0) nextOffset = position + 1
-                    return ParsedName(labels, nextOffset)
+                    return ParsedName(nextOffset, isRoot = expandedLength == 1)
                 }
                 length and 0xC0 == 0xC0 -> {
                     if (position + 1 >= message.size) return null
@@ -344,7 +512,7 @@ internal object DnsMessageValidator {
                     if (length > 63 || position + 1 > message.size - length) return null
                     expandedLength += length + 1
                     if (expandedLength > 255) return null
-                    labels += message.copyOfRange(position + 1, position + 1 + length)
+                    labels?.add(message.copyOfRange(position + 1, position + 1 + length))
                     position += length + 1
                 }
             }
@@ -352,12 +520,13 @@ internal object DnsMessageValidator {
         return null
     }
 
-    private fun skipRecords(
+    private inline fun skipRecords(
         message: ByteArray,
         startOffset: Int,
         answerCount: Int,
         authorityCount: Int,
-        additionalCount: Int
+        additionalCount: Int,
+        onOptRecord: (ParsedRecord, Int, Int, Int) -> Unit = { _, _, _, _ -> }
     ): Int? {
         var offset = startOffset
         val recordCount = answerCount + authorityCount + additionalCount
@@ -365,11 +534,12 @@ internal object DnsMessageValidator {
 
         var optSeen = false
         intArrayOf(answerCount, authorityCount, additionalCount).forEachIndexed { section, count ->
-            repeat(count) {
+            repeat(count) { index ->
                 val record = parseRecord(message, offset) ?: return null
                 if (record.type == 41) {
                     if (section != 2 || optSeen) return null
                     optSeen = true
+                    onOptRecord(record, offset, section, index)
                 }
                 offset = record.nextOffset
             }
@@ -425,7 +595,7 @@ internal object DnsMessageValidator {
         val dataStart = fixedFieldsOffset + 10
         if (dataLength > message.size - dataStart) return null
         val dataEnd = dataStart + dataLength
-        if (!isValidRecordData(message, type, dataStart, dataEnd, ownerName.labels.isEmpty())) return null
+        if (!isValidRecordData(message, type, dataStart, dataEnd, ownerName.isRoot)) return null
 
         return ParsedRecord(
             type = type,

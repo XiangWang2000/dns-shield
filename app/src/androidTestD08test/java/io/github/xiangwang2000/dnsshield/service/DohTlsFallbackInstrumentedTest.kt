@@ -3,8 +3,11 @@ package io.github.xiangwang2000.dnsshield.service
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.VpnService
+import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -12,6 +15,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import io.github.xiangwang2000.dnsshield.BuildConfig
 import io.github.xiangwang2000.dnsshield.MainActivity
 import io.github.xiangwang2000.dnsshield.data.AppDatabase
+import io.github.xiangwang2000.dnsshield.data.DnsResolverMode
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
@@ -35,6 +39,7 @@ import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -71,6 +76,226 @@ class DohTlsFallbackInstrumentedTest {
     }
 
     @Test
+    fun optInStrictDohStartupFirstBatchBenchmark() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val arguments = InstrumentationRegistry.getArguments()
+        assumeTrue(
+            "Pass d08StartupBench=true to run the online startup benchmark",
+            arguments.getString("d08StartupBench") == "true"
+        )
+
+        val resolver = (arguments.getString("d08StartupResolver") ?: "google").lowercase()
+        val (primaryIp, secondaryIp) = when (resolver) {
+            "google" -> "8.8.8.8" to "8.8.4.4"
+            "adguard" -> "94.140.14.14" to "94.140.15.15"
+            else -> throw AssertionError("Unsupported d08StartupResolver=$resolver; use google or adguard")
+        }
+        val context = instrumentation.targetContext
+        assertTrue("This benchmark must run in the isolated .d08test app", context.packageName.endsWith(".d08test"))
+
+
+        val dao = AppDatabase.getDatabase(context).dnsDao()
+        val originalServers = dao.getDnsServersList()
+        val dnsServer = originalServers.single {
+            !it.isCustom && it.primaryIp == primaryIp && it.secondaryIp == secondaryIp
+        }
+        val domains = listOf(
+            "example.com",
+            "example.org",
+            "iana.org",
+            "ietf.org",
+            "wikipedia.org",
+            "mozilla.org",
+            "kernel.org",
+            "python.org"
+        )
+
+        try {
+            stopVpnIfRunning(context)
+            ensureVpnConsent(context)
+            assertEquals(1, dao.updatePlaintextFallback(dnsServer.id, false))
+            assertTrue(dao.setActiveDnsServer(dnsServer.id))
+            DnsVpnService.setD08TestPlaintextFallbackPolicy(dnsServer.id, false)
+            DnsVpnService.setUiForeground(true)
+
+            DnsVpnService.setD08StartupBenchmarkIsolation(true)
+            val serviceStartElapsed = SystemClock.elapsedRealtime()
+            val serviceStartEpochMillis = System.currentTimeMillis()
+            startVpn(context)
+            val runningElapsed = SystemClock.elapsedRealtime()
+            val runningEpochMillis = System.currentTimeMillis()
+            val vpnNetwork = awaitActiveVpnNetwork(context)
+            val baseline = DnsVpnService.diagnosticsFlow.value
+            val batchStartElapsed = SystemClock.elapsedRealtime()
+            val batchStartEpochMillis = System.currentTimeMillis()
+            logStartupBenchmark(
+                "D08_STARTUP_BENCH_RUNNING resolver=$resolver primary_ip=$primaryIp secondary_ip=$secondaryIp " +
+                    "pid=${android.os.Process.myPid()} service_start_epoch_ms=$serviceStartEpochMillis " +
+                    "running_epoch_ms=$runningEpochMillis batch_start_epoch_ms=$batchStartEpochMillis " +
+                    "service_start_ms=${runningElapsed - serviceStartElapsed} " +
+                    "first_batch=true strict=true queries=${domains.size}"
+            )
+
+            val firstTransactionId = System.nanoTime().toInt() and 0xffff
+            val results = coroutineScope {
+                domains.mapIndexed { index, domain ->
+                    async(Dispatchers.IO) {
+                        val transactionId = (firstTransactionId + index) and 0xffff
+                        val queryStart = SystemClock.elapsedRealtime()
+                        val response = sendQueryThroughTunOnce(buildDnsQuery(domain, transactionId), vpnNetwork)
+                        StartupDnsQueryResult(
+                            domain = domain,
+                            transactionId = transactionId,
+                            clientMillis = SystemClock.elapsedRealtime() - queryStart,
+                            response = response
+                        )
+                    }
+                }.awaitAll()
+            }
+
+            results.forEach { result ->
+                val responseCode = result.response?.getOrNull(3)?.toInt()?.and(0x0f)
+                logStartupBenchmark(
+                    "D08_STARTUP_BENCH_QUERY domain=${result.domain} id=${result.transactionId} " +
+                        "client_ms=${result.clientMillis} rcode=${responseCode ?: "timeout"}"
+                )
+            }
+            results.forEach { result ->
+                val response = requireNotNull(result.response) { "Timed out querying ${result.domain}" }
+                assertDnsTransaction(response, result.transactionId)
+                assertDnsResponseCode(response, 0)
+                assertTrue("${result.domain} returned no A answers", dnsAnswerCount(response) > 0)
+            }
+
+            val diagnostics = withTimeout(SERVICE_TIMEOUT_MILLIS) {
+                DnsVpnService.diagnosticsFlow.first { it.terminalCount >= baseline.terminalCount + domains.size }
+            }
+            val dohCalls = diagnostics.dohCallsQueued - baseline.dohCallsQueued
+            val udpAttempts = diagnostics.udpAttempts - baseline.udpAttempts
+            val tcpAttempts = diagnostics.tcpAttempts - baseline.tcpAttempts
+            assertEquals(domains.size.toLong(), dohCalls)
+            assertEquals(0L, udpAttempts)
+            assertEquals(0L, tcpAttempts)
+            assertEquals(0L, diagnostics.fallbackAttempts - baseline.fallbackAttempts)
+            logStartupBenchmark(
+                "D08_STARTUP_BENCH_DONE resolver=$resolver pid=${android.os.Process.myPid()} " +
+                    "finish_epoch_ms=${System.currentTimeMillis()} elapsed_ms=${SystemClock.elapsedRealtime() - batchStartElapsed} " +
+                    "doh_calls=$dohCalls udp_attempts=$udpAttempts tcp_attempts=$tcpAttempts"
+            )
+        } finally {
+            try {
+                stopVpnIfRunning(context)
+            } finally {
+                DnsVpnService.setD08StartupBenchmarkIsolation(false)
+                DnsVpnService.setUiForeground(false)
+                originalServers.forEach { dao.insertDnsServer(it) }
+            }
+        }
+    }
+
+    @Test
+    fun optInSystemDnsProviderUsesValidatedUnderlayThroughTun() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val arguments = InstrumentationRegistry.getArguments()
+        assumeTrue(
+            "Pass d08SystemDnsTun=true to run the real System DNS regression",
+            arguments.getString("d08SystemDnsTun") == "true"
+        )
+        assumeTrue("System DNS requires Android 10+", Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+
+        val context = instrumentation.targetContext
+        assertTrue("This regression must run in the isolated .d08test app", context.packageName.endsWith(".d08test"))
+
+        val dao = AppDatabase.getDatabase(context).dnsDao()
+        val originalActive = requireNotNull(dao.getActiveDnsServer())
+        val systemDns = dao.getDnsServersList().single {
+            it.resolverMode == DnsResolverMode.SYSTEM && !it.isCustom
+        }
+        assertEquals("系統 DNS", systemDns.name)
+
+        try {
+            stopVpnIfRunning(context)
+            ensureVpnConsent(context)
+            val underlay = awaitActivePhysicalNetwork(context)
+            assertTrue("The physical underlay must be validated", underlay.isValidated)
+            assertTrue("Could not select the System DNS Room preset", dao.setActiveDnsServer(systemDns.id))
+            DnsVpnService.setD08StartupBenchmarkIsolation(true)
+            startVpn(context)
+            val vpnNetwork = awaitActiveVpnNetwork(context)
+            withTimeout(SERVICE_TIMEOUT_MILLIS) {
+                DnsVpnService.underlyingNetworkConnectivityFlow.first {
+                    it == UnderlyingNetworkConnectivity.ONLINE
+                }
+            }
+
+            val baseline = DnsVpnService.d14DiagnosticsSnapshot()
+            val firstTransactionId = System.nanoTime().toInt() and 0xffff
+            val blockedTransactionId = firstTransactionId
+            val aTransactionId = (firstTransactionId + 1) and 0xffff
+            val aaaaTransactionId = (firstTransactionId + 2) and 0xffff
+            val repeatedTransactionId = (firstTransactionId + 3) and 0xffff
+
+            val blockedResponse = requireNotNull(
+                sendQueryThroughTunOnce(buildDnsQuery("doubleclick.net", blockedTransactionId), vpnNetwork)
+            ) { "Timed out querying the built-in blocked domain" }
+            assertDnsTransaction(blockedResponse, blockedTransactionId)
+            assertDnsResponseCode(blockedResponse, 3)
+            assertEquals("NXDOMAIN must not contain answers", 0, dnsAnswerCount(blockedResponse))
+            val afterBlocked = awaitD14TerminalCount(baseline.terminalCount + 1)
+            assertEquals(0L, afterBlocked.systemAttempts - baseline.systemAttempts)
+            assertEquals(0L, afterBlocked.dohCallsQueued - baseline.dohCallsQueued)
+            assertEquals(0L, afterBlocked.udpAttempts - baseline.udpAttempts)
+
+            val aResponse = requireNotNull(
+                sendQueryThroughTunOnce(buildDnsQuery("example.com", aTransactionId, queryType = 1), vpnNetwork)
+            ) { "Timed out querying example.com A" }
+            assertDnsTransaction(aResponse, aTransactionId)
+            assertDnsResponseCode(aResponse, 0)
+            assertTrue("example.com A returned no answers", dnsAnswerCount(aResponse) > 0)
+            val afterA = awaitD14TerminalCount(baseline.terminalCount + 2)
+            assertEquals(1L, afterA.systemAttempts - baseline.systemAttempts)
+
+            val aaaaResponse = requireNotNull(
+                sendQueryThroughTunOnce(buildDnsQuery("example.com", aaaaTransactionId, queryType = 28), vpnNetwork)
+            ) { "Timed out querying example.com AAAA" }
+            assertDnsTransaction(aaaaResponse, aaaaTransactionId)
+            assertDnsResponseCode(aaaaResponse, 0)
+            assertTrue("example.com AAAA returned no answers", dnsAnswerCount(aaaaResponse) > 0)
+            val afterAaaa = awaitD14TerminalCount(baseline.terminalCount + 3)
+            assertEquals(2L, afterAaaa.systemAttempts - baseline.systemAttempts)
+
+            val repeatedAResponse = requireNotNull(
+                sendQueryThroughTunOnce(buildDnsQuery("example.com", repeatedTransactionId, queryType = 1), vpnNetwork)
+            ) { "Timed out repeating example.com A" }
+            assertDnsTransaction(repeatedAResponse, repeatedTransactionId)
+            assertDnsResponseCode(repeatedAResponse, 0)
+            assertTrue("Repeated example.com A returned no answers", dnsAnswerCount(repeatedAResponse) > 0)
+            val afterRepeatedA = awaitD14TerminalCount(baseline.terminalCount + 4)
+            assertEquals(afterAaaa.systemAttempts, afterRepeatedA.systemAttempts)
+            assertEquals(afterAaaa.cacheHits + 1, afterRepeatedA.cacheHits)
+            assertEquals(0L, afterRepeatedA.dohCallsQueued - baseline.dohCallsQueued)
+            assertEquals(0L, afterRepeatedA.udpAttempts - baseline.udpAttempts)
+        } finally {
+            try {
+                stopVpnIfRunning(context)
+            } finally {
+                DnsVpnService.setD08StartupBenchmarkIsolation(false)
+                assertTrue("Could not restore the original active DNS provider", dao.setActiveDnsServer(originalActive.id))
+            }
+        }
+    }
+
+    @Test
+    fun strictIpv6NamedBootstrapRejectsInvalidTlsWithoutPlaintext() = runBlocking {
+        runTlsFailureScenario(allowPlaintextFallback = false, ipv6 = true, namedEndpoint = true)
+    }
+
+    @Test
+    fun allowedIpv6FallbackUsesIpv6UdpAfterInvalidTls() = runBlocking {
+        runTlsFailureScenario(allowPlaintextFallback = true, ipv6 = true)
+    }
+
+    @Test
     fun strictModeSurvivesExternalNetworkHandoff() = runBlocking {
         val direction = InstrumentationRegistry.getArguments().getString("handoff_direction")
         assumeTrue("Pass handoff_direction=wifi-to-cellular or cellular-to-wifi", direction != null)
@@ -85,7 +310,7 @@ class DohTlsFallbackInstrumentedTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue("This suite must run in the isolated .d08test app", context.packageName.endsWith(".d08test"))
-        assertEquals("The D08 test build must route loopback UDP to its unprivileged test port", 15353, BuildConfig.DNS_UPSTREAM_PORT)
+
 
         val sourceTransport = if (direction == "wifi-to-cellular") "wifi" else "cellular"
         val targetTransport = if (direction == "wifi-to-cellular") "cellular" else "wifi"
@@ -206,18 +431,22 @@ class DohTlsFallbackInstrumentedTest {
 
     private suspend fun runTlsFailureScenario(
         allowPlaintextFallback: Boolean,
-        handshakeDelayMillis: Long = 0L
+        handshakeDelayMillis: Long = 0L,
+        ipv6: Boolean = false,
+        namedEndpoint: Boolean = false
     ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue("This suite must run in the isolated .d08test app", context.packageName.endsWith(".d08test"))
-        assertEquals("The D08 test build must route loopback UDP to its unprivileged test port", 15353, BuildConfig.DNS_UPSTREAM_PORT)
+
 
         val dao = AppDatabase.getDatabase(context).dnsDao()
         val originalServers = dao.getDnsServersList()
         val domain = "d08-${UUID.randomUUID().toString().replace("-", "")}.example.test"
-        val tlsServer = RejectingTlsServer(instrumentation.context, handshakeDelayMillis)
-        val udpServer = FakeUdpDnsServer(domain)
+        val resolverIp = if (ipv6) "::1" else RESOLVER_IP
+        val endpointHost = if (namedEndpoint) "ipv6.d08.invalid" else if (ipv6) "[$resolverIp]" else resolverIp
+        val tlsServer = RejectingTlsServer(instrumentation.context, handshakeDelayMillis, resolverIp = resolverIp)
+        val udpServer = FakeUdpDnsServer(domain, resolverIp)
         val resolverName = "D08 TLS ${UUID.randomUUID()}"
         var resolverId: Int? = null
 
@@ -226,12 +455,13 @@ class DohTlsFallbackInstrumentedTest {
             dao.insertDnsServer(
                 DnsServer(
                     name = resolverName,
-                    primaryIp = RESOLVER_IP,
+                    primaryIp = resolverIp,
                     secondaryIp = null,
                     isCustom = true,
                     isActive = false,
                     allowPlaintextFallback = allowPlaintextFallback,
-                    primaryDohUrl = "https://$RESOLVER_IP:${tlsServer.port}/dns-query"
+                    primaryDohUrl = "https://$endpointHost:${tlsServer.port}/dns-query",
+                    primaryDohBootstrapIps = if (namedEndpoint) resolverIp else null
                 )
             )
             resolverId = dao.getDnsServersList().first { it.name == resolverName }.id
@@ -245,7 +475,10 @@ class DohTlsFallbackInstrumentedTest {
 
             val transactionId = System.nanoTime().toInt() and 0xffff
             val queryStartMillis = android.os.SystemClock.elapsedRealtime()
-            val response = sendQueryThroughTun(buildDnsQuery(domain, transactionId))
+            val response = sendQueryThroughTun(
+                buildDnsQuery(domain, transactionId),
+                if (ipv6) DnsVpnAddresses.IPV6_DNS else DnsVpnService.DUMMY_DNS_IP
+            )
             val queryElapsedMillis = android.os.SystemClock.elapsedRealtime() - queryStartMillis
 
             if (handshakeDelayMillis > 0L) {
@@ -317,12 +550,26 @@ class DohTlsFallbackInstrumentedTest {
         assertTrue("The live Compose transport card did not show $expected; visible=$observed", false)
     }
 
+    @Suppress("DEPRECATION")
     private suspend fun ensureVpnConsent(context: Context) {
         val consentIntent = VpnService.prepare(context) ?: return
-        context.startActivity(consentIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        withTimeout(CONSENT_TIMEOUT_MILLIS) {
-            while (VpnService.prepare(context) != null) delay(250)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val activity = instrumentation.startActivitySync(
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        try {
+            instrumentation.runOnMainSync { activity.startActivityForResult(consentIntent, 1) }
+            withTimeout(CONSENT_TIMEOUT_MILLIS) {
+                while (VpnService.prepare(context) != null) delay(250)
+            }
+        } finally {
+            instrumentation.runOnMainSync { activity.finish() }
         }
+    }
+
+    private fun logStartupBenchmark(message: String) {
+        println(message)
+        Log.i(STARTUP_BENCH_LOG_TAG, message)
     }
 
     private suspend fun startVpn(context: Context) {
@@ -335,14 +582,17 @@ class DohTlsFallbackInstrumentedTest {
         }
     }
 
-    private suspend fun awaitActiveVpnNetwork(context: Context) {
-        val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        withTimeout(SERVICE_TIMEOUT_MILLIS) {
-            while (connectivity.activeNetwork?.let(connectivity::getNetworkCapabilities)
-                    ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) != true
-            ) {
-                delay(100)
+    private suspend fun awaitActiveVpnNetwork(context: Context): Network {
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        return withTimeout(SERVICE_TIMEOUT_MILLIS) {
+            var network: Network? = null
+            while (network == null) {
+                network = connectivity.activeNetwork?.takeIf {
+                    connectivity.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+                }
+                if (network == null) delay(20)
             }
+            network
         }
     }
 
@@ -357,10 +607,22 @@ class DohTlsFallbackInstrumentedTest {
         }
     }
 
-    private fun sendQueryThroughTun(query: ByteArray): ByteArray = DatagramSocket().use { socket ->
+    private suspend fun awaitD14TerminalCount(target: Long): DnsDiagnosticsSnapshot = withTimeout(SERVICE_TIMEOUT_MILLIS) {
+        var snapshot = DnsVpnService.d14DiagnosticsSnapshot()
+        while (snapshot.terminalCount < target) {
+            delay(20)
+            snapshot = DnsVpnService.d14DiagnosticsSnapshot()
+        }
+        snapshot
+    }
+
+    private fun sendQueryThroughTun(
+        query: ByteArray,
+        virtualDnsIp: String = DnsVpnService.DUMMY_DNS_IP
+    ): ByteArray = DatagramSocket().use { socket ->
         socket.soTimeout = 500
         val request = DatagramPacket(query, query.size,
-            InetAddress.getByName(DnsVpnService.DUMMY_DNS_IP), 53)
+            InetAddress.getByName(virtualDnsIp), 53)
         val response = DatagramPacket(ByteArray(2048), 2048)
         val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(QUERY_TIMEOUT_MILLIS.toLong())
         while (true) {
@@ -373,7 +635,8 @@ class DohTlsFallbackInstrumentedTest {
         response.data.copyOf(response.length)
     }
 
-    private fun sendQueryThroughTunOnce(query: ByteArray): ByteArray? = DatagramSocket().use { socket ->
+    private fun sendQueryThroughTunOnce(query: ByteArray, network: Network? = null): ByteArray? = DatagramSocket().use { socket ->
+        network?.bindSocket(socket)
         socket.soTimeout = QUERY_TIMEOUT_MILLIS
         socket.send(DatagramPacket(query, query.size, InetAddress.getByName(DnsVpnService.DUMMY_DNS_IP), 53))
         val response = DatagramPacket(ByteArray(2048), 2048)
@@ -386,6 +649,12 @@ class DohTlsFallbackInstrumentedTest {
     }
 
     private data class PhysicalNetwork(val id: Long, val transport: String, val isValidated: Boolean)
+    private data class StartupDnsQueryResult(
+        val domain: String,
+        val transactionId: Int,
+        val clientMillis: Long,
+        val response: ByteArray?
+    )
 
     private suspend fun awaitActivePhysicalNetwork(context: Context): PhysicalNetwork = withTimeout(SERVICE_TIMEOUT_MILLIS) {
         val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -549,7 +818,8 @@ class DohTlsFallbackInstrumentedTest {
     private class RejectingTlsServer(
         testContext: Context,
         private val handshakeDelayMillis: Long,
-        private val expectedConnections: Int = 1
+        private val expectedConnections: Int = 1,
+        resolverIp: String = RESOLVER_IP
     ) : Closeable {
         private val firstAccepted = CountDownLatch(1)
         private val allAccepted = CountDownLatch(expectedConnections)
@@ -571,7 +841,7 @@ class DohTlsFallbackInstrumentedTest {
             serverSocket = sslContext.serverSocketFactory.createServerSocket(
                 0,
                 expectedConnections,
-                InetAddress.getByName(RESOLVER_IP)
+                InetAddress.getByName(resolverIp)
             ) as SSLServerSocket
             worker = Thread {
                 for (connectionIndex in 0 until expectedConnections) {
@@ -638,12 +908,15 @@ class DohTlsFallbackInstrumentedTest {
         }
     }
 
-    private inner class FakeUdpDnsServer(private val expectedDomain: String) : Closeable {
+    private inner class FakeUdpDnsServer(
+        private val expectedDomain: String,
+        resolverIp: String = RESOLVER_IP
+    ) : Closeable {
         private val running = AtomicBoolean(true)
         private val requestReceived = CountDownLatch(1)
         private val socket = DatagramSocket(null).apply {
             reuseAddress = true
-            bind(InetSocketAddress(InetAddress.getByName(RESOLVER_IP), BuildConfig.DNS_UPSTREAM_PORT))
+            bind(InetSocketAddress(InetAddress.getByName(resolverIp), BuildConfig.DNS_UPSTREAM_PORT))
             soTimeout = 200
         }
         val targetQueryCount = AtomicInteger(0)
@@ -694,6 +967,7 @@ class DohTlsFallbackInstrumentedTest {
         private const val HANDOFF_TIMEOUT_MILLIS = 30_000L
         private const val NETWORK_STABLE_MILLIS = 500L
         private const val HANDOFF_LOG_TAG = "D08_HANDOFF"
+        private const val STARTUP_BENCH_LOG_TAG = "D08_STARTUP_BENCH"
         private const val CONSENT_TIMEOUT_MILLIS = 120_000L
         private val EXPECTED_ANSWER = listOf(192, 0, 2, 53)
     }

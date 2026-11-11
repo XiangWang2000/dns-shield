@@ -40,14 +40,9 @@ internal object DohBootstrapDns : Dns {
         throw UnknownHostException("Refusing system DNS lookup for DoH bootstrap hostname: $hostname")
     }
 
-    private fun addresses(vararg literals: String): List<InetAddress> = literals.map(::ipv4Address)
-
-    private fun ipv4Address(literal: String): InetAddress {
-        val octets = literal.split('.')
-        require(octets.size == 4)
-        return InetAddress.getByAddress(ByteArray(4) { index -> octets[index].toInt().toByte() })
-    }
+    private fun addresses(vararg literals: String): List<InetAddress> = literals.map(::literalAddress)
 
     private fun literalAddress(literal: String): InetAddress =
-        if (isIpv4Literal(literal)) ipv4Address(literal) else InetAddress.getByName(literal)
+        IpAddressLiteral.parse(literal)?.toInetAddress()
+            ?: throw IllegalArgumentException("Invalid numeric bootstrap address: $literal")
 }

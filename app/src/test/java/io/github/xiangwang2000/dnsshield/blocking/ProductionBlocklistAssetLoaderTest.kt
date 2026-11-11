@@ -29,9 +29,10 @@ class ProductionBlocklistAssetLoaderTest {
 
         assertSame(first, second)
         assertEquals(1, reads)
-        assertEquals(102_241, first.entryCount)
+        assertEquals(247_497, first.entryCount)
         assertTrue(matcher.shouldBlock("doubleclick.net"))
         assertTrue(matcher.shouldBlock("app-measurement.com"))
+        assertTrue(matcher.shouldBlock("supportmetrics.apple.com"))
         listOf(
             "google.com",
             "youtube.com",
@@ -71,11 +72,11 @@ class ProductionBlocklistAssetLoaderTest {
             artifactSha256 = MessageDigest.getInstance("SHA-256")
                 .digest(artifact)
                 .toArtifactHexString(),
-            entryCount = 102_241
+            entryCount = 247_497
         )
 
         assertEquals(
-            102_241,
+            247_497,
             ProductionBlocklistArtifact.verify(artifact, contract).entryCount
         )
     }
@@ -85,9 +86,9 @@ class ProductionBlocklistAssetLoaderTest {
         val contract = ProductionBlocklistArtifact.contract
         val manifest = Files.readString(productionManifestPath())
 
-        assertEquals("badmojr/1Hosts Lite", contract.sourceName)
-        assertEquals("7a4588e87bcf7e86e0b8169d391b8422bd3c5d36", contract.sourceRevision)
-        assertEquals("2026-09-03", contract.sourceDate)
+        assertEquals("1Hosts Lite + AdGuard DNS Filter", contract.sourceName)
+        assertEquals("7a4588e87bcf7e86e0b8169d391b8422bd3c5d36+bef5669f914c1d2419e732feeefde79fcdca0eab", contract.sourceRevision)
+        assertEquals("2026-11-05", contract.sourceDate)
         assertTrue(manifest.contains("\"source_name\": \"${contract.sourceName}\""))
         assertTrue(manifest.contains("\"source_revision\": \"${contract.sourceRevision}\""))
         assertTrue(manifest.contains("\"source_date\": \"${contract.sourceDate}\""))

@@ -9,7 +9,13 @@ import json
 import urllib.request
 from pathlib import Path
 
-MAX_SOURCE_BYTES = 8 * 1024 * 1024
+from merge_active_blocklist_source import (
+    MAX_SOURCE_BYTES,
+    merge_sources,
+    validate_source_manifest,
+    verify_derived_source,
+    verify_raw_source,
+)
 
 
 def validate_manifest(manifest: dict[str, object]) -> str:
@@ -38,8 +44,11 @@ def validate_manifest(manifest: dict[str, object]) -> str:
 
 
 def verify_source(manifest: dict[str, object], source: bytes) -> None:
-    validate_manifest(manifest)
+    if manifest.get("schema_version") == 2:
+        verify_derived_source(manifest, source)
+        return
 
+    validate_manifest(manifest)
     if len(source) > MAX_SOURCE_BYTES:
         raise ValueError(f"Blocklist source exceeds {MAX_SOURCE_BYTES} bytes")
     if len(source) != manifest["source_size"]:
@@ -65,11 +74,21 @@ def verify_source(manifest: dict[str, object], source: bytes) -> None:
 
 def download_source(manifest_path: Path, output_path: Path) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    source_url = validate_manifest(manifest)
-    with urllib.request.urlopen(source_url, timeout=30) as response:
-        source = response.read(MAX_SOURCE_BYTES + 1)
-    verify_source(manifest, source)
+    if manifest.get("schema_version") == 2:
+        validate_source_manifest(manifest)
+        raw_sources = []
+        for pin in manifest["sources"]:
+            with urllib.request.urlopen(pin["source_url"], timeout=30) as response:
+                source = response.read(MAX_SOURCE_BYTES + 1)
+            verify_raw_source(pin, source)
+            raw_sources.append(source)
+        source = merge_sources(manifest, raw_sources[0], raw_sources[1])
+    else:
+        source_url = validate_manifest(manifest)
+        with urllib.request.urlopen(source_url, timeout=30) as response:
+            source = response.read(MAX_SOURCE_BYTES + 1)
 
+    verify_source(manifest, source)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(source)
 
