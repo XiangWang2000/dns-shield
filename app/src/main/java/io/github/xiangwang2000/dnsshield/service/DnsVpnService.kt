@@ -46,6 +46,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import java.nio.channels.Channels
 import java.io.FileInputStream
@@ -748,6 +749,9 @@ class DnsVpnService : VpnService() {
     private var systemDnsNetwork: Network? = null
     private var underlyingNetworkChangePending = false
     private val networkReadiness = DnsNetworkReadiness()
+    private val systemDnsRouteWaiters = Semaphore(
+        MAX_CONCURRENT_DNS_QUERIES * (1 + MAX_COALESCED_DNS_QUERY_WAITERS)
+    )
     private val queryAdmission = BoundedDnsQueryAdmission<DnsQueryKey>(
         maxUniqueKeys = MAX_CONCURRENT_DNS_QUERIES,
         maxWaitersPerKey = MAX_COALESCED_DNS_QUERY_WAITERS
@@ -2054,10 +2058,18 @@ class DnsVpnService : VpnService() {
     private fun handleDnsQuery(
         dnsPacket: DnsClientQuery,
         receivedAtNanos: Long,
-        responseWriter: DnsResponseWriter
+        responseWriter: DnsResponseWriter,
+        request: DnsDiagnosticMetrics.Request = beginDnsRequest(receivedAtNanos),
+        resumedFrom: DnsStateSnapshot? = null
     ) {
-        val request = beginDnsRequest(receivedAtNanos)
         val dnsState = snapshotDnsState()
+        if (resumedFrom != null &&
+            (dnsState.resolverGeneration != resumedFrom.resolverGeneration ||
+                dnsState.policyAssembly !== resumedFrom.policyAssembly)
+        ) {
+            failDnsQuery(dnsPacket, responseWriter, request)
+            return
+        }
         val queryKey = DnsQueryKey(
             bytes = dnsPacket.payload,
             resolverGeneration = dnsState.resolverGeneration,
@@ -2068,10 +2080,51 @@ class DnsVpnService : VpnService() {
 
         val activeScope = tunnelScope
         if (activeScope == null || !activeScope.isActive) {
-            sendServFailResponse(dnsPacket, responseWriter)
-            completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
+            failDnsQuery(dnsPacket, responseWriter, request)
             return
         }
+
+        if (resumedFrom == null && dnsState.server.resolverMode == DnsResolverMode.SYSTEM &&
+            dnsState.systemDnsNetwork == null
+        ) {
+            // Always-on can bring up the tunnel before Android selects an underlay.
+            // These queries have not been sent, so they can use the next route and
+            // must take a new snapshot without extending their original deadline.
+            if (!systemDnsRouteWaiters.tryAcquire()) {
+                rejectDnsOverload(dnsPacket, responseWriter, request)
+                return
+            }
+            val deadline = DnsRequestDeadline.fromReceivedAt(receivedAtNanos)
+            activeScope.launch {
+                val ready = networkReadiness.awaitReady(deadline) {
+                    synchronized(dnsStateLock) {
+                        when {
+                            resolverGeneration != dnsState.resolverGeneration ||
+                                domainPolicy.snapshot() !== dnsState.policyAssembly ->
+                                DnsNetworkReadiness.State.STALE
+                            systemDnsNetwork == null || underlyingNetworkChangePending ->
+                                DnsNetworkReadiness.State.WAITING
+                            else -> DnsNetworkReadiness.State.READY
+                        }
+                    }
+                }
+                if (ready) {
+                    handleDnsQuery(dnsPacket, receivedAtNanos, responseWriter, request, resumedFrom = dnsState)
+                } else {
+                    failDnsQuery(dnsPacket, responseWriter, request)
+                }
+            }.invokeOnCompletion { completion ->
+                systemDnsRouteWaiters.release()
+                if (completion != null) completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
+            }
+            return
+        }
+
+        if (!isCurrentDnsState(dnsState)) {
+            failDnsQuery(dnsPacket, responseWriter, request)
+            return
+        }
+        recordUserAllowedDomain(dnsPacket.query.question.domainName ?: "Unknown", dnsState)
 
         val lease = when (val admission = queryAdmission.tryAdmit(queryKey)) {
             is DnsQueryAdmission.Leader -> admission.lease
@@ -2080,14 +2133,7 @@ class DnsVpnService : VpnService() {
                 admission.lease
             }
             DnsQueryAdmission.Rejected -> {
-                recordOverload(request)
-                sendServFailResponse(dnsPacket, responseWriter)
-                completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
-                if (isUiForeground || backgroundFailureLogLimiter.tryAcquire()) {
-                    addDnsQueryLog(important = true) {
-                        "✗ 有界請求容量已滿 [ID=${formatTxId(dnsPacket.payload)}]，已立即回覆 SERVFAIL"
-                    }
-                }
+                rejectDnsOverload(dnsPacket, responseWriter, request)
                 return
             }
         }
@@ -2141,6 +2187,30 @@ class DnsVpnService : VpnService() {
         }
         requestJob.start()
     }
+
+    private fun failDnsQuery(
+        packet: DnsClientQuery,
+        responseWriter: DnsResponseWriter,
+        request: DnsDiagnosticMetrics.Request
+    ) {
+        sendServFailResponse(packet, responseWriter)
+        completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
+    }
+
+    private fun rejectDnsOverload(
+        packet: DnsClientQuery,
+        responseWriter: DnsResponseWriter,
+        request: DnsDiagnosticMetrics.Request
+    ) {
+        recordOverload(request)
+        failDnsQuery(packet, responseWriter, request)
+        if (isUiForeground || backgroundFailureLogLimiter.tryAcquire()) {
+            addDnsQueryLog(important = true) {
+                "✗ 有界請求容量已滿 [ID=${formatTxId(packet.payload)}]，已立即回覆 SERVFAIL"
+            }
+        }
+    }
+
     private fun tryHandleFastPath(
         dnsPacket: DnsClientQuery,
         dnsState: DnsStateSnapshot,
@@ -2180,15 +2250,7 @@ class DnsVpnService : VpnService() {
             completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
             return true
         }
-        if (!isBlocked) {
-            if (!isCurrentDnsState(dnsState)) {
-                sendServFailResponse(dnsPacket, responseWriter)
-                completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
-                return true
-            }
-            recordUserAllowedDomain(domain, dnsState)
-            return false
-        }
+        if (!isBlocked) return false
 
         val blockedResponse = DnsMessageValidator.buildNxDomainResponse(dnsPacket.query)
         if (!sendResolvedResponseIfCurrent(dnsPacket, dnsState, blockedResponse, responseWriter)) {
