@@ -73,8 +73,9 @@ class ReleaseGuardsTest(unittest.TestCase):
             f"$candidate = [pscustomobject]@{{ApplicationId='{candidate_application_id}'; VersionCode={candidate_version_code}}}; "
             "$baselineSigners = @('" + "a" * 64 + "'); "
             "$candidateSigners = @('" + "','".join(candidate_signers) + "'); "
-            "Assert-ReleaseCompatibility -BaselineMetadata $baseline -CandidateMetadata $candidate "
-            "-BaselineSignerDigests $baselineSigners -CandidateSignerDigests $candidateSigners"
+            "try { Assert-ReleaseCompatibility -BaselineMetadata $baseline -CandidateMetadata $candidate "
+            "-BaselineSignerDigests $baselineSigners -CandidateSignerDigests $candidateSigners } "
+            "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
         )
         return subprocess.run(
             [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
