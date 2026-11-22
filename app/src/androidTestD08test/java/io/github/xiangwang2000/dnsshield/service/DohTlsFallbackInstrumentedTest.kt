@@ -408,7 +408,7 @@ class DohTlsFallbackInstrumentedTest {
             tlsServer.assertExpectedConnectionsCompleted()
             assertEquals("Strict TLS mode sent the hostname over plaintext UDP", 0, udpServer.targetQueryCount.get())
             assertEquals(null, udpServer.failure.get())
-            assertEquals("僅加密 · DoH 不可用 · SERVFAIL", DnsVpnService.dnsTransportStatusFlow.value)
+            assertEquals(DnsTransportStatus.UNAVAILABLE_STRICT, DnsVpnService.dnsTransportStatusFlow.value)
             assertTrue("No validated $targetTransport network remained after handoff", switchedNetworks.any { it.transport == targetTransport })
         } finally {
             try {
@@ -491,9 +491,9 @@ class DohTlsFallbackInstrumentedTest {
             assertDnsTransaction(response, transactionId)
             assertDnsResponseCode(response, if (allowPlaintextFallback) 0 else 2)
             val expectedTransportStatus = if (allowPlaintextFallback) {
-                "UDP/53 明文降級"
+                DnsTransportStatus.PLAINTEXT_UDP
             } else {
-                "僅加密 · DoH 不可用 · SERVFAIL"
+                DnsTransportStatus.UNAVAILABLE_STRICT
             }
             assertEquals(expectedTransportStatus, DnsVpnService.dnsTransportStatusFlow.value)
             if (allowPlaintextFallback) {
@@ -506,7 +506,7 @@ class DohTlsFallbackInstrumentedTest {
             }
             assertEquals(null, udpServer.failure.get())
             if (allowPlaintextFallback && handshakeDelayMillis == 0L) {
-                assertTransportStatusRendered(context, expectedTransportStatus)
+                assertTransportStatusRendered(context, expectedTransportStatus.displayText())
             }
         } finally {
             try {

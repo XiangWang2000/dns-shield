@@ -26,7 +26,7 @@ class DnsDiagnosticMetricsTest {
         assertTrue(metrics.complete(cacheHit, DnsClientTerminalOutcome.RESOLVED, completedAtNanos = 1_000_000L))
         assertTrue(metrics.complete(coalesced, DnsClientTerminalOutcome.RESOLVED, completedAtNanos = 2_000_000L))
         assertTrue(metrics.complete(overloaded, DnsClientTerminalOutcome.FAILED, completedAtNanos = 3_000_000L))
-        assertTrue(metrics.complete(blocked, DnsClientTerminalOutcome.BLOCKED, completedAtNanos = 4_000_000L, savedBytes = 500L))
+        assertTrue(metrics.complete(blocked, DnsClientTerminalOutcome.BLOCKED, completedAtNanos = 4_000_000L))
         assertTrue(metrics.complete(rejected, DnsClientTerminalOutcome.REJECTED, completedAtNanos = 5_000_000L))
 
         assertFalse(metrics.complete(overloaded, DnsClientTerminalOutcome.RESOLVED, completedAtNanos = 6_000_000L))
@@ -47,7 +47,6 @@ class DnsDiagnosticMetricsTest {
         assertEquals(1L, snapshot.udpRetryAttempts)
         assertEquals(0L, snapshot.tcpAttempts)
         assertEquals(1L, snapshot.fallbackAttempts)
-        assertEquals(500L, snapshot.estimatedSavedBytes)
         assertEquals(0L, snapshot.pending)
         assertEquals(5, snapshot.latency.sampleCount)
     }

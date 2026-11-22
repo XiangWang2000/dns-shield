@@ -122,8 +122,12 @@ class Ipv6ControlledNetworkTest {
                 assertTrue(addresses(response).contains(ip(synthesized)))
                 assertTrue(http(synthesized, 18080).contains("DNS_SHIELD_NAT64_IPV4_OK"))
             } else {
-                assertTrue("Strict mode did not use DoH", DnsVpnService.dnsTransportStatusFlow.value.contains("DoH"))
-                assertFalse(DnsVpnService.dnsTransportStatusFlow.value.contains("明文"))
+                val transport = DnsVpnService.dnsTransportStatusFlow.value
+                assertTrue("Strict mode did not use DoH", transport == DnsTransportStatus.ENCRYPTED_HTTPS)
+                assertFalse(
+                    transport == DnsTransportStatus.PLAINTEXT_UDP ||
+                        transport == DnsTransportStatus.PLAINTEXT_TCP
+                )
             }
             assertTrue(http(requireNotNull(resolver), 18081).contains("DNS_SHIELD_NATIVE_IPV6_OK"))
             if (profile == "dual-stack") {

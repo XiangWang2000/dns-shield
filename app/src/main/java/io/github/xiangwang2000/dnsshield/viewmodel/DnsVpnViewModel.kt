@@ -22,6 +22,7 @@ import io.github.xiangwang2000.dnsshield.data.BypassedApp
 import io.github.xiangwang2000.dnsshield.data.DnsResolverMode
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import io.github.xiangwang2000.dnsshield.service.DnsDiagnosticsSnapshot
+import io.github.xiangwang2000.dnsshield.service.DnsTransportStatus
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
 import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
@@ -51,7 +52,7 @@ data class DnsShieldUiState(
     val vpnLifecycleState: VpnLifecycleState = VpnLifecycleState.STOPPED,
     val diagnostics: DnsDiagnosticsSnapshot = DnsDiagnosticsSnapshot(),
     val activeDns: String = "None",
-    val dnsTransportStatus: String = "尚無上游查詢",
+    val dnsTransportStatus: DnsTransportStatus = DnsTransportStatus.IDLE,
     val logs: List<String> = emptyList(),
     val userDomainRules: List<UserDomainRuleEntity> = emptyList(),
     val domainRuleSearchQuery: String = "",
@@ -70,7 +71,6 @@ data class DnsShieldUiState(
 ) {
     val queryCount: Long get() = diagnostics.received
     val blockedAds: Long get() = diagnostics.blocked
-    val savedBytes: Long get() = diagnostics.estimatedSavedBytes
 }
 
 data class VpnMetricsState(
@@ -81,7 +81,7 @@ data class VpnMetricsState(
 data class VpnStatusAndDnsState(
     val lifecycleState: VpnLifecycleState,
     val activeDns: String,
-    val dnsTransportStatus: String,
+    val dnsTransportStatus: DnsTransportStatus,
     val dnsServers: List<DnsServer>,
     val activeDnsServer: DnsServer?,
     val networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN
@@ -294,7 +294,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
                 changed.any { isPackageInstalled(it, packageManager) }
             }
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val installedAppsWithExclusions = combine(_installedApps, _bypassedApps) { apps, saved ->
         val bypassedPackages = saved.orEmpty().mapTo(mutableSetOf()) { it.packageName }
