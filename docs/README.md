@@ -34,6 +34,7 @@
 - [D12 isolated device acceptance](archive/d12-device-acceptance.md)
 - [D14 device validation](archive/d14-device-validation.md)
 - [D15 Always-on／系統恢復驗證紀錄](archive/d15-device-acceptance.md)
+- [Issue #73 入口登入與重開機驗收（2026-11-12）](archive/issue-73-controlled-validation.md)
 - [Issue #98 / R20: DNS response parse evaluation](archive/issue98-r20-response-parse-evaluation.md)
 - [網路變更復原的能力邊界](archive/network-change-recovery.md)
 - [R01 TCP session cancellation validation (#64)](archive/r01-tcp-session-validation.md)
