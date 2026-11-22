@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Release 建置啟用 R8 程式碼縮減與資源縮減；同一份 Release APK 由 16.82 MB 降至 5.44 MB。JNI 進入點與 ViewModel 建構子保留規則已確認。
+- 上游傳輸狀態改為結構化狀態，畫面文字與顏色不再依字串內容判斷。
+- App 例外清單改用 MAIN／LAUNCHER 套件可見性查詢，移除 `QUERY_ALL_PACKAGES`；同時封鎖明文 HTTP 連線。
+- 連線診斷只顯示成功率、延遲與快取摘要，其餘統計改為展開顯示；App 圖示改用 Compose painter，減少清單內 View interop。
+
+### Fixed
+
+- 降低每筆查詢的日誌格式化成本：txid 格式化快約 27 倍、時間戳快約 6 倍（JVM 微基準，實機未量測）。
+- Release 版不再把查詢網域寫入 Logcat。
+- Android 13 以上開啟防護前會請求通知權限；拒絕時仍會啟動 VPN，並在畫面提示可前往設定。
+- 多筆 `isActive` 解析器時，改以固定順序選取第一筆。
+- 移除未被 UI 使用、以網域字串推測的「節省流量」統計。
+
 ## 1.5.0 - 2026-11-11
 
 ### Added

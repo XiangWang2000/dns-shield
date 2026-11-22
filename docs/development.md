@@ -41,7 +41,7 @@ verify.ps1 會檢查 PowerShell 腳本語法、Python 工具、production blockl
 | [app/src/main/assets/](../app/src/main/assets) | 隨 APK 發布並由工具驗證的 production 資產。 |
 | [tools/](../tools)、[app/src/test/](../app/src/test)、app/src/androidTest variants | 離線資產工具、CI、JVM 與隔離裝置測試。 |
 
-DNS Shield 是 DNS 層工具：VPN 只攔截送往本機虛擬 IPv4／IPv6 DNS 位址的 UDP／TCP 53 查詢，其餘 IPv4／IPv6 流量仍轉送至底層網路。App 直接送往其他外部 DNS 位址的查詢、App 自行使用的 DoH／DoT 與直接 IP 連線不會被攔截。App 例外清單只用於使用者選擇略過 VPN 的 App；QUERY_ALL_PACKAGES 用途與資料邊界見 [隱私說明](../PRIVACY.md)。規則順序與 Public Suffix 邊界見 [blocking policy](blocking-policy.md)。
+DNS Shield 是 DNS 層工具：VPN 只攔截送往本機虛擬 IPv4／IPv6 DNS 位址的 UDP／TCP 53 查詢，其餘 IPv4／IPv6 流量仍轉送至底層網路。App 直接送往其他外部 DNS 位址的查詢、App 自行使用的 DoH／DoT 與直接 IP 連線不會被攔截。App 例外清單只用於使用者選擇略過 VPN 的 App；套件可見性只查詢 MAIN／LAUNCHER 活動，不要求 `QUERY_ALL_PACKAGES`，資料邊界見 [隱私說明](../PRIVACY.md)。規則順序與 Public Suffix 邊界見 [blocking policy](blocking-policy.md)。
 
 ## 驗證範圍與 CI
 
@@ -100,6 +100,8 @@ Public Suffix source、格式、production gate、APK staging gate 和目前 run
 ## 正式簽章與發版
 
 新版本需在 app/build.gradle.kts 更新 versionName 並遞增 versionCode，沿用原有 applicationId 與簽章金鑰。腳本不會自動調整版本或發布 GitHub Release；發版時需一併提供 APK、SHA-256 sidecar 與 `blocklist-source.zip`。來源壓縮檔需包含兩份固定的原始清單、合併後的網域文字、重建工具、manifest 及授權告知。
+
+Release 建置已啟用 R8 程式碼縮減與資源縮減（`isMinifyEnabled`、`isShrinkResources`）。新增 JNI、反射，或只由 AndroidManifest／資源名稱參照的類別時，需同步確認 `proguard-rules.pro` 與依賴的 consumer rules；本次建置的對應檔在 `app/build/outputs/mapping/release/mapping.txt`，屬本機產物，不進版本控制。
 
 首次建立上傳金鑰時執行：
 

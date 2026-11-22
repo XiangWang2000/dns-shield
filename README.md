@@ -25,7 +25,7 @@ Android 10 以上可選「系統 DNS」，跟著目前連上的 Wi-Fi 或行動�
 
 1. 從 [GitHub Releases](https://github.com/XiangWang2000/dns-shield/releases) 下載並安裝 APK。
 2. 開啟 DNS Shield，選擇解析器；使用其他解析器時可再設定加密模式。
-3. 啟用防護，同意 Android VPN 權限，確認 App 顯示已啟用與系統 VPN 指示。
+3. 啟用防護，同意 Android VPN 權限，確認 App 顯示已啟用與系統 VPN 指示。Android 13 以上會另外詢問通知權限；即使拒絕，防護仍會運作，只是不顯示常駐通知。
 
 > 本頁依目前原始碼介紹功能；已發布 APK 可能尚未包含所有新功能，請以 [GitHub Releases](https://github.com/XiangWang2000/dns-shield/releases) 的版本說明為準。直接升級需使用相同簽名的 APK。
 

@@ -24,6 +24,26 @@ Android runner 會安裝 Debug 與 androidTest APK，只執行指定 benchmark t
 
 結果檔為 build/public-suffix.validation.json 和 build/public-suffix.benchmark.json。
 
+## Host JVM：DNS 熱路徑
+
+適用於比較每筆查詢路徑上的封包處理、回應解析與日誌格式化成本。三個測試都在一般 JVM 執行，不需要 adb；結果只描述 host JVM，不是 Android 實機耗電或延遲。
+
+| 測試類別 | 量測內容 | 結果標記 |
+| --- | --- | --- |
+| DnsHotPathBenchmarkTest | 查詢／回應封包處理 | DNS_HOTPATH_BENCHMARK |
+| DnsResponseParseBenchmarkTest | DNS response 解析 | DNS_RESPONSE_PARSE_BENCHMARK |
+| DnsLogFormattingBenchmarkTest | txid 與時間戳格式化 | DNS_LOG_FORMAT_BENCHMARK |
+
+`tools/benchmark_dns_hotpath.ps1` 會用 `--rerun-tasks` 執行第一個測試並印出結果標記；其餘兩個可直接指定測試類別：
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/benchmark_dns_hotpath.ps1
+.\gradlew.bat :app:testDebugUnitTest --tests "*DnsResponseParseBenchmarkTest" --rerun-tasks
+.\gradlew.bat :app:testDebugUnitTest --tests "*DnsLogFormattingBenchmarkTest" --rerun-tasks
+~~~
+
+輸出位於 app/build/test-results/testDebugUnitTest/TEST-*.xml 的 `<system-out>`；沒有時間門檻，請比較相同機器、相同 JVM、相鄰回合的相對倍率，不要跨裝置推論。
+
 ## Android：Public Suffix resolver
 
 工具：tools/benchmark-public-suffix-android.ps1。
