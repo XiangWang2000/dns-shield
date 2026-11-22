@@ -10,7 +10,7 @@ Windows 請使用 Android Studio JBR。Android runner 另需 Android SDK build t
 
 未指定 -Serial 時，Android runner 預期恰好一台已連線裝置。多台裝置時請明確指定 adb serial。
 
-Android runner 會安裝 Debug 與 androidTest APK，只執行指定 benchmark test class，並將裝置 JSON 拉回 build/。這些 runner 使用一般 Debug applicationId（不是 D04／D07 隔離套件）；請在專用測試裝置執行，避免覆蓋同簽章的既有安裝。
+Android runner 會安裝 Debug 與 androidTest APK，只執行指定 benchmark test class，並將裝置 JSON 拉回 build/。這些 runner 使用一般 Debug applicationId（不是 D03／D04／D08 等隔離套件）；請在專用測試裝置執行，避免覆蓋同簽章的既有安裝。
 
 ## Host JVM：Public Suffix resolver
 

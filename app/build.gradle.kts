@@ -47,13 +47,6 @@ val d08InstrumentationRequested = gradle.startParameter.taskNames.any {
   it.contains("D08test", ignoreCase = true)
 }
 
-val d07InstrumentationRequested = gradle.startParameter.taskNames.any {
-  it.contains("D07test", ignoreCase = true)
-}
-val d12InstrumentationRequested = gradle.startParameter.taskNames.any {
-  it.contains("D12test", ignoreCase = true)
-}
-
 android {
   namespace = "io.github.xiangwang2000.dnsshield"
   sourceSets.getByName("main").assets.directories.add(rootProject.file("third_party").absolutePath)
@@ -75,8 +68,6 @@ android {
     buildConfigField("int", "DNS_UPSTREAM_PORT", "53")
     if (d15InstrumentationRequested) testBuildType = "d15test"
     if (d08InstrumentationRequested) testBuildType = "d08test"
-    if (d07InstrumentationRequested) testBuildType = "d07test"
-    if (d12InstrumentationRequested) testBuildType = "d12test"
   }
 
   signingConfigs {
@@ -153,17 +144,6 @@ android {
       initWith(getByName("debug"))
       applicationIdSuffix = ".d08test"
       buildConfigField("int", "DNS_UPSTREAM_PORT", "15353")
-      matchingFallbacks += listOf("debug")
-    }
-    create("d07test") {
-      initWith(getByName("debug"))
-      applicationIdSuffix = ".d07test"
-      matchingFallbacks += listOf("debug")
-      buildConfigField("int", "DNS_UPSTREAM_PORT", "15353")
-    }
-    create("d12test") {
-      initWith(getByName("debug"))
-      applicationIdSuffix = ".d12test"
       matchingFallbacks += listOf("debug")
     }
   }

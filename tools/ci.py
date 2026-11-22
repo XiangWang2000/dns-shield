@@ -65,7 +65,7 @@ def select_scope(paths):
             variants.add(VARIANT_DIRS[parts[2]])
         else:
             # Shared androidTest, build/CI logic, native code and unknown paths
-            # retain the full gate. D07/D12 remain outside the historical gate.
+            # retain the full gate.
             return "Full", []
     return ("Selected", sorted(variants)) if variants else ("Core", [])
 

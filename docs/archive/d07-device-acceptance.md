@@ -2,6 +2,8 @@
 
 > 歷史驗證紀錄：保留當時的條件、指令與結論。現行操作請看[開發指南](../development.md)與[文件索引](../README.md)。
 
+> **已退役（2026-11-22）**：`d07test` 建置變體與隔離測試已移除，下列建置與 `adb instrument` 指令不再可用。保留本文作為歷史證據。
+
 Related: #40, #33, PR #55.
 
 Set JAVA_HOME to Android Studio JBR and ANDROID_HOME to the installed Android SDK.
