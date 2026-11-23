@@ -71,6 +71,7 @@ class DnsServerMigrationTest {
         assertNull(existingResolver.secondaryDohUrl)
         assertSystemDnsPreset(servers.single { it.resolverMode == DnsResolverMode.SYSTEM })
         assertPreservedBypassAndVersion()
+        assertDomainRuleSchema()
     }
 
     @Test
@@ -208,5 +209,36 @@ class DnsServerMigrationTest {
                 assertEquals("Mail", cursor.getString(0))
                 assertEquals(1, cursor.getInt(1))
             }
+    }
+
+    private fun assertDomainRuleSchema() {
+        val sql = requireNotNull(database).openHelper.readableDatabase
+        val columns = mutableSetOf<String>()
+        sql.query("PRAGMA table_info(`user_domain_rules`)").use { cursor ->
+            while (cursor.moveToNext()) columns += cursor.getString(1)
+        }
+        assertEquals(
+            setOf("id", "domain", "action", "includeSubdomains", "revision", "updatedAtMillis"),
+            columns
+        )
+
+        var uniqueRuleIndexFound = false
+        sql.query("PRAGMA index_list(`user_domain_rules`)").use { cursor ->
+            while (cursor.moveToNext()) {
+                if (cursor.getInt(2) != 1) continue
+                val indexName = cursor.getString(1)
+                val indexedColumns = mutableSetOf<String>()
+                sql.query("PRAGMA index_info(`$indexName`)").use { indexCursor ->
+                    while (indexCursor.moveToNext()) indexedColumns += indexCursor.getString(2)
+                }
+                if (indexedColumns == setOf("domain", "includeSubdomains")) {
+                    uniqueRuleIndexFound = true
+                }
+            }
+        }
+        assertTrue(
+            "A unique composite domain/scope index must prevent duplicate patterns",
+            uniqueRuleIndexFound
+        )
     }
 }

@@ -191,12 +191,13 @@ fun DnsShieldDashboard(
             VpnLifecycleState.STOPPING -> Unit
             VpnLifecycleState.STOPPED,
             VpnLifecycleState.FAILED -> {
-                val needsNotificationPermission =
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                        ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.POST_NOTIFICATIONS
-                        ) != PackageManager.PERMISSION_GRANTED
+                val needsNotificationPermission = requiresNotificationPermission(
+                    sdkInt = Build.VERSION.SDK_INT,
+                    permissionGranted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) == PackageManager.PERMISSION_GRANTED
+                )
                 if (needsNotificationPermission) {
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 } else {
@@ -554,6 +555,9 @@ fun StatCard(title: String, value: String, modifier: Modifier = Modifier) {
         Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     }
 }
+
+internal fun requiresNotificationPermission(sdkInt: Int, permissionGranted: Boolean): Boolean =
+    sdkInt >= Build.VERSION_CODES.TIRAMISU && !permissionGranted
 
 private fun vpnNotificationsEnabled(context: android.content.Context): Boolean {
     if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return false

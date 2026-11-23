@@ -1,6 +1,8 @@
 package io.github.xiangwang2000.dnsshield.blocking
 
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -63,6 +65,29 @@ class DomainPolicyAssemblerTest {
         assertTrue(rejected.reason.isNotBlank())
         assertTrue(assembly.matcher.shouldBlock("admob.com"))
         assertFalse(assembly.matcher.shouldBlock("github.com"))
+    }
+
+    @Test
+    fun rejectsUnsortedCompiledArtifactBeforeAddingMatcher() {
+        val artifact = ByteBuffer.allocate(40)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .apply {
+                put("DNSHBL01".toByteArray(StandardCharsets.US_ASCII))
+                putInt(1)
+                putInt(1)
+                putLong(2L)
+                putLong(Long.MIN_VALUE)
+                putLong(Long.MAX_VALUE)
+                flip()
+            }
+        val file = File.createTempFile("dns-shield-unsorted-", ".bin").apply {
+            writeBytes(artifact.array())
+            deleteOnExit()
+        }
+
+        val assembly = DomainPolicyAssembler.assemble(compiledBlocklistFile = file)
+
+        assertIs<CompiledBlocklistStatus.Rejected>(assembly.compiledBlocklistStatus)
     }
 
     @Test
