@@ -290,27 +290,14 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             withContext(Dispatchers.IO) {
                 val packageManager = getApplication<Application>().packageManager
                 val (saved, applied) = snapshot
-                val changed = (saved - applied) + (applied - saved)
-                changed.any { isPackageInstalled(it, packageManager) }
+                hasVisibleBypassChange(saved, applied) { isPackageInstalled(it, packageManager) }
             }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
-    private val installedAppsWithExclusions = combine(_installedApps, _bypassedApps) { apps, saved ->
-        val bypassedPackages = saved.orEmpty().mapTo(mutableSetOf()) { it.packageName }
-        apps.map { app -> app.copy(isBypassed = app.packageName in bypassedPackages) }
-    }
+    private val installedAppsWithExclusions = combine(_installedApps, _bypassedApps, ::applyBypassState)
 
-    val filteredApps = combine(installedAppsWithExclusions, _searchQuery) { apps, query ->
-        if (query.isBlank()) {
-            apps
-        } else {
-            apps.filter {
-                it.appName.contains(query, ignoreCase = true) ||
-                        it.packageName.contains(query, ignoreCase = true)
-            }
-        }
-    }.stateIn(
+    val filteredApps = combine(installedAppsWithExclusions, _searchQuery, ::filterApps).stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
