@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.net.VpnService
 import android.os.Build
 import android.os.Debug
 import android.os.Process
@@ -15,22 +14,18 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.xiangwang2000.dnsshield.BuildConfig
 import io.github.xiangwang2000.dnsshield.D14DeviceTestApplication
-import io.github.xiangwang2000.dnsshield.D14VpnConsentActivity
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.Callable
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.ceil
 import org.json.JSONArray
@@ -63,7 +58,7 @@ class D14TunEndToEndBenchmarkTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext.applicationContext
         assertEquals("io.github.xiangwang2000.dnsshield.d14test", context.packageName)
-        ensureVpnConsent(context)
+        ensureD14VpnConsent(context)
 
         val upstream = FakeDnsUpstream()
         val preferences = context.getSharedPreferences(DnsVpnService.D14_TEST_PREFS_NAME, Context.MODE_PRIVATE)
@@ -603,23 +598,6 @@ class D14TunEndToEndBenchmarkTest {
         throw AssertionError("Timed out waiting for VPN lifecycle $expected; current=${DnsVpnService.lifecycleStateFlow.value}")
     }
 
-    private fun ensureVpnConsent(context: Context) {
-        if (VpnService.prepare(context) == null) return
-        context.startActivity(
-            Intent(context, D14VpnConsentActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
-        val deadline = SystemClock.elapsedRealtime() + VPN_CONSENT_TIMEOUT_MS
-        while (SystemClock.elapsedRealtime() < deadline) {
-            if (VpnService.prepare(context) == null) return
-            SystemClock.sleep(250L)
-        }
-        assertNull(
-            "Approve the Android VPN consent prompt for the isolated .d14test package to continue.",
-            VpnService.prepare(context)
-        )
-    }
-
     @Suppress("DEPRECATION")
     private fun waitForSelectedValidatedPhysicalNetwork(
         context: Context,
@@ -914,119 +892,6 @@ class D14TunEndToEndBenchmarkTest {
         val response: ByteArray,
         val elapsedMillis: Double
     )
-
-    private class FakeDnsUpstream : AutoCloseable {
-        private val running = AtomicBoolean(true)
-        private val socket = DatagramSocket(null).apply {
-            reuseAddress = true
-            bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0))
-            soTimeout = 500
-        }
-        val port: Int = socket.localPort
-        val totalRequests = AtomicInteger()
-        val droppedRequests = AtomicInteger()
-        val droppedDomains = ConcurrentHashMap.newKeySet<String>()
-        val answeredDomains = ConcurrentHashMap.newKeySet<String>()
-        val answerGates = ConcurrentHashMap<String, CountDownLatch>()
-        @Volatile var failure: Throwable? = null
-        @Volatile var delayDomain: String? = null
-        @Volatile var delayMillis: Long = 0L
-        private val requestCounts = ConcurrentHashMap<String, AtomicInteger>()
-        private val thread = Thread(::serve, "d14-fake-dns").apply {
-            isDaemon = true
-            start()
-        }
-
-        fun count(domain: String): Int = requestCounts[domain]?.get() ?: 0
-
-        fun waitForCount(domain: String, expected: Int, timeoutMillis: Long): Boolean {
-            val deadline = SystemClock.elapsedRealtime() + timeoutMillis
-            while (SystemClock.elapsedRealtime() < deadline) {
-                if (count(domain) >= expected) return true
-                SystemClock.sleep(10L)
-            }
-            return count(domain) >= expected
-        }
-
-        fun countsJson(): JSONObject = JSONObject().apply {
-            requestCounts.toSortedMap().forEach { (domain, count) -> put(domain, count.get()) }
-        }
-
-        private fun serve() {
-            val buffer = ByteArray(2_048)
-            while (running.get()) {
-                try {
-                    val packet = DatagramPacket(buffer, buffer.size)
-                    socket.receive(packet)
-                    val query = packet.data.copyOfRange(packet.offset, packet.offset + packet.length)
-                    val domain = questionName(query)
-                    totalRequests.incrementAndGet()
-                    requestCounts.computeIfAbsent(domain) { AtomicInteger() }.incrementAndGet()
-                    if (droppedDomains.contains(domain)) {
-                        droppedRequests.incrementAndGet()
-                        continue
-                    }
-                    answerGates[domain]?.let { gate ->
-                        check(gate.await(95, TimeUnit.SECONDS)) { "Delayed answer gate was never released" }
-                    }
-                    val delay = if (delayDomain == domain) delayMillis else 0L
-                    if (delay > 0L) Thread.sleep(delay)
-                    val response = buildAnswer(query)
-                    socket.send(DatagramPacket(response, response.size, packet.address, packet.port))
-                    answeredDomains.add(domain)
-                } catch (_: SocketTimeoutException) {
-                    continue
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return
-                } catch (exception: Exception) {
-                    if (running.get()) failure = exception
-                    return
-                }
-            }
-        }
-
-        override fun close() {
-            running.set(false)
-            socket.close()
-            thread.interrupt()
-            thread.join(1_000L)
-        }
-
-        private fun buildAnswer(query: ByteArray): ByteArray {
-            require(query.size >= 17)
-            val response = query.copyOf(query.size + 16)
-            response[2] = 0x81.toByte()
-            response[3] = 0x80.toByte()
-            response[6] = 0
-            response[7] = 1
-            val answer = byteArrayOf(
-                0xC0.toByte(), 0x0C,
-                0, 1,
-                0, 1,
-                0, 0, 1, 44,
-                0, 4,
-                203.toByte(), 0, 113, 7
-            )
-            System.arraycopy(answer, 0, response, query.size, answer.size)
-            return response
-        }
-
-        private fun questionName(query: ByteArray): String {
-            if (query.size < 13) return "invalid"
-            val labels = mutableListOf<String>()
-            var offset = 12
-            while (offset < query.size) {
-                val length = query[offset++].toInt() and 0xFF
-                if (length == 0) return labels.joinToString(".").lowercase(Locale.ROOT)
-                if (length > 63 || offset + length > query.size) return "invalid"
-                labels += String(query, offset, length, Charsets.US_ASCII)
-                offset += length
-            }
-            return "invalid"
-        }
-
-    }
 
     private companion object {
         const val VPN_CONSENT_TIMEOUT_MS = 120_000L
