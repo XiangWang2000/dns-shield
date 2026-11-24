@@ -146,8 +146,7 @@ fun DnsShieldDashboard(
         contract = ActivityResultContracts.StartActivityForResult(),
         onResult = { result ->
             if (result.resultCode == Activity.RESULT_OK) {
-                // Permission granted, safely trigger VPN toggle action
-                viewModel.toggleVpn(context)
+                viewModel.startVpn(context)
             } else {
                 Toast.makeText(context, "同意 Android 的 VPN 連線要求後，才能開啟 DNS 防護。", Toast.LENGTH_SHORT).show()
             }
@@ -160,7 +159,7 @@ fun DnsShieldDashboard(
             if (vpnIntent != null) {
                 vpnPrepareLauncher.launch(vpnIntent)
             } else {
-                viewModel.toggleVpn(context)
+                viewModel.startVpn(context)
             }
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Failed to prepare/launch VPN service", e)
@@ -191,14 +190,15 @@ fun DnsShieldDashboard(
             VpnLifecycleState.STOPPING -> Unit
             VpnLifecycleState.STOPPED,
             VpnLifecycleState.FAILED -> {
-                val needsNotificationPermission = requiresNotificationPermission(
-                    sdkInt = Build.VERSION.SDK_INT,
-                    permissionGranted = ContextCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.POST_NOTIFICATIONS
-                    ) == PackageManager.PERMISSION_GRANTED
-                )
-                if (needsNotificationPermission) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    requiresNotificationPermission(
+                        sdkInt = Build.VERSION.SDK_INT,
+                        permissionGranted = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) == PackageManager.PERMISSION_GRANTED
+                    )
+                ) {
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 } else {
                     prepareAndStartVpn()
@@ -598,7 +598,7 @@ private fun NotificationPermissionNotice() {
                 color = MaterialTheme.colorScheme.onTertiaryContainer
             )
             Text(
-                "Android 13 以上需要通知權限，才會顯示 VPN 常駐狀態與快速斷線入口。",
+                "開啟防護通知後，就能在通知欄查看 VPN 狀態，也可以從那裡斷線。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onTertiaryContainer
             )

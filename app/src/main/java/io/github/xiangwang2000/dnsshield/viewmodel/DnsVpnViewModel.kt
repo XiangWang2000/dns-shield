@@ -978,9 +978,20 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
     }
+
+    internal fun startVpn(context: Context) {
+        if (DnsVpnService.lifecycleStateFlow.value.canStart) {
+            requestVpnAction(context, VpnToggleAction.START)
+        }
+    }
+
     fun toggleVpn(context: Context) {
+        requestVpnAction(context, _vpnLifecycleState.value.toggleAction())
+    }
+
+    private fun requestVpnAction(context: Context, requestedAction: VpnToggleAction) {
         try {
-            when (_vpnLifecycleState.value.toggleAction()) {
+            when (requestedAction) {
                 VpnToggleAction.NONE -> return
                 VpnToggleAction.STOP -> {
                     addLog("[安全防護] 已送出關閉防護服務的要求…")

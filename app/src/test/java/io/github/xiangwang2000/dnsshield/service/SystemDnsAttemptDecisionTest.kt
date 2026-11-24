@@ -5,6 +5,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+private const val SYSTEM_ERROR_CODE = 1
+private const val PARSE_ERROR_CODE = 0
+
 class SystemDnsAttemptDecisionTest {
     @Test
     fun validAnswerIsReturnedWithoutConsultingTheRetryPath() {
@@ -12,7 +15,7 @@ class SystemDnsAttemptDecisionTest {
 
         val action = decideFirstSystemDnsAttempt(
             outcome = SystemDnsAttemptOutcome.Answer(answer),
-            systemErrorCode = 3,
+            systemErrorCode = SYSTEM_ERROR_CODE,
             isValid = { true }
         )
 
@@ -25,7 +28,7 @@ class SystemDnsAttemptDecisionTest {
 
         val action = decideFirstSystemDnsAttempt(
             outcome = SystemDnsAttemptOutcome.Answer(byteArrayOf(1, 2, 3)),
-            systemErrorCode = 3,
+            systemErrorCode = SYSTEM_ERROR_CODE,
             isValid = {
                 validated = true
                 false
@@ -41,8 +44,8 @@ class SystemDnsAttemptDecisionTest {
         var validated = false
 
         val action = decideFirstSystemDnsAttempt(
-            outcome = SystemDnsAttemptOutcome.Error(code = 3),
-            systemErrorCode = 3,
+            outcome = SystemDnsAttemptOutcome.Error(code = SYSTEM_ERROR_CODE),
+            systemErrorCode = SYSTEM_ERROR_CODE,
             isValid = {
                 validated = true
                 true
@@ -56,8 +59,8 @@ class SystemDnsAttemptDecisionTest {
     @Test
     fun otherResolverErrorsAreFinal() {
         val action = decideFirstSystemDnsAttempt(
-            outcome = SystemDnsAttemptOutcome.Error(code = 0),
-            systemErrorCode = 3,
+            outcome = SystemDnsAttemptOutcome.Error(code = PARSE_ERROR_CODE),
+            systemErrorCode = SYSTEM_ERROR_CODE,
             isValid = { true }
         )
 
@@ -70,7 +73,7 @@ class SystemDnsAttemptDecisionTest {
 
         val action = decideFirstSystemDnsAttempt(
             outcome = SystemDnsAttemptOutcome.Unavailable,
-            systemErrorCode = 3,
+            systemErrorCode = SYSTEM_ERROR_CODE,
             isValid = {
                 validated = true
                 true

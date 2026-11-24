@@ -44,6 +44,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/benchmark_dns_hotpath.
 
 輸出位於 app/build/test-results/testDebugUnitTest/TEST-*.xml 的 `<system-out>`；沒有時間門檻，請比較相同機器、相同 JVM、相鄰回合的相對倍率，不要跨裝置推論。
 
+時間戳的數字以單次格式化計算。`timestamp_speedup` 的對照組每次都會新建 `SimpleDateFormat`；要評估快取實作之間的差異，請在同一環境配對量測改動前後版本，不要直接使用這個倍率。
+
 ## Android：Public Suffix resolver
 
 工具：tools/benchmark-public-suffix-android.ps1。

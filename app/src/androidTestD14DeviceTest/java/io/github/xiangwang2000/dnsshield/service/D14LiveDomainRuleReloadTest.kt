@@ -27,30 +27,29 @@ class D14LiveDomainRuleReloadTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
         assertEquals("io.github.xiangwang2000.dnsshield.d14test", context.packageName)
         ensureD14VpnConsent(context)
+        assertEquals(
+            "Stop an existing D14 VPN before running this isolated lifecycle test.",
+            VpnLifecycleState.STOPPED,
+            DnsVpnService.lifecycleStateFlow.value
+        )
 
         val dao = AppDatabase.getDatabase(context).dnsDao()
         val domain = "d14-rule-${System.nanoTime()}.example.com"
         assertNull("Test domain unexpectedly already has a rule", dao.getUserDomainRule(domain, false))
 
-        val upstream = FakeDnsUpstream()
-        val preferences = context.getSharedPreferences(DnsVpnService.D14_TEST_PREFS_NAME, Context.MODE_PRIVATE)
-        val oldHost = preferences.getString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, null)
-        val hadPort = preferences.contains(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY)
-        val oldPort = preferences.getInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, -1)
-        val preferencesPersisted = preferences.edit()
-            .putString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, "127.0.0.1")
-            .putInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, upstream.port)
-            .commit()
-        if (!preferencesPersisted) {
-            upstream.close()
-            throw AssertionError("Could not persist the loopback-only fake upstream settings.")
-        }
-
+        val fixture = D14FakeUpstreamFixture(context)
+        val upstream = fixture.upstream
         var serviceStartRequested = false
         var ruleInserted = false
+        var testFailure: Throwable? = null
+
         try {
-            dao.replaceUserDomainRule(UserDomainRuleEntity(domain = domain, action = "BLOCK", includeSubdomains = false))
+            fixture.install()
+
             ruleInserted = true
+            dao.replaceUserDomainRule(
+                UserDomainRuleEntity(domain = domain, action = "BLOCK", includeSubdomains = false)
+            )
 
             serviceStartRequested = true
             ContextCompat.startForegroundService(
@@ -62,7 +61,9 @@ class D14LiveDomainRuleReloadTest {
             assertEquals(3, d14ResponseCode(d14AwaitRcode(domain, 3)))
             assertEquals("A blocked query must not reach the fake upstream.", 0, upstream.count(domain))
 
-            dao.replaceUserDomainRule(UserDomainRuleEntity(domain = domain, action = "ALLOW", includeSubdomains = false))
+            dao.replaceUserDomainRule(
+                UserDomainRuleEntity(domain = domain, action = "ALLOW", includeSubdomains = false)
+            )
             context.startService(reloadIntent(context))
             d14AssertDnsAnswer(d14AwaitRcode(domain, 0))
             assertTrue("The allowed query must reach the fake upstream.", upstream.waitForCount(domain, 1, 2_000L))
@@ -70,7 +71,9 @@ class D14LiveDomainRuleReloadTest {
             d14AssertDnsAnswer(d14AwaitRcode(domain, 0))
             assertEquals("A repeated allowed query must use its cache entry.", 1, upstream.count(domain))
 
-            dao.replaceUserDomainRule(UserDomainRuleEntity(domain = domain, action = "BLOCK", includeSubdomains = false))
+            dao.replaceUserDomainRule(
+                UserDomainRuleEntity(domain = domain, action = "BLOCK", includeSubdomains = false)
+            )
             context.startService(reloadIntent(context))
             assertEquals(3, d14ResponseCode(d14AwaitRcode(domain, 3)))
             assertEquals(
@@ -79,21 +82,13 @@ class D14LiveDomainRuleReloadTest {
                 upstream.count(domain)
             )
             assertNull("Fake upstream thread failed.", upstream.failure)
+        } catch (failure: Throwable) {
+            testFailure = failure
+            throw failure
         } finally {
-            if (serviceStartRequested) {
-                context.startService(Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP))
-                runCatching { d14WaitForLifecycle(VpnLifecycleState.STOPPED, 10_000L) }
+            fixture.cleanup(serviceStartRequested, testFailure) {
+                if (ruleInserted) dao.deleteUserDomainRule(domain, false)
             }
-            upstream.close()
-            if (DnsVpnService.lifecycleStateFlow.value == VpnLifecycleState.STOPPED) {
-                preferences.edit().apply {
-                    if (oldHost == null) remove(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY)
-                    else putString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, oldHost)
-                    if (hadPort) putInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, oldPort)
-                    else remove(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY)
-                }.commit()
-            }
-            if (ruleInserted) dao.deleteUserDomainRule(domain, false)
         }
     }
 

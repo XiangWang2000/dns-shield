@@ -212,7 +212,7 @@ jobs:
       # Consent-free coverage that must pass on a freshly booted emulator.
       # VPN-consent variants (D04, D14, D15 smoke) stay manual.
       DEVICE_TEST_CLASSES: >-
-        io.github.xiangwang2000.dnsshield.data.DnsDaoInstrumentedTest,io.github.xiangwang2000.dnsshield.data.DnsServerMigrationTest,io.github.xiangwang2000.dnsshield.data.UserDomainRuleSaveTest,io.github.xiangwang2000.dnsshield.blocking.ProductionBlocklistAssetInstrumentedTest,io.github.xiangwang2000.dnsshield.blocking.ProductionPublicSuffixMainAssetInstrumentedTest,io.github.xiangwang2000.dnsshield.service.Ipv6ResolverSettingsInstrumentedTest,io.github.xiangwang2000.dnsshield.service.NativeDnsTcpRuntimeTest,io.github.xiangwang2000.dnsshield.viewmodel.InstalledAppsLoadingInstrumentedTest
+        io.github.xiangwang2000.dnsshield.data.DnsDaoInstrumentedTest,io.github.xiangwang2000.dnsshield.data.DnsServerMigrationTest,io.github.xiangwang2000.dnsshield.data.UserDomainRuleSaveTest,io.github.xiangwang2000.dnsshield.blocking.ProductionBlocklistAssetInstrumentedTest,io.github.xiangwang2000.dnsshield.blocking.ProductionPublicSuffixMainAssetInstrumentedTest,io.github.xiangwang2000.dnsshield.service.Ipv6ResolverSettingsInstrumentedTest,io.github.xiangwang2000.dnsshield.service.NativeDnsTcpRuntimeTest,io.github.xiangwang2000.dnsshield.viewmodel.InstalledAppsLoadingInstrumentedTest,io.github.xiangwang2000.dnsshield.viewmodel.VpnStartAuthorizationInstrumentedTest
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -293,11 +293,8 @@ jobs:
             -no-snapshot -no-window -gpu swiftshader_indirect -noaudio
             -no-boot-anim -camera-back none
           script: |
-            ./gradlew --no-daemon --console=plain :app:connectedDebugAndroidTest \
-              -Pandroid.testInstrumentationRunnerArguments.class="$DEVICE_TEST_CLASSES"
-            ./gradlew --no-daemon --console=plain -PandroidTestBuildType=d15test \
-              :app:connectedD15testAndroidTest \
-              -Pandroid.testInstrumentationRunnerArguments.class=io.github.xiangwang2000.dnsshield.service.D15UnapprovedStartTest
+            ./gradlew --no-daemon --console=plain :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class="$DEVICE_TEST_CLASSES"
+            ./gradlew --no-daemon --console=plain -PandroidTestBuildType=d15test :app:connectedD15testAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=io.github.xiangwang2000.dnsshield.service.D15UnapprovedStartTest
 
       - name: Upload device test reports
         if: always() && steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'

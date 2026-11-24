@@ -3,6 +3,7 @@ package io.github.xiangwang2000.dnsshield.service
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -15,6 +16,41 @@ import kotlin.test.assertTrue
  * same warmed JVM. Gradle writes the printed result to the JUnit XML report.
  */
 class DnsLogFormattingBenchmarkTest {
+    @Test
+    fun timestampReflectsDefaultTimeZoneChangesOnTheSameThread() {
+        val originalZone = TimeZone.getDefault()
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+            assertEquals(legacyTimestamp(0L), DnsLogFormatting.timestamp(0L))
+
+            TimeZone.setDefault(TimeZone.getTimeZone("GMT+08:00"))
+            assertEquals(legacyTimestamp(0L), DnsLogFormatting.timestamp(0L))
+        } finally {
+            TimeZone.setDefault(originalZone)
+        }
+    }
+
+    @Test
+    fun timestampPreservesLocaleTimeZoneOverrideOnTheSameThread() {
+        val originalLocale = Locale.getDefault()
+        val originalDisplayLocale = Locale.getDefault(Locale.Category.DISPLAY)
+        val originalFormatLocale = Locale.getDefault(Locale.Category.FORMAT)
+        val originalZone = TimeZone.getDefault()
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+            Locale.setDefault(Locale.US)
+            assertEquals(legacyTimestamp(0L), DnsLogFormatting.timestamp(0L))
+
+            Locale.setDefault(Locale.forLanguageTag("en-US-u-tz-uslax"))
+            assertEquals(legacyTimestamp(0L), DnsLogFormatting.timestamp(0L))
+        } finally {
+            Locale.setDefault(originalLocale)
+            Locale.setDefault(Locale.Category.DISPLAY, originalDisplayLocale)
+            Locale.setDefault(Locale.Category.FORMAT, originalFormatLocale)
+            TimeZone.setDefault(originalZone)
+        }
+    }
+
     @Test
     fun reportsTransactionIdAndTimestampCost() {
         val payloads = buildPayloads()
@@ -47,8 +83,8 @@ class DnsLogFormattingBenchmarkTest {
         val operations = payloads.size.toLong() * REPETITIONS
         val legacyTxIdPerOp = legacyTxIdNs.toDouble() / operations
         val currentTxIdPerOp = currentTxIdNs.toDouble() / operations
-        val legacyTimestampPerOp = legacyTimestampNs.toDouble() / operations
-        val currentTimestampPerOp = currentTimestampNs.toDouble() / operations
+        val legacyTimestampPerOp = legacyTimestampNs.toDouble() / REPETITIONS
+        val currentTimestampPerOp = currentTimestampNs.toDouble() / REPETITIONS
         val legacySavedBytesPerOp = legacySavedBytesNs.toDouble() / operations
 
         println(

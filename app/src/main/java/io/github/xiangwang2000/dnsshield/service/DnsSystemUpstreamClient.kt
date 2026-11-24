@@ -28,8 +28,8 @@ internal enum class SystemDnsFirstAttemptAction {
 }
 
 /**
- * Retry only when the first attempt produced an invalid answer or the platform reported the
- * system-wide resolver error. Other resolver errors (for example NXDOMAIN) are final.
+ * An invalid answer or Android's ERROR_SYSTEM can trigger an EDNS retry.
+ * Other Android resolver errors, such as ERROR_PARSE, end the lookup.
  */
 internal fun decideFirstSystemDnsAttempt(
     outcome: SystemDnsAttemptOutcome,

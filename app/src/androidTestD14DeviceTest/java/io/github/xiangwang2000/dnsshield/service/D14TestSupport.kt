@@ -16,6 +16,8 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -133,6 +135,84 @@ internal class FakeDnsUpstream : AutoCloseable {
     }
 }
 
+internal class D14FakeUpstreamFixture(private val context: Context) {
+    val upstream = FakeDnsUpstream()
+    private val preferences =
+        context.getSharedPreferences(DnsVpnService.D14_TEST_PREFS_NAME, Context.MODE_PRIVATE)
+    private val oldHost = preferences.getString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, null)
+    private val hadPort = preferences.contains(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY)
+    private val oldPort = preferences.getInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, -1)
+
+    fun install() {
+        check(
+            preferences.edit()
+                .putString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, "127.0.0.1")
+                .putInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, upstream.port)
+                .commit()
+        ) { "Could not persist the loopback-only fake upstream settings." }
+    }
+
+    suspend fun cleanup(
+        serviceStartRequested: Boolean,
+        primaryFailure: Throwable?,
+        additionalCleanup: suspend () -> Unit = {}
+    ) {
+        var cleanupFailure: Throwable? = null
+        fun rememberCleanupFailure(failure: Throwable) {
+            val previous = cleanupFailure
+            if (previous == null) cleanupFailure = failure else previous.addSuppressed(failure)
+        }
+
+        if (serviceStartRequested) {
+            val stopIntent = Intent(context, DnsVpnService::class.java).setAction(DnsVpnService.ACTION_STOP)
+            try {
+                context.startService(stopIntent)
+                d14WaitForLifecycle(VpnLifecycleState.STOPPED, 10_000L)
+            } catch (stopFailure: Throwable) {
+                try {
+                    context.stopService(stopIntent)
+                    d14WaitForLifecycle(VpnLifecycleState.STOPPED, 10_000L)
+                } catch (fallbackFailure: Throwable) {
+                    stopFailure.addSuppressed(fallbackFailure)
+                    rememberCleanupFailure(stopFailure)
+                }
+            }
+        }
+
+        runCatching { upstream.close() }.onFailure(::rememberCleanupFailure)
+        if (DnsVpnService.lifecycleStateFlow.value == VpnLifecycleState.STOPPED) {
+            val restored = runCatching {
+                preferences.edit().apply {
+                    if (oldHost == null) remove(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY)
+                    else putString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, oldHost)
+                    if (hadPort) putInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, oldPort)
+                    else remove(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY)
+                }.commit()
+            }.getOrElse {
+                rememberCleanupFailure(it)
+                false
+            }
+            if (!restored) {
+                rememberCleanupFailure(IllegalStateException("Could not restore D14 test upstream preferences."))
+            }
+        } else {
+            rememberCleanupFailure(
+                AssertionError("DNS VPN service did not reach STOPPED; its fake upstream settings remain active.")
+            )
+        }
+
+        try {
+            additionalCleanup()
+        } catch (failure: Throwable) {
+            rememberCleanupFailure(failure)
+        }
+
+        cleanupFailure?.let { failure ->
+            if (primaryFailure != null) primaryFailure.addSuppressed(failure) else throw failure
+        }
+    }
+}
+
 internal const val D14_VPN_CONSENT_TIMEOUT_MS = 120_000L
 
 internal fun ensureD14VpnConsent(context: Context) {
@@ -153,19 +233,23 @@ internal fun ensureD14VpnConsent(context: Context) {
     )
 }
 
-internal fun d14WaitForLifecycle(expected: VpnLifecycleState, timeoutMillis: Long) {
-    val deadline = SystemClock.elapsedRealtime() + timeoutMillis
-    while (SystemClock.elapsedRealtime() < deadline) {
-        val state = DnsVpnService.lifecycleStateFlow.value
-        if (state == expected) return
-        if (state == VpnLifecycleState.FAILED) {
-            throw AssertionError("DNS VPN service entered FAILED while waiting for $expected")
+internal suspend fun d14WaitForLifecycle(expected: VpnLifecycleState, timeoutMillis: Long) {
+    val reached = withTimeoutOrNull(timeoutMillis) {
+        DnsVpnService.lifecycleStateFlow.first { state ->
+            when {
+                state == expected -> true
+                // A queued STOP can still finish when startup has already failed.
+                state == VpnLifecycleState.FAILED && expected != VpnLifecycleState.STOPPED ->
+                    throw AssertionError("DNS VPN service entered FAILED while waiting for $expected")
+                else -> false
+            }
         }
-        SystemClock.sleep(25L)
     }
-    throw AssertionError(
-        "Timed out waiting for VPN lifecycle $expected; current=${DnsVpnService.lifecycleStateFlow.value}"
-    )
+    if (reached == null) {
+        throw AssertionError(
+            "Timed out waiting for VPN lifecycle $expected; current=${DnsVpnService.lifecycleStateFlow.value}"
+        )
+    }
 }
 
 internal fun d14BuildQuery(domain: String, transactionId: Int): ByteArray {

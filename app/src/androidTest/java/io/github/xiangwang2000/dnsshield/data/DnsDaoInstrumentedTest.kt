@@ -3,6 +3,11 @@ package io.github.xiangwang2000.dnsshield.data
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.xiangwang2000.dnsshield.blocking.CompositeDomainMatcher
+import io.github.xiangwang2000.dnsshield.blocking.DomainMatcher
+import io.github.xiangwang2000.dnsshield.blocking.DomainRuleAction
+import io.github.xiangwang2000.dnsshield.blocking.UserDomainRule
+import io.github.xiangwang2000.dnsshield.blocking.UserDomainRuleMatcher
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -125,6 +130,52 @@ class DnsDaoInstrumentedTest {
 
         assertTrue(dao.restoreUserDomainRule("example.com", false, "revision-3", previous = null))
         assertNull(dao.getUserDomainRule("example.com", false))
+    }
+
+    @Test
+    fun userDomainRulePersistsAcrossOnDiskDatabaseReopen() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val databaseName = "dns-dao-persistence-${System.nanoTime()}.db"
+        fun openDatabase() = Room.databaseBuilder(context, AppDatabase::class.java, databaseName)
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4)
+            .build()
+
+        fun matcher(rules: List<UserDomainRuleEntity>) = CompositeDomainMatcher(
+            blockers = listOf(DomainMatcher { true }),
+            userRules = UserDomainRuleMatcher(rules.map {
+                UserDomainRule(it.domain, DomainRuleAction.valueOf(it.action), it.includeSubdomains)
+            })
+        )
+
+        val domain = "reopened-${System.nanoTime()}.example"
+        val allowRule = UserDomainRuleEntity(
+            domain = domain,
+            action = "ALLOW",
+            includeSubdomains = false
+        )
+        var diskDatabase = openDatabase()
+
+        try {
+            val diskDao = diskDatabase.dnsDao()
+            diskDao.replaceUserDomainRule(allowRule)
+            val savedRule = checkNotNull(diskDao.getUserDomainRule(domain, false))
+            assertTrue(savedRule.id > 0)
+            assertEquals(allowRule.copy(id = savedRule.id), savedRule)
+
+            diskDatabase.close()
+            diskDatabase = openDatabase()
+
+            val persistedRules = diskDatabase.dnsDao().getUserDomainRulesList()
+            assertEquals(listOf(savedRule), persistedRules)
+            val policy = matcher(persistedRules)
+            assertFalse(policy.shouldBlock(domain))
+            assertTrue(policy.shouldBlock("cdn.$domain"))
+        } finally {
+            diskDatabase.close()
+            if (context.getDatabasePath(databaseName).exists()) {
+                check(context.deleteDatabase(databaseName))
+            }
+        }
     }
 
     private suspend fun insertServer(id: Int, active: Boolean) {

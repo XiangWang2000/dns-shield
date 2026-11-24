@@ -68,7 +68,16 @@ python tools/ci.py verify-docs
 
 文件變更可先跑文件檢查；程式、依賴、build 設定或 packaged data 變更則依 repository 要求執行完整 verify.ps1。遇到失敗時，先定位並修正第一個失敗步驟，再選足以驗證修正的範圍；只有完整入口仍是本次必需檢查，或仍有未解風險時，才重跑 Full。保留 Gradle、Python 與 JVM 原始錯誤；舊報告的測試數字不能代替本次結果。
 
-device job 的清單定義在 `DEVICE_TEST_CLASSES`，只收錄不需人工同意 VPN 的案例：DAO／migration、使用者網域規則、production blocklist 與 Public Suffix 資產載入、IPv6 resolver 設定、native TCP runtime、App 清單載入，另加 D15 的未同意啟動案例。需要人工同意 VPN 或切換網路的 D04、D14、D15 生命週期案例仍以 [tools/](../tools) 下的裝置腳本手動執行；文件變更不會啟動 device job。
+device job 的清單定義在 `DEVICE_TEST_CLASSES`，只收錄不需人工同意 VPN 的案例：DAO／migration、使用者網域規則、production blocklist 與 Public Suffix 資產載入、IPv6 resolver 設定、native TCP runtime、App 清單載入與 VPN 授權回呼，另加 D15 的未同意啟動案例。需要人工同意 VPN 或切換網路的 D04、D14、D15 生命週期案例仍以 [tools/](../tools) 下的裝置腳本手動執行；文件變更不會啟動 device job。
+
+D14 回歸測試涵蓋即時規則重載、查詢過載、停止時清空待處理查詢，以及失敗後還原測試設定。其中實際經過 TUN 的案例需要系統 VPN 同意。連接多台裝置時，請在兩個指令都加上 `-Serial` 指定裝置。
+
+過載案例會逐筆確認前 24 筆都抵達假上游並保留為待處理，再送第 25 筆，確認收到 `SERVFAIL` 且沒有轉送。停用防護後，測試也會確認待處理查詢歸零。
+
+~~~powershell
+.\tools\d14-device-test.ps1 -Action Install
+.\tools\d14-device-test.ps1 -Action Run -RegressionTests
+~~~
 
 ### IPv6 DNS 範圍與驗證限制
 
