@@ -204,6 +204,112 @@ jobs:
           "Reused successful PR verification for the identical Git tree: $env:EVIDENCE_URL" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
         shell: pwsh
 
+  device:
+    name: Instrumented device tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # Consent-free coverage that must pass on a freshly booted emulator.
+      # VPN-consent variants (D04, D14, D15 smoke) stay manual.
+      DEVICE_TEST_CLASSES: >-
+        io.github.xiangwang2000.dnsshield.data.DnsDaoInstrumentedTest,io.github.xiangwang2000.dnsshield.data.DnsServerMigrationTest,io.github.xiangwang2000.dnsshield.data.UserDomainRuleSaveTest,io.github.xiangwang2000.dnsshield.blocking.ProductionBlocklistAssetInstrumentedTest,io.github.xiangwang2000.dnsshield.blocking.ProductionPublicSuffixMainAssetInstrumentedTest,io.github.xiangwang2000.dnsshield.service.Ipv6ResolverSettingsInstrumentedTest,io.github.xiangwang2000.dnsshield.service.NativeDnsTcpRuntimeTest,io.github.xiangwang2000.dnsshield.viewmodel.InstalledAppsLoadingInstrumentedTest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set isolated Gradle home
+        run: |
+          "GRADLE_USER_HOME=$(Join-Path $env:RUNNER_TEMP 'dns-shield-gradle')" | Add-Content -LiteralPath $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.15"
+
+      - name: Check verified PR tree
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/ci_reuse.py check --event "$env:GITHUB_EVENT_PATH" --output "$env:GITHUB_OUTPUT"
+        shell: pwsh
+
+      - name: Select verification scope
+        id: scope
+        run: python tools/ci.py classify --event "$env:GITHUB_EVENT_PATH" --output "$env:GITHUB_OUTPUT"
+        shell: pwsh
+
+      - name: Check out native submodules
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        run: |
+          git submodule update --init --recursive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        shell: pwsh
+
+      - name: Set up JDK
+        id: java
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          # Adoptium semver for Temurin 21.0.12.1+1 (patch 1).
+          java-version: "21.0.12+101.0.LTS"
+          cache-jdk: ${{ !inputs.cold_cache }}
+
+      - name: Restore Gradle dependencies and build cache
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true' && !inputs.cold_cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.GRADLE_USER_HOME }}/caches
+            ${{ env.GRADLE_USER_HOME }}/wrapper
+            !${{ env.GRADLE_USER_HOME }}/caches/**/*.lock
+            !${{ env.GRADLE_USER_HOME }}/caches/**/gc.properties
+          key: gradle-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}-device-${{ github.sha }}
+          restore-keys: |
+            gradle-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}-device-
+            gradle-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}-core-
+
+      - name: Enable KVM for the emulator
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run consent-free instrumented tests
+        if: steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: >-
+            -no-snapshot -no-window -gpu swiftshader_indirect -noaudio
+            -no-boot-anim -camera-back none
+          script: |
+            ./gradlew --no-daemon --console=plain :app:connectedDebugAndroidTest \
+              -Pandroid.testInstrumentationRunnerArguments.class="$DEVICE_TEST_CLASSES"
+            ./gradlew --no-daemon --console=plain -PandroidTestBuildType=d15test \
+              :app:connectedD15testAndroidTest \
+              -Pandroid.testInstrumentationRunnerArguments.class=io.github.xiangwang2000.dnsshield.service.D15UnapprovedStartTest
+
+      - name: Upload device test reports
+        if: always() && steps.scope.outputs.docs_only != 'true' && steps.reuse.outputs.reuse != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: device-reports-${{ github.run_id }}
+          path: |
+            app/build/outputs/androidTest-results/connected/
+            app/build/reports/androidTests/connected/
+          if-no-files-found: ignore
+          retention-days: 14
+
   windows:
     name: Windows script checks
     runs-on: windows-2025
@@ -224,15 +330,16 @@ jobs:
         shell: powershell
 
   verify:
-    # Keep the existing branch-protection check name; it now gates BOTH jobs.
+    # Keep the existing branch-protection check name; it now gates all jobs.
     name: Windows verification
-    needs: [android, windows]
+    needs: [android, windows, device]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
-      - name: Require Android and Windows verification
+      - name: Require Android, Windows, and device verification
         env:
           ANDROID_RESULT: ${{ needs.android.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
-        run: test "$ANDROID_RESULT" = success && test "$WINDOWS_RESULT" = success
+          DEVICE_RESULT: ${{ needs.device.result }}
+        run: test "$ANDROID_RESULT" = success && test "$WINDOWS_RESULT" = success && test "$DEVICE_RESULT" = success

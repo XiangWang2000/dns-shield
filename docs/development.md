@@ -26,7 +26,7 @@ $env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
 powershell -NoProfile -ExecutionPolicy Bypass -File ./verify.ps1
 ~~~
 
-verify.ps1 會檢查 PowerShell 腳本語法、Python 工具、production blocklist 與 Public Suffix assets，執行 Android lint、JVM 測試及 Kotlin 編譯，並建置 Debug 與隔離 instrumentation variants。建置 androidTest APK 不等於執行裝置測試；此入口不會自動執行 adb instrumentation。
+verify.ps1 會檢查 PowerShell 腳本語法、Python 工具、production blocklist 與 Public Suffix assets，執行 Android lint、JVM 測試及 Kotlin 編譯，並建置 Debug 與隔離 instrumentation variants。建置 androidTest APK 不等於執行裝置測試；此入口不會自動執行 adb instrumentation，consent-free 的裝置案例改由 CI 的 emulator job 執行。
 
 ## 程式結構
 
@@ -60,13 +60,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./verify.ps1 -Scope Selected
 powershell -NoProfile -ExecutionPolicy Bypass -File ./verify.ps1 -Scope Isolated -Variants d15
 ~~~
 
-CI 依變更分類分派同一個 verify.ps1，Full 由 Core 與 Isolated partitions 合作完成。Windows tooling job 另檢查工具與 dispatcher。CI 會執行文件檢查：
+CI 依變更分類分派同一個 verify.ps1，Full 由 Core 與 Isolated partitions 合作完成。Windows tooling job 另檢查工具與 dispatcher；[ci.yml](../.github/workflows/ci.yml) 的 device job 另在乾淨的 API 34 emulator 上執行固定的 instrumented 案例。CI 會執行文件檢查：
 
 ~~~powershell
 python tools/ci.py verify-docs
 ~~~
 
-文件變更可先跑文件檢查；程式、依賴、build 設定或 packaged data 變更則依 repository 要求執行完整 verify.ps1。遇到失敗時，先定位並修正第一個失敗步驟，再選足以驗證修正的範圍；只有完整入口仍是本次必需檢查，或仍有未解風險時，才重跑 Full。保留 Gradle、Python 與 JVM 原始錯誤；舊報告的測試數字不能代替本次結果。CI 會建置 instrumentation APK，但不代表裝置案例已執行。
+文件變更可先跑文件檢查；程式、依賴、build 設定或 packaged data 變更則依 repository 要求執行完整 verify.ps1。遇到失敗時，先定位並修正第一個失敗步驟，再選足以驗證修正的範圍；只有完整入口仍是本次必需檢查，或仍有未解風險時，才重跑 Full。保留 Gradle、Python 與 JVM 原始錯誤；舊報告的測試數字不能代替本次結果。
+
+device job 的清單定義在 `DEVICE_TEST_CLASSES`，只收錄不需人工同意 VPN 的案例：DAO／migration、使用者網域規則、production blocklist 與 Public Suffix 資產載入、IPv6 resolver 設定、native TCP runtime、App 清單載入，另加 D15 的未同意啟動案例。需要人工同意 VPN 或切換網路的 D04、D14、D15 生命週期案例仍以 [tools/](../tools) 下的裝置腳本手動執行；文件變更不會啟動 device job。
 
 ### IPv6 DNS 範圍與驗證限制
 
