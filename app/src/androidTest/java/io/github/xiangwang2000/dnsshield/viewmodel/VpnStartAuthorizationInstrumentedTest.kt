@@ -5,8 +5,6 @@ import android.app.Instrumentation
 import android.content.ComponentName
 import android.content.ContextWrapper
 import android.content.Intent
-import android.os.SystemClock
-import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.compose.LocalActivityResultRegistryOwner
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultRegistry
@@ -15,6 +13,11 @@ import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import androidx.core.app.ActivityOptionsCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -29,11 +32,15 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VpnStartAuthorizationInstrumentedTest {
+    @get:Rule
+    val compose = createEmptyComposeRule()
+
     @Test
     fun delayedAuthorizationDoesNotToggleAlreadyRunningVpn() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -88,11 +95,12 @@ class VpnStartAuthorizationInstrumentedTest {
                 }
             }
 
-            clickPowerButton(instrumentation)
+            val powerButton = compose.onNodeWithTag("power_button")
+            powerButton.assertIsDisplayed().assertIsEnabled().performClick()
             dispatchApproval(instrumentation, registry, consentRequests.single())
             assertEquals(listOf(DnsVpnService.ACTION_START), actions)
 
-            clickPowerButton(instrumentation)
+            powerButton.assertIsDisplayed().assertIsEnabled().performClick()
             assertEquals(2, consentRequests.size)
             lifecycle.value = VpnLifecycleState.RUNNING
             withTimeout(5_000L) {
@@ -126,26 +134,5 @@ class VpnStartAuthorizationInstrumentedTest {
             delivered = registry.dispatchResult(requestCode, Activity.RESULT_OK, null)
         }
         assertTrue("The VPN authorization result must reach the dashboard.", delivered)
-    }
-
-    private fun clickPowerButton(instrumentation: Instrumentation) {
-        fun findPowerButton(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-            if (node.viewIdResourceName == "power_button") return node
-            for (index in 0 until node.childCount) {
-                node.getChild(index)?.let { findPowerButton(it)?.let { found -> return found } }
-            }
-            return null
-        }
-
-        val deadline = SystemClock.elapsedRealtime() + 5_000L
-        while (SystemClock.elapsedRealtime() < deadline) {
-            val button = instrumentation.uiAutomation.rootInActiveWindow?.let(::findPowerButton)
-            if (button?.refresh() == true && button.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                instrumentation.waitForIdleSync()
-                return
-            }
-            SystemClock.sleep(25L)
-        }
-        throw AssertionError("The VPN power button was not clickable.")
     }
 }
