@@ -39,7 +39,7 @@ verify.ps1 會檢查 PowerShell 腳本語法、Python 工具、production blockl
 | [service/DnsVpnService.kt](../app/src/main/java/io/github/xiangwang2000/dnsshield/service/DnsVpnService.kt) 與 [service/](../app/src/main/java/io/github/xiangwang2000/dnsshield/service) | VPN／TUN 生命週期、DNS 查詢、網路切換、快取、上游傳輸與診斷。 |
 | [app/src/main/cpp/](../app/src/main/cpp) 與 NativeDnsTcpRuntime、SocksDnsServer | 用於轉送用戶端 TCP/53 DNS 的 JNI／Hev 與 SOCKS 橋接。 |
 | [app/src/main/assets/](../app/src/main/assets) | 隨 APK 發布並由工具驗證的 production 資產。 |
-| [tools/](../tools)、[app/src/test/](../app/src/test)、app/src/androidTest variants | 離線資產工具、CI、JVM 與隔離裝置測試。 |
+| [tools/](../tools)、[app/src/test/](../app/src/test)、[app/src/androidTest/](../app/src/androidTest) | 離線資產工具、CI、JVM 與裝置測試。 |
 
 DNS Shield 是 DNS 層工具：VPN 只攔截送往本機虛擬 IPv4／IPv6 DNS 位址的 UDP／TCP 53 查詢，其餘 IPv4／IPv6 流量仍轉送至底層網路。App 直接送往其他外部 DNS 位址的查詢、App 自行使用的 DoH／DoT 與直接 IP 連線不會被攔截。App 例外清單只用於使用者選擇略過 VPN 的 App；套件可見性只查詢 MAIN／LAUNCHER 活動，不要求 `QUERY_ALL_PACKAGES`，資料邊界見 [隱私說明](../PRIVACY.md)。規則順序與 Public Suffix 邊界見 [blocking policy](blocking-policy.md)。
 
@@ -68,9 +68,13 @@ python tools/ci.py verify-docs
 
 文件變更可先跑文件檢查；程式、依賴、build 設定或 packaged data 變更則依 repository 要求執行完整 verify.ps1。遇到失敗時，先定位並修正第一個失敗步驟，再選足以驗證修正的範圍；只有完整入口仍是本次必需檢查，或仍有未解風險時，才重跑 Full。保留 Gradle、Python 與 JVM 原始錯誤；舊報告的測試數字不能代替本次結果。
 
-device job 的清單定義在 `DEVICE_TEST_CLASSES`，只收錄不需人工同意 VPN 的案例：DAO／migration、使用者網域規則、production blocklist 與 Public Suffix 資產載入、IPv6 resolver 設定、native TCP runtime、App 清單載入與 VPN 授權回呼，另加 D15 的未同意啟動案例。需要人工同意 VPN 或切換網路的 D04、D14、D15 生命週期案例仍以 [tools/](../tools) 下的裝置腳本手動執行；文件變更不會啟動 device job。
+device job 的清單定義在 `DEVICE_TEST_CLASSES`，只收錄不需人工同意 VPN 的案例：DAO／migration、使用者網域規則、production blocklist 與 Public Suffix 資產載入、IPv6 resolver 設定、native TCP runtime、App 清單載入、VPN 授權回呼、App 更新下載與 APK 簽章讀取，另加 D15 的未同意啟動案例。需要人工同意 VPN 或切換網路的 D04、D14、D15 生命週期案例仍以 [tools/](../tools) 下的裝置腳本手動執行；文件變更不會啟動 device job。
 
-D14 回歸測試涵蓋即時規則重載、查詢過載、停止時清空待處理查詢，以及失敗後還原測試設定。其中實際經過 TUN 的案例需要系統 VPN 同意。連接多台裝置時，請在兩個指令都加上 `-Serial` 指定裝置。
+裝置測試類別以驗證的行為命名，使用 `InstrumentedTest` 結尾，裝置基準測試使用 `InstrumentedBenchmarkTest` 結尾。
+
+共用裝置測試位於 `app/src/androidTest/java/`。隔離測試集中在 `app/src/androidTest/device/`，依用途分為 `ipv6-pass-through`、`vpn-network-recovery`、`upstream-dns`、`vpn-tunnel` 和 `vpn-lifecycle`。各目錄的 `test/` 存放測試程式及資產。有額外 manifest 或輔助程式的變體會放在 `app/`。CI 依這些目錄選擇對應的隔離建置。`vpn-tunnel` 使用 `d14DeviceTest` 建置變體。
+
+`VpnTunnelRegressionInstrumentedTest` 的三個案例分別驗證即時規則重載、查詢過載及停止時清空待處理查詢，以及失敗後還原測試設定。其中實際經過 TUN 的案例需要系統 VPN 同意。連接多台裝置時，請在兩個指令都加上 `-Serial` 指定裝置。
 
 過載案例會逐筆確認前 24 筆都抵達假上游並保留為待處理，再送第 25 筆，確認收到 `SERVFAIL` 且沒有轉送。停用防護後，測試也會確認待處理查詢歸零。
 
@@ -109,6 +113,8 @@ Installer 會在安裝前驗證候選資產；不要手動覆寫 app/src/main/as
 Public Suffix source、格式、production gate、APK staging gate 和目前 runtime 接線見 [public-suffix.md](public-suffix.md)。歷史驗收只作該次測試證據：[共同驗收](archive/r09-common-validation.md)、[行動網路切換](archive/r10-cellular-handoff-validation.md)、[R17–R19 背景工作](archive/r17-r19-background-work-validation.md)。這些報告不是當前驗收狀態。
 
 ## 正式簽章與發版
+
+App 內更新讀取 GitHub 公開的最新正式 Release。正式標籤使用 vX.Y.Z 並對應 APK 的 versionName，附件名稱使用 app-release.apk。App 會依 GitHub 提供的 SHA-256 摘要核對檔案，並在交給 Android 前檢查升級版號、套件名稱及簽章。
 
 新版本需在 app/build.gradle.kts 更新 versionName 並遞增 versionCode，沿用原有 applicationId 與簽章金鑰。腳本不會自動調整版本或發布 GitHub Release；發版時需一併提供 APK、SHA-256 sidecar 與 `blocklist-source.zip`。來源壓縮檔需包含兩份固定的原始清單、合併後的網域文字、重建工具、manifest 及授權告知。
 

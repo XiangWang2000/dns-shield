@@ -61,8 +61,8 @@ android {
     ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }
     externalNativeBuild { ndkBuild { arguments += "NDK_APPLICATION_MK=${projectDir}/src/main/cpp/Application.mk" } }
     targetSdk = 37
-    versionCode = 9
-    versionName = "1.5.0"
+    versionCode = 11
+    versionName = "1.6.0"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     buildConfigField("boolean", "D14_DEVICE_TEST", "false")
     buildConfigField("int", "DNS_UPSTREAM_PORT", "53")
@@ -156,6 +156,20 @@ android {
     buildConfig = true
   }
   sourceSets {
+    val deviceTestSuites = mapOf(
+      "d03test" to "ipv6-pass-through",
+      "d04DeviceTest" to "vpn-network-recovery",
+      "d08test" to "upstream-dns",
+      "d14DeviceTest" to "vpn-tunnel",
+      "d15test" to "vpn-lifecycle",
+    )
+    val instrumentationSuites = deviceTestSuites.mapKeys { (buildType, _) ->
+      "androidTest" + buildType.replaceFirstChar(Char::uppercaseChar)
+    }
+    configureEach {
+      deviceTestSuites[name]?.let { setRoot("src/androidTest/device/$it/app") }
+      instrumentationSuites[name]?.let { setRoot("src/androidTest/device/$it/test") }
+    }
     getByName("androidTest") {
       assets.directories.add(layout.buildDirectory.dir("generated/publicSuffixAndroidTestAssets").get().asFile.absolutePath)
     }

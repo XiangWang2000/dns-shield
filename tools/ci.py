@@ -40,11 +40,11 @@ def changed_paths(event, root=ROOT):
 
 
 VARIANT_DIRS = {
-    "androidTestD03test": "d03", "d03test": "d03",
-    "androidTestD04DeviceTest": "d04", "d04DeviceTest": "d04",
-    "androidTestD08test": "d08", "d08test": "d08",
-    "androidTestD14DeviceTest": "d14", "d14DeviceTest": "d14",
-    "androidTestD15test": "d15", "d15test": "d15",
+    "ipv6-pass-through": "d03",
+    "vpn-network-recovery": "d04",
+    "upstream-dns": "d08",
+    "vpn-tunnel": "d14",
+    "vpn-lifecycle": "d15",
 }
 CORE_PREFIXES = ("app/src/main/java/", "app/src/main/kotlin/", "app/src/main/res/",
                  "app/src/main/assets/", "app/src/test/")
@@ -61,8 +61,9 @@ def select_scope(paths):
         if is_documentation(path) or path.startswith(CORE_PREFIXES):
             continue
         parts = path.split("/")
-        if len(parts) > 3 and parts[:2] == ["app", "src"] and parts[2] in VARIANT_DIRS:
-            variants.add(VARIANT_DIRS[parts[2]])
+        if (len(parts) > 6 and parts[:4] == ["app", "src", "androidTest", "device"]
+                and parts[4] in VARIANT_DIRS and parts[5] in ("app", "test")):
+            variants.add(VARIANT_DIRS[parts[4]])
         else:
             # Shared androidTest, build/CI logic, native code and unknown paths
             # retain the full gate.

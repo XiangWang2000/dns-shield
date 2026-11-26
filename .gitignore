@@ -20,7 +20,7 @@ debug.keystore
 *.keystore
 *.p12
 # Public, test-only TLS fixtures required by the regression suites.
-!app/src/androidTestD08test/assets/d08-test-server.p12
+!app/src/androidTest/device/upstream-dns/test/assets/d08-test-server.p12
 !app/src/test/resources/doh-local-test.p12
 keystore.properties
 __pycache__/

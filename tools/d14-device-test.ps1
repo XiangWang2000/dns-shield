@@ -21,7 +21,7 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ProductionPackage = "io.github.xiangwang2000.dnsshield"
 $TestPackage = "io.github.xiangwang2000.dnsshield.d14test"
 $TestInstrumentationPackage = "$TestPackage.test"
-$TestClass = "io.github.xiangwang2000.dnsshield.service.D14TunEndToEndBenchmarkTest"
+$TestClass = "io.github.xiangwang2000.dnsshield.service.VpnTunnelEndToEndInstrumentedBenchmarkTest"
 $Gradle = Join-Path $Root "gradlew.bat"
 $Adb = (Get-Command adb -ErrorAction Stop).Source
 
@@ -178,16 +178,12 @@ switch ($Action) {
         }
         $component = "$TestInstrumentationPackage/androidx.test.runner.AndroidJUnitRunner"
         if ($RegressionTests) {
-            Write-Host "D14 regressions: approve .d14test VPN consent if shown."
-            $regressionClasses = @(
-                "io.github.xiangwang2000.dnsshield.service.D14LiveDomainRuleReloadTest",
-                "io.github.xiangwang2000.dnsshield.service.D14DnsAdmissionTest",
-                "io.github.xiangwang2000.dnsshield.service.D14FakeUpstreamFixtureTest"
-            ) -join ","
+            Write-Host "VPN tunnel regressions: approve .d14test VPN consent if shown."
+            $regressionClasses = "io.github.xiangwang2000.dnsshield.service.VpnTunnelRegressionInstrumentedTest"
             $testOutput = Invoke-Adb $device @("shell", "am", "instrument", "-w", "-e", "class", $regressionClasses, $component)
             $testOutput | ForEach-Object { Write-Host $_ }
             if (($testOutput -join "`n") -notmatch 'OK \(3 tests\)') {
-                throw "D14 regression instrumentation did not report three passing tests."
+                throw "VPN tunnel regressions did not report three passing tests."
             }
             break
         }

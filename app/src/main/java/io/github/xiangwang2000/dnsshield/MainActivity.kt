@@ -3,6 +3,7 @@ package io.github.xiangwang2000.dnsshield
 import android.Manifest
 import android.app.Activity
 import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -76,6 +77,7 @@ import io.github.xiangwang2000.dnsshield.service.displayText
 import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
 import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
 import io.github.xiangwang2000.dnsshield.service.isIpLiteral
+import io.github.xiangwang2000.dnsshield.ui.AppUpdateAction
 import io.github.xiangwang2000.dnsshield.ui.DomainRulesTab
 import io.github.xiangwang2000.dnsshield.ui.ExemptAppsTab
 import io.github.xiangwang2000.dnsshield.ui.LogsTab
@@ -113,7 +115,10 @@ class MainActivity : ComponentActivity() {
                     containerColor = MaterialTheme.colorScheme.background
                 ) { innerPadding ->
                     DnsShieldDashboard(
-                        modifier = Modifier.padding(innerPadding)
+                        modifier = Modifier.padding(innerPadding),
+                        headerAction = {
+                            if (BuildConfig.APPLICATION_ID == "io.github.xiangwang2000.dnsshield") AppUpdateAction()
+                        }
                     )
                 }
             }
@@ -136,7 +141,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun DnsShieldDashboard(
     modifier: Modifier = Modifier,
-    viewModel: DnsVpnViewModel = viewModel()
+    viewModel: DnsVpnViewModel = viewModel(),
+    prepareVpn: (Context) -> Intent? = VpnService::prepare,
+    headerAction: (@Composable () -> Unit)? = null
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -155,7 +162,7 @@ fun DnsShieldDashboard(
 
     fun prepareAndStartVpn() {
         try {
-            val vpnIntent = VpnService.prepare(context)
+            val vpnIntent = prepareVpn(context)
             if (vpnIntent != null) {
                 vpnPrepareLauncher.launch(vpnIntent)
             } else {
@@ -239,6 +246,7 @@ fun DnsShieldDashboard(
         onAllowBlockedDomain = viewModel::allowBlockedDomain,
         onUndoDomainRule = viewModel::undoDomainRule,
         onDismissResolverNotice = viewModel::dismissResolverNotice,
+        headerAction = headerAction,
         modifier = modifier
     )
 }
@@ -265,7 +273,8 @@ fun DnsShieldScreen(
     onUndoDomainRule: suspend (DomainRuleUndoToken) -> Boolean,
     modifier: Modifier = Modifier,
     onDismissResolverNotice: () -> Unit = {},
-    onRetryLoadApps: () -> Unit = {}
+    onRetryLoadApps: () -> Unit = {},
+    headerAction: (@Composable () -> Unit)? = null
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var showAddDnsDialog by rememberSaveable { mutableStateOf(false) }
@@ -279,7 +288,7 @@ fun DnsShieldScreen(
         Row(Modifier.fillMaxSize()) {
             if (useRail) DashboardTabs(selectedTab, { selectedTab = it }, useRail = true, compactHeight = compactHeight)
             Column(Modifier.weight(1f)) {
-                AppHeader(uiState.vpnLifecycleState, uiState.networkConnectivity)
+                AppHeader(uiState.vpnLifecycleState, uiState.networkConnectivity, headerAction)
                 Box(Modifier.weight(1f).widthIn(max = 840.dp).fillMaxWidth().align(Alignment.CenterHorizontally)) {
                     when (selectedTab) {
                         0 -> ControlCenterTab(
@@ -375,7 +384,8 @@ private fun protectionStatusColor(
 @Composable
 fun AppHeader(
     lifecycleState: VpnLifecycleState,
-    networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN
+    networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN,
+    trailingAction: (@Composable () -> Unit)? = null
 ) {
     Row(
         Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
@@ -392,6 +402,7 @@ fun AppHeader(
             style = MaterialTheme.typography.labelMedium,
             color = protectionStatusColor(lifecycleState, networkConnectivity)
         )
+        trailingAction?.invoke()
     }
 }
 

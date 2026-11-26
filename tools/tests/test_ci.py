@@ -22,19 +22,28 @@ class CiRoutingTest(unittest.TestCase):
         for path in ("app/src/main/java/com/example/Foo.kt", "app/src/main/res/values/strings.xml",
                      "app/src/main/assets/active.bin", "app/src/test/java/FooTest.kt"):
             self.assertEqual(ci.select_scope([path, "README.md"]), ("Core", []), path)
-        for directory, variant in ci.VARIANT_DIRS.items():
-            self.assertEqual(ci.select_scope([f"app/src/{directory}/example.kt"]),
-                             ("Selected", [variant]), directory)
-        self.assertEqual(ci.select_scope(["app/src/androidTestD08test/assets/cert.pem",
-                                         "app/src/d15test/AndroidManifest.xml"]),
-                         ("Selected", ["d08", "d15"]))
+        suites = {
+            "ipv6-pass-through/test/java/Ipv6VpnPassThroughInstrumentedTest.kt": "d03",
+            "vpn-network-recovery/test/java/WifiAndAirplaneRecoveryInstrumentedTest.kt": "d04",
+            "upstream-dns/test/assets/d08-test-server.p12": "d08",
+            "vpn-tunnel/test/java/VpnTunnelRegressionInstrumentedTest.kt": "d14",
+            "vpn-lifecycle/app/AndroidManifest.xml": "d15",
+        }
+        device_root = "app/src/androidTest/device"
+        for source, variant in suites.items():
+            self.assertEqual(ci.select_scope([f"{device_root}/{source}"]),
+                             ("Selected", [variant]), source)
+        self.assertEqual(ci.select_scope([f"{device_root}/{source}" for source in suites]),
+                         ("Selected", ["d03", "d04", "d08", "d14", "d15"]))
 
     def test_shared_configuration_and_unknown_paths_fail_closed(self):
         for path in ("app/build.gradle.kts", "gradle/libs.versions.toml", "gradle.properties",
                      "app/src/main/AndroidManifest.xml", "app/src/main/cpp/Android.mk",
                      "app/src/androidTest/java/Shared.kt", ".github/workflows/ci.yml",
+                     "app/src/androidTest/device/unknown/test/java/Foo.kt",
+                     "app/src/androidTest/device/vpn-tunnel/Foo.kt",
                      "verify.ps1", "tools/ci.py", "tools/ci_reuse.py", "unexpected/file"):
-            self.assertEqual(ci.select_scope([path, "app/src/d15test/Foo.kt"]),
+            self.assertEqual(ci.select_scope([path, "app/src/androidTest/device/vpn-lifecycle/app/AndroidManifest.xml"]),
                              ("Full", []), path)
         self.assertEqual(ci.select_scope(None), ("Full", []))
         self.assertEqual(ci.select_scope([]), ("Full", []))
