@@ -1,0 +1,47 @@
+package io.github.xiangwang2000.dnsshield.service
+
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+
+/**
+ * Formatting helpers used while assembling per-query log lines.
+ *
+ * Constructing `SimpleDateFormat` and calling `String.format` once per DNS query is measurable
+ * on the hot path, so both helpers stay allocation-light and confine the mutable formatter to the
+ * calling thread.
+ */
+internal object DnsLogFormatting {
+    private const val HEX_DIGITS = "0123456789ABCDEF"
+
+    private class TimestampFormat(val locale: Locale, val zone: TimeZone) {
+        // The zone invalidates the cache; the formatter still honors locale overrides.
+        val formatter = SimpleDateFormat("HH:mm:ss", locale)
+        val date = Date()
+    }
+
+    private val timestampFormat = ThreadLocal<TimestampFormat>()
+
+    fun transactionId(payload: ByteArray): String {
+        if (payload.size < 2) return "Unknown"
+        val high = payload[0].toInt() and 0xFF
+        val low = payload[1].toInt() and 0xFF
+        val buffer = StringBuilder(6)
+        buffer.append("0x")
+        buffer.append(HEX_DIGITS[high ushr 4])
+        buffer.append(HEX_DIGITS[high and 0x0F])
+        buffer.append(HEX_DIGITS[low ushr 4])
+        buffer.append(HEX_DIGITS[low and 0x0F])
+        return buffer.toString()
+    }
+
+    fun timestamp(nowMillis: Long): String {
+        val locale = Locale.getDefault()
+        val zone = TimeZone.getDefault()
+        val format = timestampFormat.get()?.takeIf { it.locale == locale && it.zone == zone }
+            ?: TimestampFormat(locale, zone).also { timestampFormat.set(it) }
+        format.date.time = nowMillis
+        return format.formatter.format(format.date)
+    }
+}

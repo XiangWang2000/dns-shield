@@ -10,7 +10,7 @@ Windows 請使用 Android Studio JBR。Android runner 另需 Android SDK build t
 
 未指定 -Serial 時，Android runner 預期恰好一台已連線裝置。多台裝置時請明確指定 adb serial。
 
-Android runner 會安裝 Debug 與 androidTest APK，只執行指定 benchmark test class，並將裝置 JSON 拉回 build/。這些 runner 使用一般 Debug applicationId（不是 D04／D07 隔離套件）；請在專用測試裝置執行，避免覆蓋同簽章的既有安裝。
+Android runner 會安裝 Debug 與 androidTest APK，只執行指定 benchmark test class，並將裝置 JSON 拉回 build/。這些 runner 使用一般 Debug applicationId（不是 D03／D04／D08 等隔離套件）；請在專用測試裝置執行，避免覆蓋同簽章的既有安裝。
 
 ## Host JVM：Public Suffix resolver
 
@@ -23,6 +23,28 @@ Android runner 會安裝 Debug 與 androidTest APK，只執行指定 benchmark t
 此 runner 先驗證 production manifest，再執行 opt-in 的 ProductionPublicSuffixBenchmarkTest。它不使用 adb，也不代表 Android 執行結果。
 
 結果檔為 build/public-suffix.validation.json 和 build/public-suffix.benchmark.json。
+
+## Host JVM：DNS 熱路徑
+
+適用於比較每筆查詢路徑上的封包處理、回應解析與日誌格式化成本。三個測試都在一般 JVM 執行，不需要 adb；結果只描述 host JVM，不是 Android 實機耗電或延遲。
+
+| 測試類別 | 量測內容 | 結果標記 |
+| --- | --- | --- |
+| DnsHotPathBenchmarkTest | 查詢／回應封包處理 | DNS_HOTPATH_BENCHMARK |
+| DnsResponseParseBenchmarkTest | DNS response 解析 | DNS_RESPONSE_PARSE_BENCHMARK |
+| DnsLogFormattingBenchmarkTest | txid 與時間戳格式化 | DNS_LOG_FORMAT_BENCHMARK |
+
+`tools/benchmark_dns_hotpath.ps1` 會用 `--rerun-tasks` 執行第一個測試並印出結果標記；其餘兩個可直接指定測試類別：
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/benchmark_dns_hotpath.ps1
+.\gradlew.bat :app:testDebugUnitTest --tests "*DnsResponseParseBenchmarkTest" --rerun-tasks
+.\gradlew.bat :app:testDebugUnitTest --tests "*DnsLogFormattingBenchmarkTest" --rerun-tasks
+~~~
+
+輸出位於 app/build/test-results/testDebugUnitTest/TEST-*.xml 的 `<system-out>`；沒有時間門檻，請比較相同機器、相同 JVM、相鄰回合的相對倍率，不要跨裝置推論。
+
+時間戳的數字以單次格式化計算。`timestamp_speedup` 的對照組每次都會新建 `SimpleDateFormat`；要評估快取實作之間的差異，請在同一環境配對量測改動前後版本，不要直接使用這個倍率。
 
 ## Android：Public Suffix resolver
 

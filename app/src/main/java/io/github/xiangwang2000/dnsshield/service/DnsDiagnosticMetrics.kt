@@ -49,7 +49,6 @@ data class DnsDiagnosticsSnapshot(
     val primaryUdpDeferredToBackup: Long = 0,
     val pending: Long = 0,
     val peakPending: Long = 0,
-    val estimatedSavedBytes: Long = 0,
     val latency: DnsLatencySummary = DnsLatencySummary(),
     val coalescedWait: DnsCoalescedWaitSummary = DnsCoalescedWaitSummary(),
     val systemAttempts: Long = 0
@@ -98,7 +97,6 @@ internal class DnsDiagnosticMetrics(
     private var primaryUdpDeferredToBackup = 0L
     private var pending = 0L
     private var peakPending = 0L
-    private var estimatedSavedBytes = 0L
 
     init {
         require(latencyWindowSize > 0)
@@ -150,8 +148,7 @@ internal class DnsDiagnosticMetrics(
     fun complete(
         request: Request,
         outcome: DnsClientTerminalOutcome,
-        completedAtNanos: Long = System.nanoTime(),
-        savedBytes: Long = 0L
+        completedAtNanos: Long = System.nanoTime()
     ): Boolean = synchronized(lock) {
         if (request.completed || request.generation != generation) {
             request.completed = true
@@ -161,10 +158,7 @@ internal class DnsDiagnosticMetrics(
         request.completed = true
         when (outcome) {
             DnsClientTerminalOutcome.RESOLVED -> resolved++
-            DnsClientTerminalOutcome.BLOCKED -> {
-                blocked++
-                estimatedSavedBytes += savedBytes.coerceAtLeast(0L)
-            }
+            DnsClientTerminalOutcome.BLOCKED -> blocked++
             DnsClientTerminalOutcome.FAILED -> failed++
             DnsClientTerminalOutcome.REJECTED -> rejected++
         }
@@ -198,7 +192,6 @@ internal class DnsDiagnosticMetrics(
             primaryUdpDeferredToBackup = primaryUdpDeferredToBackup,
             pending = pending,
             peakPending = peakPending,
-            estimatedSavedBytes = estimatedSavedBytes,
             latency = DnsLatencySummary(
                 sampleCount = latencySampleCount,
                 p50Millis = percentileMillis(sortedSamples, 50),
@@ -238,7 +231,6 @@ internal class DnsDiagnosticMetrics(
         primaryUdpDeferredToBackup = 0L
         pending = 0L
         peakPending = 0L
-        estimatedSavedBytes = 0L
         latencySampleCount = 0
         nextLatencySample = 0
         queueWaitSampleCount = 0

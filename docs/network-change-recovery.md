@@ -28,7 +28,7 @@ DNS Shield 被動觀察 Android 網路 callback，不使用 `requestNetwork` 要
 
 日常建置／回歸使用根目錄的 `verify.ps1`，各 scope 見[開發指南](development.md)。它不會切換實機網路。
 
-`D09WifiRecoveryDeviceTest` 的 Wi-Fi 測試先等待初始 callback，確認沒有其他非 VPN 底層網路，再驗證：
+`WifiAndAirplaneRecoveryInstrumentedTest` 的 Wi-Fi 測試先等待初始 callback，確認沒有其他非 VPN 底層網路，再驗證：
 
 1. 已為 `ONLINE` 的防護在關閉 Wi-Fi 後產生新的 unavailable 紀錄，服務與 ViewModel 都離開 `ONLINE`，VPN 維持 `RUNNING`。
 2. Wi-Fi 恢復後回到 `ONLINE`，並經實際 TUN 收到符合查詢的成功 DNS 回應。

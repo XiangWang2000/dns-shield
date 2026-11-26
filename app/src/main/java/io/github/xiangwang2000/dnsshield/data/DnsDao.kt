@@ -81,10 +81,10 @@ interface DnsDao {
     @Query("SELECT * FROM dns_servers ORDER BY isCustom ASC, id ASC")
     suspend fun getDnsServersList(): List<DnsServer>
 
-    @Query("SELECT * FROM dns_servers WHERE isActive = 1 LIMIT 1")
+    @Query("SELECT * FROM dns_servers WHERE isActive = 1 ORDER BY id LIMIT 1")
     suspend fun getActiveDnsServer(): DnsServer?
 
-    @Query("SELECT * FROM dns_servers WHERE isActive = 1 LIMIT 1")
+    @Query("SELECT * FROM dns_servers WHERE isActive = 1 ORDER BY id LIMIT 1")
     fun getActiveDnsServerFlow(): Flow<DnsServer?>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

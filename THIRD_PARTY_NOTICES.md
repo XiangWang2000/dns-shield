@@ -1,6 +1,6 @@
 # Third-party data notices
 
-DNS Shield 1.5.0 packages a compiled domain blocklist derived from 1Hosts Lite and AdGuard DNS Filter. The application source is licensed separately under [Apache License 2.0](LICENSE).
+DNS Shield packages a compiled domain blocklist derived from 1Hosts Lite and AdGuard DNS Filter. The application source is licensed separately under [Apache License 2.0](LICENSE).
 
 ## 1Hosts Lite
 
@@ -31,3 +31,7 @@ On 2026-11-11, DNS Shield combined these snapshots by taking simple AdGuard doma
 The combined blocklist data is distributed under GNU GPL version 3. The original 1Hosts Lite input is available under MPL 2.0 and is additionally provided under GPL version 3 for use in the combined blocklist under MPL 2.0 section 3.3.
 
 Download `blocklist-source.zip` next to the APK on the matching [GitHub release](https://github.com/XiangWang2000/dns-shield/releases). It contains the unmodified pinned inputs, the canonical merged domain text, build tools, manifests, and license texts. The source and artifact contracts are [active_blocklist_source.json](tools/active_blocklist_source.json) and [active_blocklist_production.json](tools/active_blocklist_production.json).
+
+## Native DNS TCP stack
+
+The APK bundles Hev (`e802f02bae0fc55cbf681466a60e89c2e6773401`) and its recursively pinned submodules to forward client TCP/53 DNS queries. Their license texts ship inside the APK as [native-tcp-NOTICES.txt](app/src/main/assets/native-tcp-NOTICES.txt).

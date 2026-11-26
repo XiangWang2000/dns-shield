@@ -47,13 +47,6 @@ val d08InstrumentationRequested = gradle.startParameter.taskNames.any {
   it.contains("D08test", ignoreCase = true)
 }
 
-val d07InstrumentationRequested = gradle.startParameter.taskNames.any {
-  it.contains("D07test", ignoreCase = true)
-}
-val d12InstrumentationRequested = gradle.startParameter.taskNames.any {
-  it.contains("D12test", ignoreCase = true)
-}
-
 android {
   namespace = "io.github.xiangwang2000.dnsshield"
   sourceSets.getByName("main").assets.directories.add(rootProject.file("third_party").absolutePath)
@@ -68,15 +61,13 @@ android {
     ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }
     externalNativeBuild { ndkBuild { arguments += "NDK_APPLICATION_MK=${projectDir}/src/main/cpp/Application.mk" } }
     targetSdk = 37
-    versionCode = 9
-    versionName = "1.5.0"
+    versionCode = 11
+    versionName = "1.6.0"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     buildConfigField("boolean", "D14_DEVICE_TEST", "false")
     buildConfigField("int", "DNS_UPSTREAM_PORT", "53")
     if (d15InstrumentationRequested) testBuildType = "d15test"
     if (d08InstrumentationRequested) testBuildType = "d08test"
-    if (d07InstrumentationRequested) testBuildType = "d07test"
-    if (d12InstrumentationRequested) testBuildType = "d12test"
   }
 
   signingConfigs {
@@ -113,7 +104,8 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       if (releaseSigningReady) {
         signingConfig = signingConfigs.getByName("release")
@@ -154,17 +146,6 @@ android {
       buildConfigField("int", "DNS_UPSTREAM_PORT", "15353")
       matchingFallbacks += listOf("debug")
     }
-    create("d07test") {
-      initWith(getByName("debug"))
-      applicationIdSuffix = ".d07test"
-      matchingFallbacks += listOf("debug")
-      buildConfigField("int", "DNS_UPSTREAM_PORT", "15353")
-    }
-    create("d12test") {
-      initWith(getByName("debug"))
-      applicationIdSuffix = ".d12test"
-      matchingFallbacks += listOf("debug")
-    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -175,6 +156,20 @@ android {
     buildConfig = true
   }
   sourceSets {
+    val deviceTestSuites = mapOf(
+      "d03test" to "ipv6-pass-through",
+      "d04DeviceTest" to "vpn-network-recovery",
+      "d08test" to "upstream-dns",
+      "d14DeviceTest" to "vpn-tunnel",
+      "d15test" to "vpn-lifecycle",
+    )
+    val instrumentationSuites = deviceTestSuites.mapKeys { (buildType, _) ->
+      "androidTest" + buildType.replaceFirstChar(Char::uppercaseChar)
+    }
+    configureEach {
+      deviceTestSuites[name]?.let { setRoot("src/androidTest/device/$it/app") }
+      instrumentationSuites[name]?.let { setRoot("src/androidTest/device/$it/test") }
+    }
     getByName("androidTest") {
       assets.directories.add(layout.buildDirectory.dir("generated/publicSuffixAndroidTestAssets").get().asFile.absolutePath)
     }
@@ -205,6 +200,8 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.okhttp)
   testImplementation(libs.kotlin.test)
+  androidTestImplementation(platform(libs.androidx.compose.bom))
+  androidTestImplementation(libs.androidx.compose.ui.test.junit4)
   androidTestImplementation(libs.androidx.test.ext.junit)
   androidTestImplementation(libs.androidx.test.runner)
   debugImplementation(libs.androidx.compose.ui.tooling)

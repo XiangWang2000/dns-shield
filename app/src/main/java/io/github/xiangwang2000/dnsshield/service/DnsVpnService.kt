@@ -55,9 +55,6 @@ import java.io.IOException
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.Socket
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -81,7 +78,7 @@ class DnsVpnService : VpnService() {
         const val EXTRA_RESOLVER_COMMAND_REVISION = "resolverCommandRevision"
         const val ACTION_CLEAR_LOGS = "io.github.xiangwang2000.dnsshield.service.CLEAR_LOGS"
         const val ACTION_RELOAD_DOMAIN_POLICY = "io.github.xiangwang2000.dnsshield.service.RELOAD_DOMAIN_POLICY"
-        private const val CHANNEL_ID = "dns_vpn_channel"
+        internal const val VPN_NOTIFICATION_CHANNEL_ID = "dns_vpn_channel"
         internal const val NOTIFICATION_ID = 5543
         internal fun createVpnNotification(context: Context, content: String): Notification {
             val stopIntent = Intent(context, DnsVpnService::class.java).apply {
@@ -95,7 +92,7 @@ class DnsVpnService : VpnService() {
             val mainIntent = Intent(context, MainActivity::class.java)
             val mainPendingIntent = PendingIntent.getActivity(context, 0, mainIntent, flags)
 
-            return NotificationCompat.Builder(context, CHANNEL_ID)
+            return NotificationCompat.Builder(context, VPN_NOTIFICATION_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_lock_lock) // Standard lock icon
                 .setContentTitle("DNS Shield VPN")
                 .setContentText(content)
@@ -109,7 +106,7 @@ class DnsVpnService : VpnService() {
         internal fun createVpnNotificationChannel(context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val channel = NotificationChannel(
-                    CHANNEL_ID,
+                    VPN_NOTIFICATION_CHANNEL_ID,
                     "DNS Shield ",
                     NotificationManager.IMPORTANCE_LOW
                 ).apply {
@@ -143,7 +140,7 @@ class DnsVpnService : VpnService() {
         val underlyingNetworkConnectivityFlow = _underlyingNetworkConnectivityFlow.asStateFlow()
         internal val diagnosticsFlow = MutableStateFlow(DnsDiagnosticsSnapshot())
         val activeDnsFlow = MutableStateFlow("None")
-        val dnsTransportStatusFlow = MutableStateFlow("尚無上游查詢")
+        val dnsTransportStatusFlow = MutableStateFlow(DnsTransportStatus.IDLE)
         val liveLogsFlow = MutableStateFlow<List<String>>(emptyList())
         private val plaintextFallbackFence = DnsPlaintextFallbackFence()
 
@@ -430,9 +427,10 @@ class DnsVpnService : VpnService() {
         }
 
         private fun addLogInternal(message: String, writeDebugLog: Boolean) {
-            val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+            val timestamp = DnsLogFormatting.timestamp(System.currentTimeMillis())
             val formattedMessage = "[$timestamp] $message"
-            if (writeDebugLog) {
+            // Release builds keep the in-app log but must not leak queried domains to logcat.
+            if (writeDebugLog && BuildConfig.DEBUG) {
                 Log.d(TAG, formattedMessage)
             }
             synchronized(logList) {
@@ -468,10 +466,9 @@ class DnsVpnService : VpnService() {
 
         private fun completeDnsRequest(
             request: DnsDiagnosticMetrics.Request,
-            outcome: DnsClientTerminalOutcome,
-            savedBytes: Long = 0L
+            outcome: DnsClientTerminalOutcome
         ) {
-            if (diagnosticMetrics.complete(request, outcome, savedBytes = savedBytes)) {
+            if (diagnosticMetrics.complete(request, outcome)) {
                 scheduleStatsFlush()
             }
         }
@@ -597,45 +594,6 @@ class DnsVpnService : VpnService() {
 
             return policyAssembly.matcher.shouldBlock(normalized).also {
                 blockDecisionCache.put(cacheKey, it)
-            }
-        }
-
-        fun estimateSavedBytes(domain: String): Long {
-            val d = domain.lowercase()
-
-            return when {
-                d.contains("video") || d.contains("vast") || d.contains("vpaid") ->
-                    2_000 * 1024L
-
-                d.contains("doubleclick") ||
-                d.contains("googlesyndication") ||
-                d.contains("googleads") ||
-                d.contains("admob") ||
-                d.contains("adservice") ||
-                d.contains("adsystem") ||
-                d.contains("amazon-adsystem") ->
-                    500 * 1024L
-
-                d.contains("analytics") ||
-                d.contains("measurement") ||
-                d.contains("app-measurement") ->
-                    30 * 1024L
-
-                d.contains("crashlytics") ||
-                d.contains("crash") ->
-                    15 * 1024L
-
-                d.contains("telemetry") ->
-                    40 * 1024L
-
-                d.contains("tracker") ||
-                d.contains("tracking") ||
-                d.contains("adjust") ||
-                d.contains("appsflyer") ->
-                    80 * 1024L
-
-                else ->
-                    100 * 1024L
             }
         }
 
@@ -823,7 +781,7 @@ class DnsVpnService : VpnService() {
             )
             networkReadiness.signalChange()
         }
-        dnsTransportStatusFlow.value = "設定已更新，等待下一次查詢"
+        dnsTransportStatusFlow.value = DnsTransportStatus.SETTINGS_UPDATED
     }
 
     private fun invalidatePolicyState() {
@@ -1772,7 +1730,7 @@ class DnsVpnService : VpnService() {
                         candidate.allowPlaintextFallback
                     )
                     updateResolverState(candidate, testUpstream?.second ?: BuildConfig.DNS_UPSTREAM_PORT)
-                    dnsTransportStatusFlow.value = "尚無上游查詢"
+                    dnsTransportStatusFlow.value = DnsTransportStatus.IDLE
                     val label = resolverDisplayName(candidate)
                     activeDnsFlow.value = label
                     addLog("Database loaded. Upstream DNS: $label")
@@ -2206,7 +2164,7 @@ class DnsVpnService : VpnService() {
         failDnsQuery(packet, responseWriter, request)
         if (isUiForeground || backgroundFailureLogLimiter.tryAcquire()) {
             addDnsQueryLog(important = true) {
-                "✗ 有界請求容量已滿 [ID=${formatTxId(packet.payload)}]，已立即回覆 SERVFAIL"
+                "✗ 有界請求容量已滿 [ID=${DnsLogFormatting.transactionId(packet.payload)}]，已立即回覆 SERVFAIL"
             }
         }
     }
@@ -2237,7 +2195,7 @@ class DnsVpnService : VpnService() {
             completeDnsRequest(request, DnsClientTerminalOutcome.RESOLVED)
             recordUserAllowedDomain(domain, dnsState)
             addDnsQueryLog {
-                "⚡ [快取解析] [ID=${formatTxId(dnsPacket.payload)}]: $domain (記憶體命中, ${cachedResponse.size} bytes)"
+                "⚡ [快取解析] [ID=${DnsLogFormatting.transactionId(dnsPacket.payload)}]: $domain (記憶體命中, ${cachedResponse.size} bytes)"
             }
             return true
         }
@@ -2258,8 +2216,7 @@ class DnsVpnService : VpnService() {
             completeDnsRequest(request, DnsClientTerminalOutcome.FAILED)
             return true
         }
-        val savedBytes = estimateSavedBytes(domain)
-        completeDnsRequest(request, DnsClientTerminalOutcome.BLOCKED, savedBytes = savedBytes)
+        completeDnsRequest(request, DnsClientTerminalOutcome.BLOCKED)
         val reason = if (
             dnsState.policyAssembly.userRuleMatcher.decisionFor(domain) == DomainRuleAction.BLOCK
         ) DnsDecisionReason.USER_RULE else DnsDecisionReason.PROTECTION_LIST
@@ -2436,14 +2393,14 @@ class DnsVpnService : VpnService() {
                 return DnsClientTerminalOutcome.FAILED
             }
             addDnsQueryLog {
-                "✓ 解析成功 [ID=${formatTxId(dnsPayload)}]: $domain (${sharedResponse.size} bytes)"
+                "✓ 解析成功 [ID=${DnsLogFormatting.transactionId(dnsPayload)}]: $domain (${sharedResponse.size} bytes)"
             }
             return DnsClientTerminalOutcome.RESOLVED
         } else {
             sendServFailResponse(dnsPacket, responseWriter)
             if (isUiForeground || backgroundFailureLogLimiter.tryAcquire()) {
                 addDnsQueryLog(important = true) {
-                    "✗ 請求失敗 [ID=${formatTxId(dnsPayload)}]: $domain 伺服器逾時、超載或無回應"
+                    "✗ 請求失敗 [ID=${DnsLogFormatting.transactionId(dnsPayload)}]: $domain 伺服器逾時、超載或無回應"
                 }
             }
             return DnsClientTerminalOutcome.FAILED
@@ -2626,15 +2583,15 @@ class DnsVpnService : VpnService() {
 
         if (!isCurrentDnsState(dnsState)) return null
         when (outcome.transport) {
-            DnsTransport.ENCRYPTED_HTTPS -> dnsTransportStatusFlow.value = "DoH 加密"
-            DnsTransport.PLAINTEXT_UDP -> dnsTransportStatusFlow.value = "UDP/53 明文降級"
-            DnsTransport.PLAINTEXT_TCP -> dnsTransportStatusFlow.value = "TCP/53 明文降級"
-            DnsTransport.SYSTEM -> dnsTransportStatusFlow.value = "系統 DNS"
+            DnsTransport.ENCRYPTED_HTTPS -> dnsTransportStatusFlow.value = DnsTransportStatus.ENCRYPTED_HTTPS
+            DnsTransport.PLAINTEXT_UDP -> dnsTransportStatusFlow.value = DnsTransportStatus.PLAINTEXT_UDP
+            DnsTransport.PLAINTEXT_TCP -> dnsTransportStatusFlow.value = DnsTransportStatus.PLAINTEXT_TCP
+            DnsTransport.SYSTEM -> dnsTransportStatusFlow.value = DnsTransportStatus.SYSTEM
             DnsTransport.UNAVAILABLE -> {
                 dnsTransportStatusFlow.value = when {
-                    usesSystemDns -> "系統 DNS 無法解析 · SERVFAIL"
-                    dnsState.server.allowPlaintextFallback -> "上游不可用 · SERVFAIL"
-                    else -> "僅加密 · DoH 不可用 · SERVFAIL"
+                    usesSystemDns -> DnsTransportStatus.UNAVAILABLE_SYSTEM
+                    dnsState.server.allowPlaintextFallback -> DnsTransportStatus.UNAVAILABLE_FALLBACK
+                    else -> DnsTransportStatus.UNAVAILABLE_STRICT
                 }
             }
         }
@@ -2648,16 +2605,16 @@ class DnsVpnService : VpnService() {
             BackgroundDnsLogPolicy.Decision.Detail -> {
                 when (outcome.transport) {
                     DnsTransport.ENCRYPTED_HTTPS ->
-                        "🌐 [DoH 解析] [ID=${formatTxId(dnsPayload)}]: 透過 HTTPS 解析 $domain"
+                        "🌐 [DoH 解析] [ID=${DnsLogFormatting.transactionId(dnsPayload)}]: 透過 HTTPS 解析 $domain"
                     DnsTransport.PLAINTEXT_UDP -> if (dnsState.dohEndpoints.isEmpty()) {
-                        "🌐 [DNS 明文] [ID=${formatTxId(dnsPayload)}]: 此解析器使用傳統 DNS，以 UDP/53 解析 $domain"
+                        "🌐 [DNS 明文] [ID=${DnsLogFormatting.transactionId(dnsPayload)}]: 此解析器使用傳統 DNS，以 UDP/53 解析 $domain"
                     } else {
-                        "⚠️ [DNS 降級] [ID=${formatTxId(dnsPayload)}]: 本次 DoH 未取得可用回應，改用 UDP/53 解析 $domain"
+                        "⚠️ [DNS 降級] [ID=${DnsLogFormatting.transactionId(dnsPayload)}]: 本次 DoH 未取得可用回應，改用 UDP/53 解析 $domain"
                     }
                     DnsTransport.PLAINTEXT_TCP ->
-                        "⚠️ [DNS 明文] [ID=${formatTxId(dnsPayload)}]: UDP 回應遭截短，改用 TCP/53 解析 $domain"
+                        "⚠️ [DNS 明文] [ID=${DnsLogFormatting.transactionId(dnsPayload)}]: UDP 回應遭截短，改用 TCP/53 解析 $domain"
                     DnsTransport.SYSTEM ->
-                        "🌐 [系統 DNS] [ID=${formatTxId(dnsPayload)}]: 透過 Android 解析 $domain"
+                        "🌐 [系統 DNS] [ID=${DnsLogFormatting.transactionId(dnsPayload)}]: 透過 Android 解析 $domain"
                     DnsTransport.UNAVAILABLE -> error("Unavailable outcomes are not successful resolution logs")
                 }
             }
@@ -2675,14 +2632,6 @@ class DnsVpnService : VpnService() {
         }
         if (successMessage != null) addLogInternal(successMessage, writeDebugLog = true)
         return outcome.response?.takeIf { deadline.remainingMillis() > 0L && isCurrentDnsState(dnsState) }
-    }
-
-    private fun formatTxId(dnsPayload: ByteArray): String {
-        return if (dnsPayload.size >= 2) {
-            String.format("0x%02X%02X", dnsPayload[0], dnsPayload[1])
-        } else {
-            "Unknown"
-        }
     }
 
     private suspend fun handleTunnelEnded(command: LifecycleCommand.TunnelEnded) {

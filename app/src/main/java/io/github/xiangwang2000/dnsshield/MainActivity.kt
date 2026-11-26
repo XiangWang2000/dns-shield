@@ -1,9 +1,16 @@
 package io.github.xiangwang2000.dnsshield
 
+import android.Manifest
 import android.app.Activity
+import android.app.NotificationManager
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -46,6 +53,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.xiangwang2000.dnsshield.blocking.DomainPolicyDiagnostics
@@ -59,10 +71,13 @@ import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
 import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
 import io.github.xiangwang2000.dnsshield.service.UnderlyingNetworkConnectivity
 import io.github.xiangwang2000.dnsshield.service.DnsDiagnosticsSnapshot
+import io.github.xiangwang2000.dnsshield.service.DnsTransportStatus
 import io.github.xiangwang2000.dnsshield.service.DnsVpnService
+import io.github.xiangwang2000.dnsshield.service.displayText
 import io.github.xiangwang2000.dnsshield.service.DohEndpointConfiguration
 import io.github.xiangwang2000.dnsshield.service.VpnLifecycleState
 import io.github.xiangwang2000.dnsshield.service.isIpLiteral
+import io.github.xiangwang2000.dnsshield.ui.AppUpdateAction
 import io.github.xiangwang2000.dnsshield.ui.DomainRulesTab
 import io.github.xiangwang2000.dnsshield.ui.ExemptAppsTab
 import io.github.xiangwang2000.dnsshield.ui.LogsTab
@@ -100,7 +115,10 @@ class MainActivity : ComponentActivity() {
                     containerColor = MaterialTheme.colorScheme.background
                 ) { innerPadding ->
                     DnsShieldDashboard(
-                        modifier = Modifier.padding(innerPadding)
+                        modifier = Modifier.padding(innerPadding),
+                        headerAction = {
+                            if (BuildConfig.APPLICATION_ID == "io.github.xiangwang2000.dnsshield") AppUpdateAction()
+                        }
                     )
                 }
             }
@@ -123,7 +141,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun DnsShieldDashboard(
     modifier: Modifier = Modifier,
-    viewModel: DnsVpnViewModel = viewModel()
+    viewModel: DnsVpnViewModel = viewModel(),
+    prepareVpn: (Context) -> Intent? = VpnService::prepare,
+    headerAction: (@Composable () -> Unit)? = null
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -133,11 +153,39 @@ fun DnsShieldDashboard(
         contract = ActivityResultContracts.StartActivityForResult(),
         onResult = { result ->
             if (result.resultCode == Activity.RESULT_OK) {
-                // Permission granted, safely trigger VPN toggle action
-                viewModel.toggleVpn(context)
+                viewModel.startVpn(context)
             } else {
                 Toast.makeText(context, "同意 Android 的 VPN 連線要求後，才能開啟 DNS 防護。", Toast.LENGTH_SHORT).show()
             }
+        }
+    )
+
+    fun prepareAndStartVpn() {
+        try {
+            val vpnIntent = prepareVpn(context)
+            if (vpnIntent != null) {
+                vpnPrepareLauncher.launch(vpnIntent)
+            } else {
+                viewModel.startVpn(context)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to prepare/launch VPN service", e)
+            Toast.makeText(context, "無法開啟 VPN，請稍後重試。${e.localizedMessage.orEmpty()}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { granted ->
+            if (!granted) {
+                Toast.makeText(
+                    context,
+                    "未開啟通知權限；防護仍會運作，但不會顯示常駐通知。",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            // Notification denial must not block the VPN; continue with the normal flow.
+            prepareAndStartVpn()
         }
     )
 
@@ -149,16 +197,18 @@ fun DnsShieldDashboard(
             VpnLifecycleState.STOPPING -> Unit
             VpnLifecycleState.STOPPED,
             VpnLifecycleState.FAILED -> {
-                try {
-                    val vpnIntent = VpnService.prepare(context)
-                    if (vpnIntent != null) {
-                        vpnPrepareLauncher.launch(vpnIntent)
-                    } else {
-                        viewModel.toggleVpn(context)
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("MainActivity", "Failed to prepare/launch VPN service", e)
-                    Toast.makeText(context, "無法開啟 VPN，請稍後重試。${e.localizedMessage.orEmpty()}", Toast.LENGTH_LONG).show()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    requiresNotificationPermission(
+                        sdkInt = Build.VERSION.SDK_INT,
+                        permissionGranted = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) == PackageManager.PERMISSION_GRANTED
+                    )
+                ) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    prepareAndStartVpn()
                 }
             }
         }
@@ -196,6 +246,7 @@ fun DnsShieldDashboard(
         onAllowBlockedDomain = viewModel::allowBlockedDomain,
         onUndoDomainRule = viewModel::undoDomainRule,
         onDismissResolverNotice = viewModel::dismissResolverNotice,
+        headerAction = headerAction,
         modifier = modifier
     )
 }
@@ -222,7 +273,8 @@ fun DnsShieldScreen(
     onUndoDomainRule: suspend (DomainRuleUndoToken) -> Boolean,
     modifier: Modifier = Modifier,
     onDismissResolverNotice: () -> Unit = {},
-    onRetryLoadApps: () -> Unit = {}
+    onRetryLoadApps: () -> Unit = {},
+    headerAction: (@Composable () -> Unit)? = null
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var showAddDnsDialog by rememberSaveable { mutableStateOf(false) }
@@ -236,7 +288,7 @@ fun DnsShieldScreen(
         Row(Modifier.fillMaxSize()) {
             if (useRail) DashboardTabs(selectedTab, { selectedTab = it }, useRail = true, compactHeight = compactHeight)
             Column(Modifier.weight(1f)) {
-                AppHeader(uiState.vpnLifecycleState, uiState.networkConnectivity)
+                AppHeader(uiState.vpnLifecycleState, uiState.networkConnectivity, headerAction)
                 Box(Modifier.weight(1f).widthIn(max = 840.dp).fillMaxWidth().align(Alignment.CenterHorizontally)) {
                     when (selectedTab) {
                         0 -> ControlCenterTab(
@@ -332,7 +384,8 @@ private fun protectionStatusColor(
 @Composable
 fun AppHeader(
     lifecycleState: VpnLifecycleState,
-    networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN
+    networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN,
+    trailingAction: (@Composable () -> Unit)? = null
 ) {
     Row(
         Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
@@ -349,6 +402,7 @@ fun AppHeader(
             style = MaterialTheme.typography.labelMedium,
             color = protectionStatusColor(lifecycleState, networkConnectivity)
         )
+        trailingAction?.invoke()
     }
 }
 
@@ -513,6 +567,73 @@ fun StatCard(title: String, value: String, modifier: Modifier = Modifier) {
     }
 }
 
+internal fun requiresNotificationPermission(sdkInt: Int, permissionGranted: Boolean): Boolean =
+    sdkInt >= Build.VERSION_CODES.TIRAMISU && !permissionGranted
+
+private fun vpnNotificationsEnabled(context: android.content.Context): Boolean {
+    if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return false
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return true
+    val channel = manager.getNotificationChannel(DnsVpnService.VPN_NOTIFICATION_CHANNEL_ID) ?: return true
+    return channel.importance != NotificationManager.IMPORTANCE_NONE
+}
+
+@Composable
+private fun NotificationPermissionNotice() {
+    val context = LocalContext.current
+    var notificationsEnabled by remember { mutableStateOf(vpnNotificationsEnabled(context)) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                notificationsEnabled = vpnNotificationsEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    if (notificationsEnabled) return
+
+    Surface(
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("notification_permission_card")
+            .semantics { liveRegion = LiveRegionMode.Polite }
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "防護通知已關閉",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            Text(
+                "開啟防護通知後，就能在通知欄查看 VPN 狀態，也可以從那裡斷線。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            TextButton(
+                onClick = {
+                    val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    } else {
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null)
+                        )
+                    }
+                    runCatching { context.startActivity(intent) }
+                },
+                modifier = Modifier.heightIn(min = 48.dp).testTag("open_notification_settings")
+            ) {
+                Text("開啟通知設定", color = MaterialTheme.colorScheme.onTertiaryContainer)
+            }
+        }
+    }
+}
+
 @Composable
 fun ControlCenterTab(
     uiState: DnsShieldUiState,
@@ -535,6 +656,11 @@ fun ControlCenterTab(
                 uiState.vpnLifecycleState, uiState.queryCount, uiState.blockedAds,
                 onToggleVpn, onShowLogs, uiState.networkConnectivity
             )
+        }
+        if (uiState.vpnLifecycleState == VpnLifecycleState.RUNNING ||
+            uiState.vpnLifecycleState == VpnLifecycleState.STARTING
+        ) {
+            item { NotificationPermissionNotice() }
         }
         uiState.resolverNotice?.let { notice ->
             item {
@@ -586,10 +712,13 @@ fun ControlCenterTab(
                     style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    uiState.dnsTransportStatus, style = MaterialTheme.typography.bodyMedium,
-                    color = when {
-                        uiState.dnsTransportStatus.contains("SERVFAIL") || uiState.dnsTransportStatus.contains("不可用") -> MaterialTheme.colorScheme.error
-                        uiState.dnsTransportStatus.contains("明文") -> MaterialTheme.colorScheme.tertiary
+                    uiState.dnsTransportStatus.displayText(), style = MaterialTheme.typography.bodyMedium,
+                    color = when (uiState.dnsTransportStatus) {
+                        DnsTransportStatus.UNAVAILABLE_SYSTEM,
+                        DnsTransportStatus.UNAVAILABLE_FALLBACK,
+                        DnsTransportStatus.UNAVAILABLE_STRICT -> MaterialTheme.colorScheme.error
+                        DnsTransportStatus.PLAINTEXT_UDP,
+                        DnsTransportStatus.PLAINTEXT_TCP -> MaterialTheme.colorScheme.tertiary
                         else -> MaterialTheme.colorScheme.onSurface
                     }
                 )
@@ -745,22 +874,60 @@ private fun DisclosureCard(title: String, summary: String, modifier: Modifier = 
 
 @Composable
 private fun DnsDiagnosticsCard(diagnostics: DnsDiagnosticsSnapshot) {
-    DisclosureCard("連線診斷", "累積查詢失敗 ${diagnostics.failed} · 待處理 ${diagnostics.pending}", Modifier.testTag("dns_diagnostics_card")) {
-        val lines = listOf(
-            "收到 ${diagnostics.received} · 解析 ${diagnostics.resolved} · 攔截 ${diagnostics.blocked}",
-            "累積查詢失敗 ${diagnostics.failed}（超載 ${diagnostics.overloaded}）· 拒絕 ${diagnostics.rejected}",
-            "快取命中 ${diagnostics.cacheHits} · 合併重複查詢 ${diagnostics.coalesced}",
-            "上游傳輸：DoH 已排程 ${diagnostics.dohCallsQueued} · UDP 已送出 ${diagnostics.udpAttempts} · TCP ${diagnostics.tcpAttempts}",
-            "UDP 備援 ${diagnostics.fallbackAttempts} · UDP 重試 ${diagnostics.udpRetryAttempts}",
-            "UDP 回覆：主要 ${diagnostics.primaryUdpAnswers} · 備援 ${diagnostics.secondaryUdpAnswers}",
-            "UDP 逾時：主要 ${diagnostics.primaryUdpTimeouts} · 備援 ${diagnostics.secondaryUdpTimeouts} · 先用備援 ${diagnostics.primaryUdpDeferredToBackup}",
-            "待處理 ${diagnostics.pending} · 最高 ${diagnostics.peakPending}",
-            if (diagnostics.latency.sampleCount == 0) "查詢延遲：尚無資料"
-            else "最近 ${diagnostics.latency.sampleCount} 筆延遲：P50 ${diagnostics.latency.p50Millis} ms · P95 ${diagnostics.latency.p95Millis} ms"
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
+    DisclosureCard(
+        "連線診斷",
+        "解析 ${diagnostics.resolved} · 攔截 ${diagnostics.blocked} · 失敗 ${diagnostics.failed}",
+        Modifier.testTag("dns_diagnostics_card")
+    ) {
+        val settled = diagnostics.resolved + diagnostics.blocked + diagnostics.failed + diagnostics.rejected
+        val successPercent = if (settled == 0L) {
+            null
+        } else {
+            (diagnostics.resolved + diagnostics.blocked) * 100.0 / settled
+        }
+        Text(
+            if (successPercent == null) {
+                "尚無查詢結果"
+            } else {
+                "查詢成功率 ${String.format(java.util.Locale.ROOT, "%.1f", successPercent)}%（已結算 $settled 筆）"
+            },
+            style = MaterialTheme.typography.bodyMedium
         )
-        lines.forEach { Text(it, style = MaterialTheme.typography.bodyMedium) }
-        if (diagnostics.systemAttempts > 0) {
-            Text("系統 DNS ${diagnostics.systemAttempts} 次", style = MaterialTheme.typography.bodyMedium)
+        Text(
+            if (diagnostics.latency.sampleCount == 0) {
+                "查詢延遲：尚無資料"
+            } else {
+                "最近 ${diagnostics.latency.sampleCount} 筆延遲：P50 ${diagnostics.latency.p50Millis} ms · P95 ${diagnostics.latency.p95Millis} ms"
+            },
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Text(
+            "快取命中 ${diagnostics.cacheHits} · 合併重複查詢 ${diagnostics.coalesced} · 待處理 ${diagnostics.pending}",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        TextButton(
+            onClick = { showAdvanced = !showAdvanced },
+            modifier = Modifier.heightIn(min = 48.dp).testTag("toggle_advanced_diagnostics")
+        ) {
+            Text(if (showAdvanced) "收起進階統計" else "顯示進階統計")
+        }
+        if (showAdvanced) {
+            listOf(
+                "收到 ${diagnostics.received} · 拒絕 ${diagnostics.rejected} · 超載 ${diagnostics.overloaded}",
+                "上游傳輸：DoH 已排程 ${diagnostics.dohCallsQueued} · UDP 已送出 ${diagnostics.udpAttempts} · TCP ${diagnostics.tcpAttempts}",
+                "UDP 備援 ${diagnostics.fallbackAttempts} · UDP 重試 ${diagnostics.udpRetryAttempts}",
+                "UDP 回覆：主要 ${diagnostics.primaryUdpAnswers} · 備援 ${diagnostics.secondaryUdpAnswers}",
+                "UDP 逾時：主要 ${diagnostics.primaryUdpTimeouts} · 備援 ${diagnostics.secondaryUdpTimeouts} · 先用備援 ${diagnostics.primaryUdpDeferredToBackup}",
+                "待處理 ${diagnostics.pending} · 最高 ${diagnostics.peakPending}",
+                "系統 DNS ${diagnostics.systemAttempts} 次"
+            ).forEach {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
         Text("失敗數為累積查詢失敗，不代表目前仍無法連線。統計保存在記憶體，App 程序結束後會重設。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }

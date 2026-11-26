@@ -134,27 +134,43 @@ class SocksDnsServerTest {
 
     @Test
     fun closeUnblocksPendingHandshakeAndStopsListenerWithoutWaiting() {
-        val server = SocksDnsServer(handler = { _, _ -> }, idleTimeoutMillis = 10_000)
-        server.start()
-        val port = server.port
-        connect(server).use { socket ->
-            socket.getOutputStream().write(byteArrayOf(5, 1, 2))
-            socket.getOutputStream().flush()
-            assertContentEquals(byteArrayOf(5, 2), readBytes(socket, 2))
-            val username = server.username.toByteArray(Charsets.UTF_8)
-            socket.getOutputStream().write(byteArrayOf(1, username.size.toByte(), username[0]))
-            socket.getOutputStream().flush()
+        withServer(handler = { _, _ -> }, idleTimeoutMillis = 10_000) { server ->
+            val loopback = InetAddress.getByName("127.0.0.1")
+            val listenerAddress = InetSocketAddress(loopback, server.port)
+            Socket().use { inFlightProbe ->
+                Socket().use { refusalProbe ->
+                    // Allocate both source ports while the listener owns its port, to avoid TCP self-connect.
+                    val sourceAddress = InetSocketAddress(loopback, 0)
+                    inFlightProbe.bind(sourceAddress)
+                    inFlightProbe.soTimeout = 500
+                    refusalProbe.bind(sourceAddress)
 
-            val started = System.nanoTime()
-            server.close()
-            val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
-            assertTrue(elapsedMillis < 1_000, "close took " + elapsedMillis + "ms")
-            awaitClosed(socket)
-        }
+                    connect(server).use { socket ->
+                        socket.getOutputStream().write(byteArrayOf(5, 1, 2))
+                        socket.getOutputStream().flush()
+                        assertContentEquals(byteArrayOf(5, 2), readBytes(socket, 2))
+                        val username = server.username.toByteArray(Charsets.UTF_8)
+                        socket.getOutputStream().write(byteArrayOf(1, username.size.toByte(), username[0]))
+                        socket.getOutputStream().flush()
 
-        Socket().use { refused ->
-            assertFailsWith<ConnectException> {
-                refused.connect(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 500)
+                        val started = System.nanoTime()
+                        server.close()
+                        val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+                        assertTrue(elapsedMillis < 1_000, "close took " + elapsedMillis + "ms")
+                        awaitClosed(socket)
+                    }
+
+                    // A blocked accept may still unwind after close returns. It must drop any raced connection.
+                    try {
+                        inFlightProbe.connect(listenerAddress, 500)
+                        awaitClosed(inFlightProbe)
+                    } catch (_: ConnectException) {
+                        // The listener has already been released.
+                    }
+                    assertFailsWith<ConnectException> {
+                        refusalProbe.connect(listenerAddress, 500)
+                    }
+                }
             }
         }
     }

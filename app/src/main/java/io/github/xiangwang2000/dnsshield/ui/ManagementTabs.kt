@@ -1,9 +1,10 @@
 package io.github.xiangwang2000.dnsshield.ui
 
 import android.content.ClipData
+import android.graphics.drawable.Drawable
 import android.os.Build
-import android.widget.ImageView
 import android.widget.Toast
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -75,8 +76,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalConfiguration
@@ -367,15 +374,10 @@ fun AppIconAsync(packageName: String, modifier: Modifier = Modifier) {
 
     val currentDrawable = iconDrawable
     if (currentDrawable != null) {
-        AndroidView(
-            factory = { viewContext ->
-                ImageView(viewContext).apply {
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                }
-            },
-            update = { imageView ->
-                imageView.setImageDrawable(currentDrawable)
-            },
+        Image(
+            painter = remember(currentDrawable) { DrawablePainter(currentDrawable) },
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
             modifier = modifier
         )
     } else {
@@ -954,15 +956,17 @@ fun LogsTab(
     val clipboard = LocalClipboard.current
     val context = LocalContext.current
     val searchTerm = domainSearchQuery.trim()
-    val filteredEvents = blockedEvents.filter { event ->
-        (searchTerm.isEmpty() || event.domain.contains(searchTerm, ignoreCase = true)) &&
-            (
-                when (selectedDomainFilter) {
-                    DomainLogFilter.ALL -> true
-                    DomainLogFilter.BLOCKED -> event.decision == DnsDecision.BLOCK
-                    DomainLogFilter.ALLOWED -> event.decision == DnsDecision.ALLOW
-                }
-            )
+    val filteredEvents = remember(blockedEvents, searchTerm, selectedDomainFilter) {
+        blockedEvents.filter { event ->
+            (searchTerm.isEmpty() || event.domain.contains(searchTerm, ignoreCase = true)) &&
+                (
+                    when (selectedDomainFilter) {
+                        DomainLogFilter.ALL -> true
+                        DomainLogFilter.BLOCKED -> event.decision == DnsDecision.BLOCK
+                        DomainLogFilter.ALLOWED -> event.decision == DnsDecision.ALLOW
+                    }
+                    )
+        }
     }
     val ruleMatcher = remember(userDomainRules) {
         UserDomainRuleMatcher(userDomainRules.mapNotNull { rule ->
@@ -1436,5 +1440,24 @@ private fun getLogColor(log: String): Color {
         log.contains("✓") || log.contains("成功") -> CyberEmeraldGlow
         log.contains("✗") || log.contains("Err") || log.contains("失敗") -> CyberCrimson
         else -> ColorTextPrimary
+    }
+}
+
+/**
+ * Draws a platform [Drawable] without a per-item `AndroidView`, which keeps LazyColumn scrolling
+ * from paying View-interop costs for every visible app icon.
+ */
+private class DrawablePainter(private val drawable: Drawable) : Painter() {
+    override val intrinsicSize: Size
+        get() = Size(
+            drawable.intrinsicWidth.toFloat().coerceAtLeast(1f),
+            drawable.intrinsicHeight.toFloat().coerceAtLeast(1f)
+        )
+
+    override fun DrawScope.onDraw() {
+        drawIntoCanvas { canvas ->
+            drawable.setBounds(0, 0, size.width.toInt(), size.height.toInt())
+            drawable.draw(canvas.nativeCanvas)
+        }
     }
 }

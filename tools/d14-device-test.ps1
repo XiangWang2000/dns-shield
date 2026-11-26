@@ -4,12 +4,16 @@ param(
     [ValidateSet("Build", "Install", "Run", "Uninstall")]
     [string]$Action,
     [string]$Serial,
+    [switch]$RegressionTests,
     [switch]$ManualNetworkHandoff,
     [switch]$CheckDelayedResponseFence,
     [string]$BenchmarkLabel = "unlabeled"
 )
 
 $ErrorActionPreference = "Stop"
+if ($RegressionTests -and ($Action -ne "Run" -or $ManualNetworkHandoff -or $CheckDelayedResponseFence)) {
+    throw "-RegressionTests is for -Action Run without network handoff options."
+}
 if ($CheckDelayedResponseFence -and -not $ManualNetworkHandoff) {
     throw "-CheckDelayedResponseFence requires -ManualNetworkHandoff."
 }
@@ -17,7 +21,7 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ProductionPackage = "io.github.xiangwang2000.dnsshield"
 $TestPackage = "io.github.xiangwang2000.dnsshield.d14test"
 $TestInstrumentationPackage = "$TestPackage.test"
-$TestClass = "io.github.xiangwang2000.dnsshield.service.D14TunEndToEndBenchmarkTest"
+$TestClass = "io.github.xiangwang2000.dnsshield.service.VpnTunnelEndToEndInstrumentedBenchmarkTest"
 $Gradle = Join-Path $Root "gradlew.bat"
 $Adb = (Get-Command adb -ErrorAction Stop).Source
 
@@ -172,6 +176,18 @@ switch ($Action) {
         if ($TestPackage -eq $ProductionPackage) {
             throw "Refusing to run an instrumentation target that matches production."
         }
+        $component = "$TestInstrumentationPackage/androidx.test.runner.AndroidJUnitRunner"
+        if ($RegressionTests) {
+            Write-Host "VPN tunnel regressions: approve .d14test VPN consent if shown."
+            $regressionClasses = "io.github.xiangwang2000.dnsshield.service.VpnTunnelRegressionInstrumentedTest"
+            $testOutput = Invoke-Adb $device @("shell", "am", "instrument", "-w", "-e", "class", $regressionClasses, $component)
+            $testOutput | ForEach-Object { Write-Host $_ }
+            if (($testOutput -join "`n") -notmatch 'OK \(3 tests\)') {
+                throw "VPN tunnel regressions did not report three passing tests."
+            }
+            break
+        }
+
         $reportDirectory = Join-Path $Root "captures\d14"
         New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
         $before = @(Get-D14Reports $device $TestPackage)
@@ -186,7 +202,6 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { throw "Could not record source revision." }
         $sourceChanges = & git -C $Root status --porcelain --untracked-files=no
         if ($sourceChanges) { $sourceRevision += "+dirty" }
-        $component = "$TestInstrumentationPackage/androidx.test.runner.AndroidJUnitRunner"
         $testOutput = & $Adb -s $device shell am instrument -w -e class "$TestClass#$method" -e d14_label $BenchmarkLabel -e d14_source_revision $sourceRevision $component 2>&1
         $testExitCode = $LASTEXITCODE
         $testOutput | ForEach-Object { Write-Host $_ }

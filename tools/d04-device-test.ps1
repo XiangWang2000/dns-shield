@@ -11,7 +11,7 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ProductionPackage = "io.github.xiangwang2000.dnsshield"
 $TestPackage = "$ProductionPackage.d04test"
 $TestInstrumentationPackage = "$TestPackage.test"
-$TestClass = "io.github.xiangwang2000.dnsshield.service.VpnLifecycleDeviceTest"
+$TestClass = "io.github.xiangwang2000.dnsshield.service.VpnLifecycleInstrumentedTest"
 $Gradle = Join-Path $Root "gradlew.bat"
 $Adb = (Get-Command adb -ErrorAction Stop).Source
 

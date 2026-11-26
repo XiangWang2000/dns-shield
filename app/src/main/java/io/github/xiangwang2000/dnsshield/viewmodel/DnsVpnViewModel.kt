@@ -22,6 +22,7 @@ import io.github.xiangwang2000.dnsshield.data.BypassedApp
 import io.github.xiangwang2000.dnsshield.data.DnsResolverMode
 import io.github.xiangwang2000.dnsshield.data.DnsServer
 import io.github.xiangwang2000.dnsshield.service.DnsDiagnosticsSnapshot
+import io.github.xiangwang2000.dnsshield.service.DnsTransportStatus
 import io.github.xiangwang2000.dnsshield.blocking.RulePolicyStatus
 import io.github.xiangwang2000.dnsshield.data.UserDomainRuleEntity
 import io.github.xiangwang2000.dnsshield.service.DnsDecisionEvent
@@ -51,7 +52,7 @@ data class DnsShieldUiState(
     val vpnLifecycleState: VpnLifecycleState = VpnLifecycleState.STOPPED,
     val diagnostics: DnsDiagnosticsSnapshot = DnsDiagnosticsSnapshot(),
     val activeDns: String = "None",
-    val dnsTransportStatus: String = "尚無上游查詢",
+    val dnsTransportStatus: DnsTransportStatus = DnsTransportStatus.IDLE,
     val logs: List<String> = emptyList(),
     val userDomainRules: List<UserDomainRuleEntity> = emptyList(),
     val domainRuleSearchQuery: String = "",
@@ -70,7 +71,6 @@ data class DnsShieldUiState(
 ) {
     val queryCount: Long get() = diagnostics.received
     val blockedAds: Long get() = diagnostics.blocked
-    val savedBytes: Long get() = diagnostics.estimatedSavedBytes
 }
 
 data class VpnMetricsState(
@@ -81,7 +81,7 @@ data class VpnMetricsState(
 data class VpnStatusAndDnsState(
     val lifecycleState: VpnLifecycleState,
     val activeDns: String,
-    val dnsTransportStatus: String,
+    val dnsTransportStatus: DnsTransportStatus,
     val dnsServers: List<DnsServer>,
     val activeDnsServer: DnsServer?,
     val networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN
@@ -290,27 +290,14 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             withContext(Dispatchers.IO) {
                 val packageManager = getApplication<Application>().packageManager
                 val (saved, applied) = snapshot
-                val changed = (saved - applied) + (applied - saved)
-                changed.any { isPackageInstalled(it, packageManager) }
+                hasVisibleBypassChange(saved, applied) { isPackageInstalled(it, packageManager) }
             }
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
-    private val installedAppsWithExclusions = combine(_installedApps, _bypassedApps) { apps, saved ->
-        val bypassedPackages = saved.orEmpty().mapTo(mutableSetOf()) { it.packageName }
-        apps.map { app -> app.copy(isBypassed = app.packageName in bypassedPackages) }
-    }
+    private val installedAppsWithExclusions = combine(_installedApps, _bypassedApps, ::applyBypassState)
 
-    val filteredApps = combine(installedAppsWithExclusions, _searchQuery) { apps, query ->
-        if (query.isBlank()) {
-            apps
-        } else {
-            apps.filter {
-                it.appName.contains(query, ignoreCase = true) ||
-                        it.packageName.contains(query, ignoreCase = true)
-            }
-        }
-    }.stateIn(
+    val filteredApps = combine(installedAppsWithExclusions, _searchQuery, ::filterApps).stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
@@ -991,9 +978,20 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
     }
+
+    internal fun startVpn(context: Context) {
+        if (DnsVpnService.lifecycleStateFlow.value.canStart) {
+            requestVpnAction(context, VpnToggleAction.START)
+        }
+    }
+
     fun toggleVpn(context: Context) {
+        requestVpnAction(context, _vpnLifecycleState.value.toggleAction())
+    }
+
+    private fun requestVpnAction(context: Context, requestedAction: VpnToggleAction) {
         try {
-            when (_vpnLifecycleState.value.toggleAction()) {
+            when (requestedAction) {
                 VpnToggleAction.NONE -> return
                 VpnToggleAction.STOP -> {
                     addLog("[安全防護] 已送出關閉防護服務的要求…")

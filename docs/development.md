@@ -26,7 +26,7 @@ $env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
 powershell -NoProfile -ExecutionPolicy Bypass -File ./verify.ps1
 ~~~
 
-verify.ps1 會檢查 PowerShell 腳本語法、Python 工具、production blocklist 與 Public Suffix assets，執行 Android lint、JVM 測試及 Kotlin 編譯，並建置 Debug 與隔離 instrumentation variants。建置 androidTest APK 不等於執行裝置測試；此入口不會自動執行 adb instrumentation。
+verify.ps1 會檢查 PowerShell 腳本語法、Python 工具、production blocklist 與 Public Suffix assets，執行 Android lint、JVM 測試及 Kotlin 編譯，並建置 Debug 與隔離 instrumentation variants。建置 androidTest APK 不等於執行裝置測試；此入口不會自動執行 adb instrumentation，consent-free 的裝置案例改由 CI 的 emulator job 執行。
 
 ## 程式結構
 
@@ -39,9 +39,9 @@ verify.ps1 會檢查 PowerShell 腳本語法、Python 工具、production blockl
 | [service/DnsVpnService.kt](../app/src/main/java/io/github/xiangwang2000/dnsshield/service/DnsVpnService.kt) 與 [service/](../app/src/main/java/io/github/xiangwang2000/dnsshield/service) | VPN／TUN 生命週期、DNS 查詢、網路切換、快取、上游傳輸與診斷。 |
 | [app/src/main/cpp/](../app/src/main/cpp) 與 NativeDnsTcpRuntime、SocksDnsServer | 用於轉送用戶端 TCP/53 DNS 的 JNI／Hev 與 SOCKS 橋接。 |
 | [app/src/main/assets/](../app/src/main/assets) | 隨 APK 發布並由工具驗證的 production 資產。 |
-| [tools/](../tools)、[app/src/test/](../app/src/test)、app/src/androidTest variants | 離線資產工具、CI、JVM 與隔離裝置測試。 |
+| [tools/](../tools)、[app/src/test/](../app/src/test)、[app/src/androidTest/](../app/src/androidTest) | 離線資產工具、CI、JVM 與裝置測試。 |
 
-DNS Shield 是 DNS 層工具：VPN 只攔截送往本機虛擬 IPv4／IPv6 DNS 位址的 UDP／TCP 53 查詢，其餘 IPv4／IPv6 流量仍轉送至底層網路。App 直接送往其他外部 DNS 位址的查詢、App 自行使用的 DoH／DoT 與直接 IP 連線不會被攔截。App 例外清單只用於使用者選擇略過 VPN 的 App；QUERY_ALL_PACKAGES 用途與資料邊界見 [隱私說明](../PRIVACY.md)。規則順序與 Public Suffix 邊界見 [blocking policy](blocking-policy.md)。
+DNS Shield 是 DNS 層工具：VPN 只攔截送往本機虛擬 IPv4／IPv6 DNS 位址的 UDP／TCP 53 查詢，其餘 IPv4／IPv6 流量仍轉送至底層網路。App 直接送往其他外部 DNS 位址的查詢、App 自行使用的 DoH／DoT 與直接 IP 連線不會被攔截。App 例外清單只用於使用者選擇略過 VPN 的 App；套件可見性只查詢 MAIN／LAUNCHER 活動，不要求 `QUERY_ALL_PACKAGES`，資料邊界見 [隱私說明](../PRIVACY.md)。規則順序與 Public Suffix 邊界見 [blocking policy](blocking-policy.md)。
 
 ## 驗證範圍與 CI
 
@@ -60,13 +60,28 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./verify.ps1 -Scope Selected
 powershell -NoProfile -ExecutionPolicy Bypass -File ./verify.ps1 -Scope Isolated -Variants d15
 ~~~
 
-CI 依變更分類分派同一個 verify.ps1，Full 由 Core 與 Isolated partitions 合作完成。Windows tooling job 另檢查工具與 dispatcher。CI 會執行文件檢查：
+CI 依變更分類分派同一個 verify.ps1，Full 由 Core 與 Isolated partitions 合作完成。Windows tooling job 另檢查工具與 dispatcher；[ci.yml](../.github/workflows/ci.yml) 的 device job 另在乾淨的 API 34 emulator 上執行固定的 instrumented 案例。CI 會執行文件檢查：
 
 ~~~powershell
 python tools/ci.py verify-docs
 ~~~
 
-文件變更可先跑文件檢查；程式、依賴、build 設定或 packaged data 變更則依 repository 要求執行完整 verify.ps1。遇到失敗時，先定位並修正第一個失敗步驟，再選足以驗證修正的範圍；只有完整入口仍是本次必需檢查，或仍有未解風險時，才重跑 Full。保留 Gradle、Python 與 JVM 原始錯誤；舊報告的測試數字不能代替本次結果。CI 會建置 instrumentation APK，但不代表裝置案例已執行。
+文件變更可先跑文件檢查；程式、依賴、build 設定或 packaged data 變更則依 repository 要求執行完整 verify.ps1。遇到失敗時，先定位並修正第一個失敗步驟，再選足以驗證修正的範圍；只有完整入口仍是本次必需檢查，或仍有未解風險時，才重跑 Full。保留 Gradle、Python 與 JVM 原始錯誤；舊報告的測試數字不能代替本次結果。
+
+device job 的清單定義在 `DEVICE_TEST_CLASSES`，只收錄不需人工同意 VPN 的案例：DAO／migration、使用者網域規則、production blocklist 與 Public Suffix 資產載入、IPv6 resolver 設定、native TCP runtime、App 清單載入、VPN 授權回呼、App 更新下載與 APK 簽章讀取，另加 D15 的未同意啟動案例。需要人工同意 VPN 或切換網路的 D04、D14、D15 生命週期案例仍以 [tools/](../tools) 下的裝置腳本手動執行；文件變更不會啟動 device job。
+
+裝置測試類別以驗證的行為命名，使用 `InstrumentedTest` 結尾，裝置基準測試使用 `InstrumentedBenchmarkTest` 結尾。
+
+共用裝置測試位於 `app/src/androidTest/java/`。隔離測試集中在 `app/src/androidTest/device/`，依用途分為 `ipv6-pass-through`、`vpn-network-recovery`、`upstream-dns`、`vpn-tunnel` 和 `vpn-lifecycle`。各目錄的 `test/` 存放測試程式及資產。有額外 manifest 或輔助程式的變體會放在 `app/`。CI 依這些目錄選擇對應的隔離建置。`vpn-tunnel` 使用 `d14DeviceTest` 建置變體。
+
+`VpnTunnelRegressionInstrumentedTest` 的三個案例分別驗證即時規則重載、查詢過載及停止時清空待處理查詢，以及失敗後還原測試設定。其中實際經過 TUN 的案例需要系統 VPN 同意。連接多台裝置時，請在兩個指令都加上 `-Serial` 指定裝置。
+
+過載案例會逐筆確認前 24 筆都抵達假上游並保留為待處理，再送第 25 筆，確認收到 `SERVFAIL` 且沒有轉送。停用防護後，測試也會確認待處理查詢歸零。
+
+~~~powershell
+.\tools\d14-device-test.ps1 -Action Install
+.\tools\d14-device-test.ps1 -Action Run -RegressionTests
+~~~
 
 ### IPv6 DNS 範圍與驗證限制
 
@@ -99,7 +114,11 @@ Public Suffix source、格式、production gate、APK staging gate 和目前 run
 
 ## 正式簽章與發版
 
+App 內更新讀取 GitHub 公開的最新正式 Release。正式標籤使用 vX.Y.Z 並對應 APK 的 versionName，附件名稱使用 app-release.apk。App 會依 GitHub 提供的 SHA-256 摘要核對檔案，並在交給 Android 前檢查升級版號、套件名稱及簽章。
+
 新版本需在 app/build.gradle.kts 更新 versionName 並遞增 versionCode，沿用原有 applicationId 與簽章金鑰。腳本不會自動調整版本或發布 GitHub Release；發版時需一併提供 APK、SHA-256 sidecar 與 `blocklist-source.zip`。來源壓縮檔需包含兩份固定的原始清單、合併後的網域文字、重建工具、manifest 及授權告知。
+
+Release 建置已啟用 R8 程式碼縮減與資源縮減（`isMinifyEnabled`、`isShrinkResources`）。新增 JNI、反射，或只由 AndroidManifest／資源名稱參照的類別時，需同步確認 `proguard-rules.pro` 與依賴的 consumer rules；本次建置的對應檔在 `app/build/outputs/mapping/release/mapping.txt`，屬本機產物，不進版本控制。
 
 首次建立上傳金鑰時執行：
 
