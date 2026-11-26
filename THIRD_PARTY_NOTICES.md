@@ -1,6 +1,6 @@
 # Third-party data notices
 
-DNS Shield 1.5.0 packages a compiled domain blocklist derived from 1Hosts Lite and AdGuard DNS Filter. The application source is licensed separately under [Apache License 2.0](LICENSE).
+DNS Shield packages a compiled domain blocklist derived from 1Hosts Lite and AdGuard DNS Filter. The application source is licensed separately under [Apache License 2.0](LICENSE).
 
 ## 1Hosts Lite
 
