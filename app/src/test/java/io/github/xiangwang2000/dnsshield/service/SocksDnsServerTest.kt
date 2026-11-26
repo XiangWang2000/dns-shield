@@ -134,27 +134,30 @@ class SocksDnsServerTest {
 
     @Test
     fun closeUnblocksPendingHandshakeAndStopsListenerWithoutWaiting() {
-        val server = SocksDnsServer(handler = { _, _ -> }, idleTimeoutMillis = 10_000)
-        server.start()
-        val port = server.port
-        connect(server).use { socket ->
-            socket.getOutputStream().write(byteArrayOf(5, 1, 2))
-            socket.getOutputStream().flush()
-            assertContentEquals(byteArrayOf(5, 2), readBytes(socket, 2))
-            val username = server.username.toByteArray(Charsets.UTF_8)
-            socket.getOutputStream().write(byteArrayOf(1, username.size.toByte(), username[0]))
-            socket.getOutputStream().flush()
+        withServer(handler = { _, _ -> }, idleTimeoutMillis = 10_000) { server ->
+            val loopback = InetAddress.getByName("127.0.0.1")
+            val listenerAddress = InetSocketAddress(loopback, server.port)
+            Socket().use { probe ->
+                // Reserve a distinct source port while the listener owns its port, to avoid TCP self-connect.
+                probe.bind(InetSocketAddress(loopback, 0))
+                connect(server).use { socket ->
+                    socket.getOutputStream().write(byteArrayOf(5, 1, 2))
+                    socket.getOutputStream().flush()
+                    assertContentEquals(byteArrayOf(5, 2), readBytes(socket, 2))
+                    val username = server.username.toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().write(byteArrayOf(1, username.size.toByte(), username[0]))
+                    socket.getOutputStream().flush()
 
-            val started = System.nanoTime()
-            server.close()
-            val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
-            assertTrue(elapsedMillis < 1_000, "close took " + elapsedMillis + "ms")
-            awaitClosed(socket)
-        }
+                    val started = System.nanoTime()
+                    server.close()
+                    val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+                    assertTrue(elapsedMillis < 1_000, "close took " + elapsedMillis + "ms")
+                    awaitClosed(socket)
+                }
 
-        Socket().use { refused ->
-            assertFailsWith<ConnectException> {
-                refused.connect(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 500)
+                assertFailsWith<ConnectException> {
+                    probe.connect(listenerAddress, 500)
+                }
             }
         }
     }
