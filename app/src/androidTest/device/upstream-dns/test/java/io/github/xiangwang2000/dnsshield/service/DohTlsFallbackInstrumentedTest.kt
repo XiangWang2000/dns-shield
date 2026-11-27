@@ -115,10 +115,10 @@ class DohTlsFallbackInstrumentedTest {
             ensureVpnConsent(context)
             assertEquals(1, dao.updatePlaintextFallback(dnsServer.id, false))
             assertTrue(dao.setActiveDnsServer(dnsServer.id))
-            DnsVpnService.setD08TestPlaintextFallbackPolicy(dnsServer.id, false)
+            DnsVpnService.testHooks.setD08TestPlaintextFallbackPolicy(dnsServer.id, false)
             DnsVpnService.setUiForeground(true)
 
-            DnsVpnService.setD08StartupBenchmarkIsolation(true)
+            DnsVpnService.testHooks.setD08StartupBenchmarkIsolation(true)
             val serviceStartElapsed = SystemClock.elapsedRealtime()
             val serviceStartEpochMillis = System.currentTimeMillis()
             startVpn(context)
@@ -186,7 +186,7 @@ class DohTlsFallbackInstrumentedTest {
             try {
                 stopVpnIfRunning(context)
             } finally {
-                DnsVpnService.setD08StartupBenchmarkIsolation(false)
+                DnsVpnService.testHooks.setD08StartupBenchmarkIsolation(false)
                 DnsVpnService.setUiForeground(false)
                 originalServers.forEach { dao.insertDnsServer(it) }
             }
@@ -219,7 +219,7 @@ class DohTlsFallbackInstrumentedTest {
             val underlay = awaitActivePhysicalNetwork(context)
             assertTrue("The physical underlay must be validated", underlay.isValidated)
             assertTrue("Could not select the System DNS Room preset", dao.setActiveDnsServer(systemDns.id))
-            DnsVpnService.setD08StartupBenchmarkIsolation(true)
+            DnsVpnService.testHooks.setD08StartupBenchmarkIsolation(true)
             startVpn(context)
             val vpnNetwork = awaitActiveVpnNetwork(context)
             withTimeout(SERVICE_TIMEOUT_MILLIS) {
@@ -228,7 +228,7 @@ class DohTlsFallbackInstrumentedTest {
                 }
             }
 
-            val baseline = DnsVpnService.d14DiagnosticsSnapshot()
+            val baseline = DnsVpnService.testHooks.diagnosticsSnapshot()
             val firstTransactionId = System.nanoTime().toInt() and 0xffff
             val blockedTransactionId = firstTransactionId
             val aTransactionId = (firstTransactionId + 1) and 0xffff
@@ -279,7 +279,7 @@ class DohTlsFallbackInstrumentedTest {
             try {
                 stopVpnIfRunning(context)
             } finally {
-                DnsVpnService.setD08StartupBenchmarkIsolation(false)
+                DnsVpnService.testHooks.setD08StartupBenchmarkIsolation(false)
                 assertTrue("Could not restore the original active DNS provider", dao.setActiveDnsServer(originalActive.id))
             }
         }
@@ -534,16 +534,26 @@ class DohTlsFallbackInstrumentedTest {
         val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
         val deadline = android.os.SystemClock.elapsedRealtime() + 5_000L
         var observed = emptyList<String>()
+        var scrolled = false
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
-            val root = automation.rootInActiveWindow
             val texts = mutableListOf<String>()
+            var dashboardList: android.view.accessibility.AccessibilityNodeInfo? = null
             fun collect(node: android.view.accessibility.AccessibilityNodeInfo?) {
                 if (node == null || texts.size >= 40) return
-                node.text?.toString()?.let(texts::add)
+                if (node.isVisibleToUser) {
+                    node.text?.toString()?.let(texts::add)
+                    if (node.viewIdResourceName == "control_center_list") dashboardList = node
+                }
                 for (index in 0 until node.childCount) collect(node.getChild(index))
             }
-            collect(root)
+            collect(automation.rootInActiveWindow)
             if (texts.any { expected in it }) return
+            // The transport status sits below the protection card on short displays.
+            if (!scrolled && texts.any { it.startsWith("已選 DNS：") }) {
+                scrolled = dashboardList?.performAction(
+                    android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                ) == true
+            }
             observed = texts
             Thread.sleep(100)
         }
@@ -608,10 +618,10 @@ class DohTlsFallbackInstrumentedTest {
     }
 
     private suspend fun awaitD14TerminalCount(target: Long): DnsDiagnosticsSnapshot = withTimeout(SERVICE_TIMEOUT_MILLIS) {
-        var snapshot = DnsVpnService.d14DiagnosticsSnapshot()
+        var snapshot = DnsVpnService.testHooks.diagnosticsSnapshot()
         while (snapshot.terminalCount < target) {
             delay(20)
-            snapshot = DnsVpnService.d14DiagnosticsSnapshot()
+            snapshot = DnsVpnService.testHooks.diagnosticsSnapshot()
         }
         snapshot
     }

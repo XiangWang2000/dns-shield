@@ -8,8 +8,14 @@ internal class DnsResponseCacheEntry private constructor(
     private val lifetimeMillis: Long,
     private val monotonicClock: () -> Long
 ) {
-    internal val estimatedCacheWeightBytes: Int =
-        maxOf(MIN_CACHE_WEIGHT_BYTES, responseData.size + CACHE_ENTRY_OVERHEAD_BYTES + ttlFields.size * TTL_FIELD_WEIGHT_BYTES)
+    internal val estimatedCacheWeightBytes: Int = estimatedCacheWeightBytes(0)
+
+    internal fun estimatedCacheWeightBytes(keyWireByteCount: Int): Int =
+        maxOf(
+            MIN_CACHE_WEIGHT_BYTES,
+            keyWireByteCount.coerceAtLeast(0) + responseData.size +
+                CACHE_ENTRY_OVERHEAD_BYTES + ttlFields.size * TTL_FIELD_WEIGHT_BYTES
+        )
 
     fun responseAtCurrentTime(): ByteArray? {
         val elapsedMillis = (monotonicClock() - insertedAtMillis).coerceAtLeast(0L)

@@ -11,15 +11,14 @@ fun interface DomainMatcher {
 }
 
 /**
- * Preserves the blocking behavior that currently lives in DnsVpnService.
- *
- * This is intentionally a behavior-preserving extraction. The broad contains
- * rules remain unchanged for now and can be tightened in a later policy change.
+ * Blocks explicit domains, their configured suffixes, and exact blocked labels.
  */
 class BuiltInDomainMatcher : DomainMatcher {
     private val exactBlocks = setOf(
         "doubleclick.net",
         "admob.com",
+        "adservice.google.com",
+        "amazon-adsystem.com",
         "pagead2.googlesyndication.com",
         "googleads.g.doubleclick.net",
         "analytics.google.com",
@@ -29,6 +28,7 @@ class BuiltInDomainMatcher : DomainMatcher {
     private val suffixBlocks = listOf(
         ".doubleclick.net",
         ".admob.com",
+        ".amazon-adsystem.com",
         ".analytics.google.com",
         ".adnxs.com",
         ".adcolony.com",
@@ -38,16 +38,6 @@ class BuiltInDomainMatcher : DomainMatcher {
         ".telemetry.mozilla.org",
         ".adjust.com",
         ".appsflyer.com"
-    )
-
-    private val containsBlocks = listOf(
-        "adservice",
-        "adsystem",
-        "googleads",
-        "pagead",
-        "amazon-adsystem",
-        "telemetry-",
-        "analytics-"
     )
 
     private val exactBlockedLabels = setOf(
@@ -66,10 +56,6 @@ class BuiltInDomainMatcher : DomainMatcher {
         for (suffix in suffixBlocks) {
             if (normalized.endsWith(suffix)) return true
         }
-        for (fragment in containsBlocks) {
-            if (normalized.contains(fragment)) return true
-        }
-
         return containsExactBlockedLabel(normalized)
     }
 

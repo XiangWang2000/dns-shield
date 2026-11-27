@@ -95,6 +95,7 @@ class DnsTcpTunInstrumentedTest {
         val tcp = java.net.ServerSocket().apply { bind(InetSocketAddress(address, io.github.xiangwang2000.dnsshield.BuildConfig.DNS_UPSTREAM_PORT)) }
         val udpCount = java.util.concurrent.atomic.AtomicInteger()
         val tcpCount = java.util.concurrent.atomic.AtomicInteger()
+        val paddedTcpQueryBytes = java.util.concurrent.atomic.AtomicInteger()
         val addressCount = java.util.concurrent.atomic.AtomicInteger()
         val blockedCount = java.util.concurrent.atomic.AtomicInteger()
         val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
@@ -129,12 +130,17 @@ class DnsTcpTunInstrumentedTest {
         }.apply { start() }
         val tcpThread = Thread {
             try {
-                repeat(2) {
+                repeat(3) {
                     tcp.accept().use { socket ->
                         socket.soTimeout = 8000
                         val request = requireNotNull(DnsTcpFrameCodec.readFrame(socket.getInputStream()))
                         tcpCount.incrementAndGet()
-                        val parsed = (DnsMessageValidator.parseQuery(request) as DnsQueryParseResult.Valid).query
+                        if (request.size > DnsMessageValidator.MAX_UDP_QUERY_BYTES) {
+                            paddedTcpQueryBytes.set(request.size)
+                        }
+                        val parsed = (DnsMessageValidator.parseQuery(
+                            request, DnsTcpFrameCodec.MAX_DNS_MESSAGE_BYTES
+                        ) as DnsQueryParseResult.Valid).query
                         DnsTcpFrameCodec.writeFrame(socket.getOutputStream(), largeTxtResponse(parsed, recordCount = 30))
                     }
                 }
@@ -237,6 +243,44 @@ class DnsTcpTunInstrumentedTest {
             }
             assertEquals(2, udpCount.get())
             assertEquals("IPv4 and IPv6 retries should each fetch one full answer from upstream", 2, tcpCount.get())
+
+            val question = query(0x5260, "d11-large.example.test", 16)
+            val paddingBytes = 4_096
+            val optDataBytes = paddingBytes + 4
+            val paddedWire = java.nio.ByteBuffer.allocate(question.size + 11 + optDataBytes)
+                .put(question)
+                .put(0)
+                .putShort(41)
+                .putShort(4_096)
+                .putInt(0)
+                .putShort(optDataBytes.toShort())
+                .putShort(12)
+                .putShort(paddingBytes.toShort())
+                .array()
+                .also { it[11] = 1 }
+            val parsedPadded = (DnsMessageValidator.parseQuery(
+                paddedWire, DnsTcpFrameCodec.MAX_DNS_MESSAGE_BYTES
+            ) as DnsQueryParseResult.Valid).query
+            DnsVpnService.setUiForeground(true)
+            val paddedAnswer = try {
+                tcpQuery("10.0.0.1", paddedWire).also {
+                    val transaction = DnsLogFormatting.transactionId(paddedWire)
+                    val lines = withTimeout(5_000) {
+                        DnsVpnService.liveLogsFlow.first { logs -> logs.any { "[DNS 明文] [ID=$transaction]" in it } }
+                    }
+                    val log = lines.first { "[DNS 明文] [ID=$transaction]" in it }
+                    assertTrue("The direct TCP attempt should report its actual route: $log", "使用 TCP/53" in log)
+                    assertFalse("The direct TCP attempt should not claim UDP truncation: $log", "UDP 回應遭截短" in log)
+                }
+            } finally {
+                DnsVpnService.setUiForeground(false)
+            }
+            assertTrue(DnsMessageValidator.isValidResponse(paddedAnswer, parsedPadded))
+            assertEquals(0, readUnsignedShort(paddedAnswer, 2) and 0x0200)
+            assertEquals(30, readUnsignedShort(paddedAnswer, 6))
+            assertEquals(paddedWire.size, paddedTcpQueryBytes.get())
+            assertEquals("A large TCP query must go straight to TCP upstream", 3, tcpCount.get())
+            assertEquals("A large TCP query must not be sent over UDP", 2, udpCount.get())
             failure.get()?.let { throw AssertionError("Fake upstream failed", it) }
         } finally {
             try {

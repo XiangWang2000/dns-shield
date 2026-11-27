@@ -16,6 +16,29 @@ internal data class DnsResolutionOutcome(
     val endpointUrl: String? = null
 )
 
+/** A valid-shaped SIG(0) reply covers the exact query sent on the wire. */
+internal class DnsSig0RetryRequired(
+    val upstream: DnsUdpUpstreamEndpoint,
+    val transport: DnsTransport,
+    val attemptDeadlineNanos: Long
+) : Exception("A SIG(0) response requires the original DNS query")
+
+internal inline fun finishPlaintextDnsResponse(
+    response: ByteArray,
+    query: ParsedDnsQuery,
+    sentQuery: ByteArray,
+    hasSig0: Boolean,
+    requireSig0Response: Boolean,
+    retryRequired: () -> DnsSig0RetryRequired
+): ByteArray? {
+    if (hasSig0) {
+        if (!sentQuery.contentEquals(query.wire)) throw retryRequired()
+        return response
+    }
+    if (requireSig0Response) return null
+    return DnsMessageValidator.restoreClientTransactionId(response, query)
+}
+
 internal object DnsTransportPolicy {
     suspend fun resolve(
         allowPlaintextFallback: Boolean,

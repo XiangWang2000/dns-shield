@@ -67,10 +67,15 @@ data class DnsShieldUiState(
     val rulePolicyStatus: RulePolicyStatus = RulePolicyStatus(),
     val resolverNotice: String? = null,
     val networkConnectivity: UnderlyingNetworkConnectivity = UnderlyingNetworkConnectivity.UNKNOWN,
-    val appLoadError: String? = null
+    val appLoadError: String? = null,
+    val alwaysOnVpnEnabled: Boolean? = null,
+    val alwaysOnVpnReminderAcknowledged: Boolean = false
 ) {
     val queryCount: Long get() = diagnostics.received
     val blockedAds: Long get() = diagnostics.blocked
+    val shouldShowAlwaysOnVpnReminder: Boolean
+        get() = vpnLifecycleState == VpnLifecycleState.RUNNING &&
+            alwaysOnVpnEnabled == false && !alwaysOnVpnReminderAcknowledged
 }
 
 data class VpnMetricsState(
@@ -159,6 +164,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     private val _vpnLifecycleState = MutableStateFlow(DnsVpnService.lifecycleStateFlow.value)
     private val _networkConnectivity =
         MutableStateFlow(DnsVpnService.underlyingNetworkConnectivityFlow.value)
+    private val _alwaysOnVpnEnabled = MutableStateFlow(DnsVpnService.alwaysOnVpnEnabledFlow.value)
     val vpnLifecycleState = _vpnLifecycleState.asStateFlow()
 
     private val _diagnostics = MutableStateFlow(DnsVpnService.diagnosticsFlow.value)
@@ -186,6 +192,9 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     private val _bypassedApps = MutableStateFlow<List<BypassedApp>?>(null)
 
     private val _infoCardVisible = MutableStateFlow(sharedPrefs.getBoolean("info_card_visible", true))
+    private val _alwaysOnVpnReminderAcknowledged = MutableStateFlow(
+        sharedPrefs.getBoolean("always_on_vpn_reminder_acknowledged", false)
+    )
 
     private fun addLog(message: String) {
         DnsVpnService.addLog(message)
@@ -378,11 +387,15 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
     val uiState: StateFlow<DnsShieldUiState> = combine(
         baseUiState,
         _rulePolicyStatus,
-        _resolverNotice
-    ) { state, rulePolicyStatus, resolverNotice ->
+        _resolverNotice,
+        _alwaysOnVpnEnabled,
+        _alwaysOnVpnReminderAcknowledged
+    ) { state, rulePolicyStatus, resolverNotice, alwaysOnVpnEnabled, reminderAcknowledged ->
         state.copy(
             rulePolicyStatus = rulePolicyStatus,
-            resolverNotice = resolverNotice
+            resolverNotice = resolverNotice,
+            alwaysOnVpnEnabled = alwaysOnVpnEnabled,
+            alwaysOnVpnReminderAcknowledged = reminderAcknowledged
         )
     }.stateIn(
         scope = viewModelScope,
@@ -407,9 +420,18 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
             rulePolicyStatus = _rulePolicyStatus.value,
             resolverNotice = _resolverNotice.value,
             networkConnectivity = _networkConnectivity.value,
-            appLoadError = _appLoadError.value
+            appLoadError = _appLoadError.value,
+            alwaysOnVpnEnabled = _alwaysOnVpnEnabled.value,
+            alwaysOnVpnReminderAcknowledged = _alwaysOnVpnReminderAcknowledged.value
         )
     )
+
+    fun acknowledgeAlwaysOnVpnReminder() {
+        _alwaysOnVpnReminderAcknowledged.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            sharedPrefs.edit { putBoolean("always_on_vpn_reminder_acknowledged", true) }
+        }
+    }
 
     fun setInfoCardVisible(visible: Boolean) {
         _infoCardVisible.value = visible
@@ -554,6 +576,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         // Direct, high-speed StateFlow collections across the same process using clean helper method
         collectServiceFlow(DnsVpnService.lifecycleStateFlow, _vpnLifecycleState)
         collectServiceFlow(DnsVpnService.underlyingNetworkConnectivityFlow, _networkConnectivity)
+        collectServiceFlow(DnsVpnService.alwaysOnVpnEnabledFlow, _alwaysOnVpnEnabled)
         collectServiceFlow(DnsVpnService.diagnosticsFlow, _diagnostics)
         collectServiceFlow(DnsVpnService.activeDnsFlow, _activeDns)
         collectServiceFlow(DnsVpnService.dnsTransportStatusFlow, _dnsTransportStatus)
@@ -817,7 +840,7 @@ class DnsVpnViewModel(application: Application) : AndroidViewModel(application) 
         name: String,
         primaryIp: String,
         secondaryIp: String?,
-        allowPlaintextFallback: Boolean = true,
+        allowPlaintextFallback: Boolean,
         primaryDohUrl: String? = null,
         primaryDohBootstrapIps: String? = null,
         secondaryDohUrl: String? = null,

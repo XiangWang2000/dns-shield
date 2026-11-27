@@ -127,12 +127,12 @@ class VpnTunnelRegressionInstrumentedTest {
             val runId = System.nanoTime().toString(36)
             d14AssertDnsAnswer(d14AwaitRcode("d14-admission-ready-$runId.example.invalid", 0))
             val readyDeadline = SystemClock.elapsedRealtime() + 2_000L
-            while (DnsVpnService.d14DiagnosticsSnapshot().pending > 0 && SystemClock.elapsedRealtime() < readyDeadline) {
+            while (DnsVpnService.testHooks.diagnosticsSnapshot().pending > 0 && SystemClock.elapsedRealtime() < readyDeadline) {
                 SystemClock.sleep(10L)
             }
-            assertEquals("The readiness probe must finish before filling the slots.", 0L, DnsVpnService.d14DiagnosticsSnapshot().pending)
-            DnsVpnService.resetD14Diagnostics()
-            val diagnosticsBefore = DnsVpnService.d14DiagnosticsSnapshot()
+            assertEquals("The readiness probe must finish before filling the slots.", 0L, DnsVpnService.testHooks.diagnosticsSnapshot().pending)
+            DnsVpnService.testHooks.resetD14Diagnostics()
+            val diagnosticsBefore = DnsVpnService.testHooks.diagnosticsSnapshot()
 
             val busyDomains = (0 until MAX_UNIQUE_QUERIES).map {
                 "d14-admission-$runId-$it.example.invalid"
@@ -149,7 +149,7 @@ class VpnTunnelRegressionInstrumentedTest {
                 client.send(DatagramPacket(query, query.size, tunDnsAddress, 53))
                 if (!upstream.waitForCount(domain, 1, remaining)) break
             }
-            val saturated = DnsVpnService.d14DiagnosticsSnapshot()
+            val saturated = DnsVpnService.testHooks.diagnosticsSnapshot()
             assertEquals(
                 "Held queries did not reach the fake upstream: TUN received=${saturated.received}, " +
                     "UDP attempts=${saturated.udpAttempts}, pending=${saturated.pending}, " +
@@ -167,7 +167,7 @@ class VpnTunnelRegressionInstrumentedTest {
             val overflowDomain = "d14-admission-overflow-$runId.example.invalid"
             val response = d14SendQuery(overflowDomain, 0x6300, timeoutMillis = 1_500)
             assertEquals("A query beyond the 24-key cap must receive SERVFAIL.", 2, d14ResponseCode(response))
-            val afterOverflow = DnsVpnService.d14DiagnosticsSnapshot()
+            val afterOverflow = DnsVpnService.testHooks.diagnosticsSnapshot()
             assertEquals(saturated.overloaded + 1, afterOverflow.overloaded)
             // The overflow probe may still be completing its response.
             assertTrue("A held upstream query must still be pending before stop.", afterOverflow.pending > 1)
@@ -179,7 +179,7 @@ class VpnTunnelRegressionInstrumentedTest {
                 "Stopping with pending upstream work exceeded 2.5 seconds.",
                 SystemClock.elapsedRealtime() - stopStartedAt < 2_500L
             )
-            assertEquals("STOPPED must leave no pending queries.", 0L, DnsVpnService.d14DiagnosticsSnapshot().pending)
+            assertEquals("STOPPED must leave no pending queries.", 0L, DnsVpnService.testHooks.diagnosticsSnapshot().pending)
             serviceStartRequested = false
 
             // Once DNS workers have stopped, let the fake receiver drain queued datagrams.
@@ -210,7 +210,7 @@ class VpnTunnelRegressionInstrumentedTest {
         val context = isolatedD14Context()
         val lifecycle = DnsVpnService.lifecycleStateFlow
         assertEquals(VpnLifecycleState.STOPPED, lifecycle.value)
-        val preferences = context.getSharedPreferences(DnsVpnService.D14_TEST_PREFS_NAME, Context.MODE_PRIVATE)
+        val preferences = context.getSharedPreferences(DnsVpnServiceTestHooks.D14_TEST_PREFS_NAME, Context.MODE_PRIVATE)
         val savedPreferences = preferences.all
         val queuedStopActions = mutableListOf<String?>()
         val queuedStopContext = object : ContextWrapper(context) {
@@ -236,8 +236,8 @@ class VpnTunnelRegressionInstrumentedTest {
                 try {
                     assertTrue("Cleanup must wait for the queued stop.", waitedForStop)
                     assertEquals(listOf(DnsVpnService.ACTION_STOP), queuedStopActions)
-                    assertEquals("127.0.0.1", preferences.getString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, null))
-                    assertEquals(fixture.upstream.port, preferences.getInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, -1))
+                    assertEquals("127.0.0.1", preferences.getString(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_HOST_KEY, null))
+                    assertEquals(fixture.upstream.port, preferences.getInt(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY, -1))
                 } finally {
                     lifecycle.value = VpnLifecycleState.STOPPED
                     cleanup.await()

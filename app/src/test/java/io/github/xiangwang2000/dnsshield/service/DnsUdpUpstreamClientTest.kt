@@ -158,30 +158,48 @@ class DnsUdpUpstreamClientTest {
         val wrongSource = DatagramSocket(0, loopback)
         val client = DatagramSocket()
         val serverFailure = AtomicReference<Throwable?>()
-        val queryBytes = DnsTestMessages.query()
+        val queryBytes = DnsTestMessages.query(edns = true)
         val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
         val expectedResponse = DnsTestMessages.response(queryBytes)
+        val upstreamTransactionId = query.transactionId xor 0xFFFF
+        val expectedUpstreamQuery = DnsMessageValidator.prepareUpstreamQuery(query).also {
+            DnsMessageValidator.setTransactionId(it, upstreamTransactionId)
+        }
+        val upstreamQuery = AtomicReference<ByteArray?>()
 
         val fakeUpstream = thread(name = "fake-dns-upstream") {
             try {
                 val request = DatagramPacket(ByteArray(4096), 4096)
                 server.receive(request)
-                wrongSource.send(DatagramPacket(expectedResponse, expectedResponse.size, request.address, request.port))
+                val requestBytes = request.data.copyOfRange(request.offset, request.offset + request.length)
+                upstreamQuery.set(requestBytes)
+                val upstreamResponse = DnsTestMessages.response(requestBytes)
+                wrongSource.send(
+                    DatagramPacket(upstreamResponse, upstreamResponse.size, request.address, request.port)
+                )
 
-                val wrongId = expectedResponse.copyOf().also { it[1] = (it[1].toInt() xor 1).toByte() }
+                val wrongId = upstreamResponse.copyOf().also { it[1] = (it[1].toInt() xor 1).toByte() }
                 server.send(DatagramPacket(wrongId, wrongId.size, request.address, request.port))
 
-                val wrongQuestion = DnsTestMessages.response(queryBytes, name = "other.example")
+                val wrongQuestion = DnsTestMessages.response(requestBytes, name = "other.example")
                 server.send(DatagramPacket(wrongQuestion, wrongQuestion.size, request.address, request.port))
-                server.send(DatagramPacket(expectedResponse, expectedResponse.size, request.address, request.port))
+                server.send(DatagramPacket(upstreamResponse, upstreamResponse.size, request.address, request.port))
             } catch (failure: Throwable) {
                 serverFailure.set(failure)
             }
         }
 
         try {
-            val response = DnsUdpUpstreamClient.queryBlocking(client, query, loopback, server.localPort, 2000)
+            val response = DnsUdpUpstreamClient.queryBlocking(
+                client,
+                query,
+                loopback,
+                server.localPort,
+                2000,
+                transactionIdSource = { upstreamTransactionId }
+            )
             assertContentEquals(expectedResponse, response)
+            assertContentEquals(expectedUpstreamQuery, upstreamQuery.get())
             fakeUpstream.join(2000)
             assertTrue(!fakeUpstream.isAlive)
             assertNull(serverFailure.get())
@@ -209,7 +227,12 @@ class DnsUdpUpstreamClientTest {
         }
 
         try {
-            assertNull(DnsUdpUpstreamClient.queryBlocking(client, query, loopback, server.localPort, 150))
+            assertNull(
+                DnsUdpUpstreamClient.queryBlocking(
+                    client, query, loopback, server.localPort, 150,
+                    transactionIdSource = { query.transactionId }
+                )
+            )
             fakeUpstream.join(1000)
             assertTrue(!fakeUpstream.isAlive)
         } finally {
@@ -241,7 +264,12 @@ class DnsUdpUpstreamClientTest {
         }
 
         try {
-            assertNull(DnsUdpUpstreamClient.queryBlocking(client, query, loopback, server.localPort, 150))
+            assertNull(
+                DnsUdpUpstreamClient.queryBlocking(
+                    client, query, loopback, server.localPort, 150,
+                    transactionIdSource = { query.transactionId }
+                )
+            )
             fakeUpstream.join(1000)
             assertTrue(!fakeUpstream.isAlive)
         } finally {
@@ -268,7 +296,12 @@ class DnsUdpUpstreamClientTest {
         }
 
         try {
-            assertNull(DnsUdpUpstreamClient.queryBlocking(client, query, loopback, server.localPort, 150))
+            assertNull(
+                DnsUdpUpstreamClient.queryBlocking(
+                    client, query, loopback, server.localPort, 150,
+                    transactionIdSource = { query.transactionId }
+                )
+            )
             fakeUpstream.join(1000)
             assertTrue(!fakeUpstream.isAlive)
         } finally {
@@ -298,7 +331,12 @@ class DnsUdpUpstreamClientTest {
 
         try {
             val startedAt = System.nanoTime()
-            assertNull(DnsUdpUpstreamClient.queryBlocking(client, query, loopback, server.localPort, 400))
+            assertNull(
+                DnsUdpUpstreamClient.queryBlocking(
+                    client, query, loopback, server.localPort, 400,
+                    transactionIdSource = { query.transactionId }
+                )
+            )
             val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L
             kotlin.test.assertTrue(elapsedMillis < 900, "invalid responses extended the deadline: ${elapsedMillis}ms")
             fakeUpstream.join(2000)
@@ -429,7 +467,8 @@ class DnsUdpUpstreamClientTest {
                 deadline = deadline,
                 onAttempt = { udpAttempts.incrementAndGet() },
                 onRetry = { udpRetries.incrementAndGet() },
-                receiveBufferAllocator = countingReceiveBufferAllocator(receiveBufferAllocations)
+                receiveBufferAllocator = countingReceiveBufferAllocator(receiveBufferAllocations),
+                transactionIdSource = { query.transactionId }
             )
             val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L
 
@@ -537,6 +576,7 @@ class DnsUdpUpstreamClientTest {
                     query = query,
                     upstreams = listOf(DnsUdpUpstreamEndpoint(loopback, servers[index].localPort)),
                     deadline = DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 3_000),
+                    transactionIdSource = { query.transactionId },
                     receiveBufferAllocator = { size ->
                         allocationCounts[index].incrementAndGet()
                         ByteArray(size).also {
@@ -619,7 +659,8 @@ class DnsUdpUpstreamClientTest {
                 ),
                 deadline = DnsRequestDeadline.fromReceivedAt(System.nanoTime(), timeoutMillis = 1_000),
                 tcpQuery = { null },
-                receiveBufferAllocator = countingReceiveBufferAllocator(allocations)
+                receiveBufferAllocator = countingReceiveBufferAllocator(allocations),
+                transactionIdSource = { query.transactionId }
             )
 
             assertContentEquals(truncatedResponse, outcome?.response)
@@ -717,12 +758,14 @@ class DnsUdpUpstreamClientTest {
                             query = query,
                             server = upstream.address,
                             port = upstream.port,
-                            deadline = deadline
+                            deadline = deadline,
+                            transactionIdSource = { query.transactionId }
                         )
                     } finally {
                         tcpClient.close()
                     }
-                }
+                },
+                transactionIdSource = { query.transactionId }
             )
 
             assertContentEquals(fullResponse, assertNotNull(outcome).response)

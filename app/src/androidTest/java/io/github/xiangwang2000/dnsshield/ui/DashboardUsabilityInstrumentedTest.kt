@@ -59,6 +59,11 @@ class DashboardUsabilityInstrumentedTest {
         val result = CompletableDeferred<String?>()
         render(onAddDns = { attempts.incrementAndGet(); result.await() })
         clickVisible("add_dns_button", "control_center_list")
+        val fallbackSwitch = requireNode("dialog_plaintext_fallback_switch")
+        assertTrue(fallbackSwitch.isCheckable)
+        @Suppress("DEPRECATION")
+        val plaintextEnabled = fallbackSwitch.isChecked
+        assertFalse("A new resolver must use encrypted DNS by default", plaintextEnabled)
         setText("dialog_dns_name_input", "My resolver")
         setText("dialog_dns_primary_input", "8.8.8.8")
         click("dialog_confirm_button")
@@ -267,6 +272,64 @@ class DashboardUsabilityInstrumentedTest {
             }
         }
         capture("network-online.png")
+        scrollVisible("open_vpn_settings", "control_center_list")
+        assertTrue(textIn(requireNode("open_vpn_settings")).contains("VPN 設定"))
+    }
+
+    @Test
+    fun alwaysOnReminderRequiresDefinitelyDisabledStatus() {
+        val state = mutableStateOf(DnsShieldUiState(
+            isRunning = true,
+            vpnLifecycleState = VpnLifecycleState.RUNNING,
+            alwaysOnVpnEnabled = false
+        ))
+        render(state = state)
+
+        scrollVisible("always_on_vpn_reminder", "control_center_list")
+        assertTrue(textIn(requireNode("always_on_vpn_reminder")).contains("永久連線的 VPN 尚未開啟"))
+
+        instrumentation.runOnMainSync { state.value = state.value.copy(alwaysOnVpnEnabled = true) }
+        scrollVisible("open_vpn_settings", "control_center_list")
+        assertNull("Enabled status must not show the reminder", findNode("always_on_vpn_reminder"))
+
+        instrumentation.runOnMainSync { state.value = state.value.copy(alwaysOnVpnEnabled = null) }
+        waitUntil { findNode("always_on_vpn_reminder") == null }
+    }
+
+    @Test
+    fun alwaysOnReminderAcknowledgesDismissalAndSettingsOpening() {
+        val state = mutableStateOf(DnsShieldUiState(
+            isRunning = true,
+            vpnLifecycleState = VpnLifecycleState.RUNNING,
+            alwaysOnVpnEnabled = false
+        ))
+        val acknowledgements = AtomicInteger()
+        val settingsOpens = AtomicInteger()
+        render(
+            state = state,
+            onAcknowledgeAlwaysOnVpnReminder = {
+                acknowledgements.incrementAndGet()
+                state.value = state.value.copy(alwaysOnVpnReminderAcknowledged = true)
+            },
+            onOpenVpnSettings = { settingsOpens.incrementAndGet() }
+        )
+
+        clickVisible("always_on_vpn_open_settings", "control_center_list")
+        waitUntil { findNode("always_on_vpn_reminder") == null }
+        assertEquals(1, acknowledgements.get())
+        assertEquals(1, settingsOpens.get())
+
+        instrumentation.runOnMainSync {
+            state.value = state.value.copy(alwaysOnVpnReminderAcknowledged = false)
+        }
+        clickVisible("always_on_vpn_dismiss", "control_center_list")
+        waitUntil { findNode("always_on_vpn_reminder") == null }
+        assertEquals(2, acknowledgements.get())
+
+        instrumentation.runOnMainSync { state.value = state.value.copy(alwaysOnVpnEnabled = true) }
+        instrumentation.runOnMainSync { state.value = state.value.copy(alwaysOnVpnEnabled = false) }
+        scrollVisible("open_vpn_settings", "control_center_list")
+        assertNull("An acknowledged reminder must stay dismissed", findNode("always_on_vpn_reminder"))
     }
 
     @Test
@@ -416,7 +479,9 @@ class DashboardUsabilityInstrumentedTest {
         onSaveRule: suspend (String?) -> DomainRuleSaveResult = { DomainRuleSaveResult.Saved },
         state: MutableState<DnsShieldUiState>? = null,
         onAllowDomain: suspend (String) -> DomainRuleUndoToken = { error("Unused by this scenario") },
-        onUndoRule: suspend (DomainRuleUndoToken) -> Boolean = { false }
+        onUndoRule: suspend (DomainRuleUndoToken) -> Boolean = { false },
+        onAcknowledgeAlwaysOnVpnReminder: () -> Unit = {},
+        onOpenVpnSettings: (() -> Unit)? = null
     ) {
         val intent = Intent(instrumentation.targetContext, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
@@ -446,6 +511,8 @@ class DashboardUsabilityInstrumentedTest {
                             onDeleteDomainRule = {},
                             onAllowBlockedDomain = onAllowDomain,
                             onUndoDomainRule = onUndoRule,
+                            onAcknowledgeAlwaysOnVpnReminder = onAcknowledgeAlwaysOnVpnReminder,
+                            onOpenVpnSettings = onOpenVpnSettings,
                             modifier = Modifier.padding(padding)
                         )
                     }

@@ -61,13 +61,13 @@ class VpnTunnelEndToEndInstrumentedBenchmarkTest {
         ensureD14VpnConsent(context)
 
         val upstream = FakeDnsUpstream()
-        val preferences = context.getSharedPreferences(DnsVpnService.D14_TEST_PREFS_NAME, Context.MODE_PRIVATE)
-        val oldHost = preferences.getString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, null)
-        val hadPort = preferences.contains(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY)
-        val oldPort = preferences.getInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, -1)
+        val preferences = context.getSharedPreferences(DnsVpnServiceTestHooks.D14_TEST_PREFS_NAME, Context.MODE_PRIVATE)
+        val oldHost = preferences.getString(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_HOST_KEY, null)
+        val hadPort = preferences.contains(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY)
+        val oldPort = preferences.getInt(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY, -1)
         val preferencesPersisted = preferences.edit()
-            .putString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, "127.0.0.1")
-            .putInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, upstream.port)
+            .putString(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_HOST_KEY, "127.0.0.1")
+            .putInt(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY, upstream.port)
             .commit()
         if (!preferencesPersisted) {
             upstream.close()
@@ -105,9 +105,9 @@ class VpnTunnelEndToEndInstrumentedBenchmarkTest {
             waitForLifecycle(VpnLifecycleState.RUNNING, 20_000L)
             vpnReadyNanos = SystemClock.elapsedRealtimeNanos()
             waitForSelectedValidatedPhysicalNetwork(context, 5_000L)
-            assertTrue("Policy assembly should be measured in the D14 target.", DnsVpnService.d14PolicyAssemblyNanos.get() > 0L)
-            DnsVpnService.resetD14Diagnostics()
-            val initial = DnsVpnService.d14DiagnosticsSnapshot()
+            assertTrue("Policy assembly should be measured in the D14 target.", DnsVpnService.testHooks.d14PolicyAssemblyNanos.get() > 0L)
+            DnsVpnService.testHooks.resetD14Diagnostics()
+            val initial = DnsVpnService.testHooks.diagnosticsSnapshot()
             diagnosticsBefore = initial
 
             val cacheDomain = "d14-cache-$runId.example.invalid"
@@ -144,7 +144,7 @@ class VpnTunnelEndToEndInstrumentedBenchmarkTest {
                 val coldDomains = (0 until COLD_CACHE_WARMUP + COLD_CACHE_SAMPLES).map {
                     "d14-cold-$runId-${it.toString().padStart(4, '0')}.example.invalid"
                 }
-                val coldBefore = DnsVpnService.d14DiagnosticsSnapshot()
+                val coldBefore = DnsVpnService.testHooks.diagnosticsSnapshot()
                 val coldCacheLatencies = DoubleArray(COLD_CACHE_SAMPLES)
                 Trace.beginSection("D14 cold cache phase")
                 val coldAllocatedBytes = try {
@@ -257,7 +257,7 @@ class VpnTunnelEndToEndInstrumentedBenchmarkTest {
             }
             if (manualHandoff) {
                 val networkBefore = waitForSelectedValidatedPhysicalNetwork(context, 5_000L)
-                val networkChangeCountBefore = DnsVpnService.d14NetworkChangeCount.get()
+                val networkChangeCountBefore = DnsVpnService.testHooks.d14NetworkChangeCount.get()
                 val delayedDomain = "d14-old-$runId.example.invalid"
                 if (checkDelayedResponseFence) {
                     upstream.answerGates[delayedDomain] = CountDownLatch(1)
@@ -321,7 +321,7 @@ class VpnTunnelEndToEndInstrumentedBenchmarkTest {
                 )
                 scenarioResults.put("network_switch", JSONObject()
                     .put("passed", true)
-                    .put("observed_service_transitions", DnsVpnService.d14NetworkChangeCount.get() - networkChangeCountBefore)
+                    .put("observed_service_transitions", DnsVpnService.testHooks.d14NetworkChangeCount.get() - networkChangeCountBefore)
                     .put("selected_network_id_before", networkBefore.selectedNetworkId ?: JSONObject.NULL)
                     .put("selected_network_id_after", networkAfter.selectedNetworkId ?: JSONObject.NULL)
                     .put("selected_transport_mask_before", networkBefore.selectedTransportMask)
@@ -368,10 +368,10 @@ class VpnTunnelEndToEndInstrumentedBenchmarkTest {
                 runCatching { upstream.close() }.onFailure(::rememberCleanupFailure)
                 val restored = runCatching {
                     preferences.edit().apply {
-                        if (oldHost == null) remove(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY)
-                        else putString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, oldHost)
-                        if (hadPort) putInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, oldPort)
-                        else remove(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY)
+                        if (oldHost == null) remove(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_HOST_KEY)
+                        else putString(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_HOST_KEY, oldHost)
+                        if (hadPort) putInt(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY, oldPort)
+                        else remove(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY)
                     }.commit()
                 }.getOrElse {
                     rememberCleanupFailure(it)
@@ -606,7 +606,7 @@ class VpnTunnelEndToEndInstrumentedBenchmarkTest {
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val deadline = SystemClock.elapsedRealtime() + timeoutMillis
         while (SystemClock.elapsedRealtime() < deadline) {
-            val snapshot = DnsVpnService.d14UnderlyingNetworkSnapshot.get()
+            val snapshot = DnsVpnService.testHooks.d14UnderlyingNetworkSnapshot.get()
             if (snapshot != null && isSelectedValidatedPhysicalNetwork(connectivityManager, snapshot)) return snapshot
             SystemClock.sleep(250L)
         }
@@ -623,16 +623,16 @@ class VpnTunnelEndToEndInstrumentedBenchmarkTest {
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val deadline = SystemClock.elapsedRealtime() + timeoutMillis
         while (SystemClock.elapsedRealtime() < deadline) {
-            val snapshot = DnsVpnService.d14UnderlyingNetworkSnapshot.get()
+            val snapshot = DnsVpnService.testHooks.d14UnderlyingNetworkSnapshot.get()
             val selectedNetworkChanged = snapshot != null &&
                 (snapshot.selectedNetworkId != baseline.selectedNetworkId ||
                     snapshot.selectedTransportMask != baseline.selectedTransportMask)
-            val serviceTransitioned = DnsVpnService.d14NetworkChangeCount.get() > baselineChangeCount
+            val serviceTransitioned = DnsVpnService.testHooks.d14NetworkChangeCount.get() > baselineChangeCount
             if (selectedNetworkChanged && serviceTransitioned &&
                 isSelectedValidatedPhysicalNetwork(connectivityManager, snapshot)
             ) {
                 SystemClock.sleep(NETWORK_CHANGE_DEBOUNCE_MS)
-                val stableSnapshot = DnsVpnService.d14UnderlyingNetworkSnapshot.get()
+                val stableSnapshot = DnsVpnService.testHooks.d14UnderlyingNetworkSnapshot.get()
                 val remainsChanged = stableSnapshot != null &&
                     (stableSnapshot.selectedNetworkId != baseline.selectedNetworkId ||
                         stableSnapshot.selectedTransportMask != baseline.selectedTransportMask)
@@ -705,8 +705,8 @@ class VpnTunnelEndToEndInstrumentedBenchmarkTest {
         failure: Throwable?
     ) {
         val nowNanos = SystemClock.elapsedRealtimeNanos()
-        val snapshot = DnsVpnService.d14DiagnosticsSnapshot()
-        val packetRejectionCounts = DnsVpnService.d14PacketRejectionCountsSnapshot()
+        val snapshot = DnsVpnService.testHooks.diagnosticsSnapshot()
+        val packetRejectionCounts = DnsVpnService.testHooks.d14PacketRejectionCountsSnapshot()
         val diagnosticDeltas = diagnosticDeltasJson(diagnosticsBefore, snapshot, clientTimeouts.get())
         val samplesJson = JSONObject()
         val summariesJson = JSONObject()
@@ -744,7 +744,7 @@ class VpnTunnelEndToEndInstrumentedBenchmarkTest {
             .put("sdk", Build.VERSION.SDK_INT)
             .put("service_start_to_running_ms", if (vpnReadyNanos > 0L) (vpnReadyNanos - serviceStartNanos) / 1_000_000.0 else JSONObject.NULL)
             .put("application_on_create_to_vpn_running_ms", appCreatedToVpnReadyMs)
-            .put("policy_assembly_ms", DnsVpnService.d14PolicyAssemblyNanos.get().takeIf { it >= 0L }?.div(1_000_000.0) ?: JSONObject.NULL)
+            .put("policy_assembly_ms", DnsVpnService.testHooks.d14PolicyAssemblyNanos.get().takeIf { it >= 0L }?.div(1_000_000.0) ?: JSONObject.NULL)
             .put("client_latency_samples_ms", samplesJson)
             .put("client_latency_percentiles_ms", summariesJson)
             .put("scenarios", scenarioResults)

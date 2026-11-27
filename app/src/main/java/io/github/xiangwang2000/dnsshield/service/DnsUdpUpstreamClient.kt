@@ -31,7 +31,9 @@ internal object DnsUdpUpstreamClient {
         onAttempt: () -> Unit = {},
         receiveBufferAllocator: (Int) -> ByteArray = { ByteArray(it) },
         onTimeout: () -> Unit = {},
-        onAnswer: (responseCode: Int) -> Unit = {}
+        onAnswer: (responseCode: Int) -> Unit = {},
+        transactionIdSource: () -> Int = DnsMessageValidator::nextPlaintextTransactionId,
+        requireSig0Response: Boolean = false
     ): ByteArray? {
         val startedAtNanos = System.nanoTime()
         val remainingMillis = deadline.remainingMillis(startedAtNanos)
@@ -55,7 +57,9 @@ internal object DnsUdpUpstreamClient {
                         onAttempt,
                         receiveBufferAllocator,
                         onTimeout,
-                        onAnswer
+                        onAnswer,
+                        transactionIdSource,
+                        requireSig0Response
                     )
                 }
                 if (continuation.isActive) continuation.resumeWith(result)
@@ -75,7 +79,8 @@ internal object DnsUdpUpstreamClient {
         primaryBackoff: UdpPrimaryBackoff? = null,
         onTimeout: (isPrimary: Boolean) -> Unit = {},
         onAnswer: (isPrimary: Boolean) -> Unit = {},
-        onPrimaryDeferred: () -> Unit = {}
+        onPrimaryDeferred: () -> Unit = {},
+        transactionIdSource: () -> Int = DnsMessageValidator::nextPlaintextTransactionId
     ): DnsResolutionOutcome? {
         var lastFailure: Exception? = null
         var lastTruncatedResponse: ByteArray? = null
@@ -135,7 +140,8 @@ internal object DnsUdpUpstreamClient {
                         onAnswer = { responseCode ->
                             udpResponseCode = responseCode
                             onAnswer(isPrimary)
-                        }
+                        },
+                        transactionIdSource = transactionIdSource
                     )
                     if (response != null) {
                         if (DnsMessageValidator.isTruncatedResponse(response, query)) {
@@ -194,10 +200,11 @@ internal object DnsUdpUpstreamClient {
                             }
                         }
                     }
-                } catch (exception: CancellationException) {
-                    cancelled = true
-                    throw exception
                 } catch (exception: Exception) {
+                    if (exception is CancellationException || exception is DnsSig0RetryRequired) {
+                        cancelled = true
+                        throw exception
+                    }
                     lastFailure = exception
                 }
             }
@@ -229,11 +236,12 @@ internal object DnsUdpUpstreamClient {
         query: ParsedDnsQuery,
         server: InetAddress,
         port: Int = 53,
-        timeoutMillis: Int = DEFAULT_ATTEMPT_TIMEOUT_MILLIS.toInt()
+        timeoutMillis: Int = DEFAULT_ATTEMPT_TIMEOUT_MILLIS.toInt(),
+        transactionIdSource: () -> Int = DnsMessageValidator::nextPlaintextTransactionId
     ): ByteArray? {
         if (timeoutMillis <= 0) return null
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis.toLong())
-        return queryUntilDeadline(socket, query, server, port, deadlineNanos)
+        return queryUntilDeadline(socket, query, server, port, deadlineNanos, transactionIdSource = transactionIdSource)
     }
 
     private fun queryUntilDeadline(
@@ -245,13 +253,22 @@ internal object DnsUdpUpstreamClient {
         onAttempt: () -> Unit = {},
         receiveBufferAllocator: (Int) -> ByteArray = { ByteArray(it) },
         onTimeout: () -> Unit = {},
-        onAnswer: (responseCode: Int) -> Unit = {}
+        onAnswer: (responseCode: Int) -> Unit = {},
+        transactionIdSource: () -> Int,
+        requireSig0Response: Boolean = false
     ): ByteArray? {
-        if (deadlineNanos - System.nanoTime() <= 0L) return null
+        if (query.wire.size > DnsMessageValidator.MAX_UDP_QUERY_BYTES ||
+            deadlineNanos - System.nanoTime() <= 0L
+        ) return null
 
         socket.disconnect()
         socket.connect(server, port)
-        val upstreamQuery = DnsMessageValidator.prepareUpstreamQuery(query)
+        val upstreamQuery = if (requireSig0Response) query.wire else DnsMessageValidator.prepareUpstreamQuery(query)
+        val upstreamTransactionId = if (requireSig0Response) {
+            query.transactionId
+        } else {
+            DnsMessageValidator.assignPlaintextTransactionId(upstreamQuery, query, transactionIdSource)
+        }
         socket.send(DatagramPacket(upstreamQuery, upstreamQuery.size, server, port))
         onAttempt()
 
@@ -280,17 +297,26 @@ internal object DnsUdpUpstreamClient {
                 responsePacket.offset,
                 responsePacket.offset + responsePacket.length
             )
-            if (responsePacket.length >= buffer.size) {
-                if (DnsMessageValidator.isTruncatedResponse(response, query)) return response
+            val truncated = DnsMessageValidator.isTruncatedResponse(response, query, upstreamTransactionId)
+            if (!truncated && (responsePacket.length >= buffer.size || response.size > query.maxUdpResponseBytes)) {
                 continue
             }
-            if (DnsMessageValidator.isTruncatedResponse(response, query)) return response
-            if (response.size <= query.maxUdpResponseBytes) {
-                val responseCode = DnsMessageValidator.validatedResponseCode(response, query)
-                if (responseCode >= 0) {
-                    onAnswer(responseCode)
-                    return response
+            val validation = DnsMessageValidator.validateResponse(response, query, upstreamTransactionId)
+            if (!validation.isValid) {
+                // A partial UDP TC reply is only a signal to fetch the complete answer via TCP.
+                if (truncated && !requireSig0Response) {
+                    return DnsMessageValidator.restoreClientTransactionId(response, query)
                 }
+                continue
+            }
+            val accepted = finishPlaintextDnsResponse(
+                response, query, upstreamQuery, validation.hasSig0, requireSig0Response
+            ) {
+                DnsSig0RetryRequired(DnsUdpUpstreamEndpoint(server, port), DnsTransport.PLAINTEXT_UDP, deadlineNanos)
+            }
+            if (accepted != null) {
+                if (!truncated) onAnswer(validation.responseCode)
+                return accepted
             }
         }
     }

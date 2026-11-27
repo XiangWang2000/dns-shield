@@ -31,7 +31,7 @@ class DnsMessageValidatorTest {
     }
 
     @Test
-    fun accepts4096ByteValidEdnsPaddingQueryAndRejects4097ByteQuery() {
+    fun appliesSeparateUdpAndTcpQueryLimits() {
         fun queryWithPadding(size: Int): ByteArray {
             val query = DnsTestMessages.query(edns = true)
             val optionOffset = query.size
@@ -61,6 +61,16 @@ class DnsMessageValidatorTest {
             RejectionReason.TOO_LARGE,
             assertIs<DnsQueryParseResult.Rejected>(DnsMessageValidator.parseQuery(overLimit)).reason
         )
+
+        val tcpLimit = DnsTcpFrameCodec.MAX_DNS_MESSAGE_BYTES
+        assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(overLimit, tcpLimit))
+        assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryWithPadding(tcpLimit), tcpLimit))
+        assertEquals(
+            RejectionReason.TOO_LARGE,
+            assertIs<DnsQueryParseResult.Rejected>(
+                DnsMessageValidator.parseQuery(queryWithPadding(tcpLimit + 1), tcpLimit)
+            ).reason
+        )
     }
 
     @Test
@@ -80,6 +90,42 @@ class DnsMessageValidatorTest {
         val minimumSizeQuery = DnsMessageValidator.prepareUpstreamQuery(undersizedParsed)
         assertEquals(512, undersizedParsed.maxUdpResponseBytes)
         assertEquals(512, readUnsignedShort(minimumSizeQuery, DnsTestMessages.queryQuestionEnd(minimumSizeQuery) + 3))
+    }
+
+    @Test
+    fun preservesSig0QueryBytesForPlaintextUpstream() {
+        val queryWithEdns = DnsTestMessages.query(edns = true, udpPayloadSize = 8_192)
+        val signer = byteArrayOf(4, 't'.code.toByte(), 'e'.code.toByte(), 's'.code.toByte(), 't'.code.toByte(), 0)
+        val signature = ByteArray(64) // Opaque signature bytes for the wire-preservation check.
+        val sigDataSize = 18 + signer.size + signature.size
+        val signedWire = java.nio.ByteBuffer.allocate(queryWithEdns.size + 11 + sigDataSize)
+            .put(queryWithEdns)
+            .put(0)
+            .putShort(24)
+            .putShort(255)
+            .putInt(0)
+            .putShort(sigDataSize.toShort())
+            .putShort(0) // SIG(0) covers the transaction.
+            .put(15)
+            .put(0)
+            .putInt(0)
+            .putInt(0)
+            .putInt(0)
+            .putShort(0)
+            .put(signer)
+            .put(signature)
+            .array()
+            .also { it[11] = 2 }
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(signedWire)).query
+        assertTrue(query.hasSig0)
+        assertEquals(DnsMessageValidator.MAX_UDP_RESPONSE_BYTES, query.maxUdpResponseBytes)
+
+        val upstreamWire = DnsMessageValidator.prepareUpstreamQuery(query)
+        val upstreamId = DnsMessageValidator.assignPlaintextTransactionId(upstreamWire, query) {
+            error("A SIG(0) query must keep its client ID")
+        }
+        assertEquals(query.transactionId, upstreamId)
+        assertContentEquals(signedWire, upstreamWire)
     }
 
     @Test
@@ -238,6 +284,82 @@ class DnsMessageValidatorTest {
             responseWithoutOpt,
             assertNotNull(DnsMessageValidator.withoutSyntheticEdns(responseWithoutOpt, retry, original))
         )
+    }
+
+    @Test
+    fun detectsFinalAdditionalSig0WithoutModifyingSignedResponses() {
+        val queryBytes = DnsTestMessages.query()
+        val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
+        val signerName = DnsTestMessages.encodedName("signer.example")
+        fun signatureRecord(
+            typeCovered: Int = 0,
+            clazz: Int = 255,
+            ownerName: String = ""
+        ) = DnsTestResourceRecord(
+            type = 24,
+            ttl = 0,
+            clazz = clazz,
+            ownerName = ownerName,
+            data = ByteArray(18 + signerName.size + 1).also { data ->
+                data[0] = (typeCovered ushr 8).toByte()
+                data[1] = typeCovered.toByte()
+                data[2] = 15 // Algorithm; signature contents remain opaque to structural validation.
+                System.arraycopy(signerName, 0, data, 18, signerName.size)
+                data[data.lastIndex] = 0x5A
+            }
+        )
+        val answer = DnsTestResourceRecord(type = 1, ttl = 60, data = byteArrayOf(192.toByte(), 0, 2, 1))
+        val ordinaryResponse = DnsTestMessages.responseWithRecords(queryBytes, answers = listOf(answer))
+        val ordinaryValidation = DnsMessageValidator.validateResponse(ordinaryResponse, query)
+        assertEquals(0, ordinaryValidation.responseCode)
+        assertFalse(ordinaryValidation.hasSig0)
+        assertFalse(DnsMessageValidator.hasSig0Response(ordinaryResponse, query))
+        assertTrue(DnsMessageValidator.isCacheableResponse(ordinaryResponse, query))
+
+        val signedResponse = DnsTestMessages.responseWithRecords(
+            queryBytes,
+            answers = listOf(answer),
+            additionals = listOf(signatureRecord())
+        )
+        val signedValidation = DnsMessageValidator.validateResponse(signedResponse, query)
+        assertEquals(0, signedValidation.responseCode)
+        assertTrue(signedValidation.hasSig0)
+        assertTrue(DnsMessageValidator.hasSig0Response(signedResponse, query))
+        assertFalse(DnsMessageValidator.isCacheableResponse(signedResponse, query))
+        assertNull(DnsMessageValidator.parseCacheRecordMetadata(signedResponse, query))
+        assertContentEquals(
+            signedResponse,
+            assertNotNull(DnsMessageValidator.truncateResponseForClient(signedResponse, query, signedResponse.size))
+        )
+        assertNull(DnsMessageValidator.truncateResponseForClient(signedResponse, query, signedResponse.size - 1))
+
+        val signatureBeforeAnotherAdditional = DnsTestMessages.responseWithRecords(
+            queryBytes,
+            answers = listOf(answer),
+            additionals = listOf(
+                signatureRecord(typeCovered = 1, clazz = 1, ownerName = "example.com"),
+                DnsTestResourceRecord(type = 1, ttl = 60, data = byteArrayOf(192.toByte(), 0, 2, 2))
+            )
+        )
+        val otherFinalSig = DnsTestMessages.responseWithRecords(
+            queryBytes,
+            answers = listOf(answer),
+            additionals = listOf(signatureRecord(typeCovered = 1, clazz = 1, ownerName = "example.com"))
+        )
+        assertFalse(DnsMessageValidator.hasSig0Response(signatureBeforeAnotherAdditional, query))
+        assertFalse(DnsMessageValidator.hasSig0Response(otherFinalSig, query))
+
+        val original = query
+        val retry = assertNotNull(DnsMessageValidator.withEdnsForSystemRetry(original))
+        val signedRetryResponse = DnsTestMessages.responseWithRecords(
+            retry.wire,
+            additionals = listOf(
+                DnsTestResourceRecord(type = 41, ttl = 0, clazz = 4096, ownerName = "", data = byteArrayOf()),
+                signatureRecord()
+            )
+        )
+        assertTrue(DnsMessageValidator.hasSig0Response(signedRetryResponse, retry))
+        assertNull(DnsMessageValidator.withoutSyntheticEdns(signedRetryResponse, retry, original))
     }
 
     @Test
@@ -437,7 +559,7 @@ class DnsMessageValidatorTest {
         assertNull(DnsMessageValidator.buildParseErrorResponse(ByteArray(11), RejectionReason.TOO_SHORT))
         assertNull(
             DnsMessageValidator.buildParseErrorResponse(
-                ByteArray(DnsMessageValidator.MAX_QUERY_MESSAGE_BYTES + 1),
+                ByteArray(DnsMessageValidator.MAX_UDP_QUERY_BYTES + 1),
                 RejectionReason.TOO_LARGE
             )
         )

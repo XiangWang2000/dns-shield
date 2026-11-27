@@ -169,17 +169,15 @@ class DnsHotPathInstrumentedBenchmarkTest {
 
     private class LegacyBuiltInDomainMatcher {
         private val exactBlocks = setOf(
-            "doubleclick.net", "admob.com", "pagead2.googlesyndication.com",
-            "googleads.g.doubleclick.net", "analytics.google.com", "crashlytics.com"
+            "doubleclick.net", "admob.com", "adservice.google.com", "amazon-adsystem.com",
+            "pagead2.googlesyndication.com", "googleads.g.doubleclick.net",
+            "analytics.google.com", "crashlytics.com"
         )
         private val suffixBlocks = listOf(
-            ".doubleclick.net", ".admob.com", ".analytics.google.com", ".adnxs.com",
+            ".doubleclick.net", ".admob.com", ".amazon-adsystem.com",
+            ".analytics.google.com", ".adnxs.com",
             ".adcolony.com", ".adservice.google.com", ".scorecardresearch.com", ".hotjar.com",
             ".telemetry.mozilla.org", ".adjust.com", ".appsflyer.com"
-        )
-        private val containsBlocks = listOf(
-            "adservice", "adsystem", "googleads", "pagead", "amazon-adsystem",
-            "telemetry-", "analytics-"
         )
         private val exactBlockedLabels = setOf(
             "ads", "tracker", "telemetry", "analytics", "crashlytics"
@@ -190,7 +188,6 @@ class DnsHotPathInstrumentedBenchmarkTest {
             if (normalized.isEmpty() || normalized == "unknown") return false
             if (normalized in exactBlocks) return true
             if (suffixBlocks.any(normalized::endsWith)) return true
-            if (containsBlocks.any(normalized::contains)) return true
             return normalized.split('.').any(exactBlockedLabels::contains)
         }
     }

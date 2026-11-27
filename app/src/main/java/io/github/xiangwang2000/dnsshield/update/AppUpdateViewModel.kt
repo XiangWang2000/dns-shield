@@ -41,7 +41,16 @@ internal class AppUpdateViewModel(
     private val installer = AndroidUpdateInstaller(application)
     private val downloadDirectory = File(application.cacheDir, "app-updates")
     private val prefs = application.getSharedPreferences("app_updates", Context.MODE_PRIVATE)
-    private val _state = MutableStateFlow(AppUpdateUiState(autoCheck = prefs.getBoolean(AUTO_CHECK, false)))
+    private val _state = MutableStateFlow(
+        AppUpdateUiState(
+            autoCheck = prefs.getBoolean(AUTO_CHECK, false),
+            message = if (prefs.getInt(INSTALL_STARTED_FROM_VERSION_CODE, -1) == BuildConfig.VERSION_CODE) {
+                "上次安裝更新已中斷，請重新檢查更新。"
+            } else {
+                null
+            }
+        )
+    )
     val state = _state.asStateFlow()
 
     private val _confirmation = MutableStateFlow<Intent?>(null)
@@ -65,7 +74,10 @@ internal class AppUpdateViewModel(
 
     fun checkForUpdate() {
         if (operationRunning || _state.value.phase == UpdatePhase.InstallPermission) return
-        prefs.edit { putLong(LAST_CHECK, System.currentTimeMillis()) }
+        prefs.edit {
+            putLong(LAST_CHECK, System.currentTimeMillis())
+            remove(INSTALL_STARTED_FROM_VERSION_CODE)
+        }
         _state.update { it.copy(phase = UpdatePhase.Checking, available = null, message = null) }
         operation = viewModelScope.launch {
             try {
@@ -130,6 +142,12 @@ internal class AppUpdateViewModel(
                 val apk = releases.download(update, downloadDirectory)
                 downloaded = apk
                 _state.update { it.copy(phase = UpdatePhase.Installing) }
+                withContext(Dispatchers.IO) {
+                    // The install can replace this process before it receives the result.
+                    prefs.edit(commit = true) {
+                        putInt(INSTALL_STARTED_FROM_VERSION_CODE, BuildConfig.VERSION_CODE)
+                    }
+                }
                 when (installer.install(apk, update.versionName) { _confirmation.value = it }) {
                     InstallOutcome.Installed -> _state.update {
                         it.copy(phase = UpdatePhase.Idle, available = null, message = "更新已安裝。")
@@ -151,7 +169,10 @@ internal class AppUpdateViewModel(
             } finally {
                 _confirmation.value = null
                 downloaded?.let { apk ->
-                    withContext(NonCancellable + Dispatchers.IO) { apk.delete() }
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        prefs.edit(commit = true) { remove(INSTALL_STARTED_FROM_VERSION_CODE) }
+                        apk.delete()
+                    }
                 }
             }
         }
@@ -165,6 +186,7 @@ internal class AppUpdateViewModel(
         const val TAG = "AppUpdate"
         const val AUTO_CHECK = "auto_check"
         const val LAST_CHECK = "last_check"
+        const val INSTALL_STARTED_FROM_VERSION_CODE = "install_started_from_version_code"
         const val CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000L
     }
 }

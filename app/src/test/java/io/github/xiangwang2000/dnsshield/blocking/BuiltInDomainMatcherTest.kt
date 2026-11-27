@@ -20,9 +20,13 @@ class BuiltInDomainMatcherTest {
     }
 
     @Test
-    fun preservesContainsRules() {
-        assertTrue(matcher.shouldBlock("api.amazon-adsystem.example"))
-        assertTrue(matcher.shouldBlock("telemetry-endpoint.example"))
+    fun blocksKnownAdServiceAndAmazonAdsSystemDomains() {
+        assertTrue(matcher.shouldBlock("adservice.google.com"))
+        assertTrue(matcher.shouldBlock("api.adservice.google.com"))
+        assertTrue(matcher.shouldBlock("amazon-adsystem.com"))
+        assertTrue(matcher.shouldBlock("api.amazon-adsystem.com"))
+        assertTrue(matcher.shouldBlock("cdn.api.amazon-adsystem.com"))
+        assertFalse(matcher.shouldBlock("api.amazon-adsystem.example"))
     }
 
     @Test
@@ -39,6 +43,9 @@ class BuiltInDomainMatcherTest {
         assertFalse(matcher.shouldBlock("trackerx.example.com"))
         assertFalse(matcher.shouldBlock("myanalytics.example.com"))
         assertFalse(matcher.shouldBlock("crashlytics2.example.com"))
+        assertFalse(matcher.shouldBlock("mypageadmin.example.com"))
+        assertFalse(matcher.shouldBlock("analytics-tooling.example.org"))
+        assertFalse(matcher.shouldBlock("telemetry-workshop.example.edu"))
     }
 
     @Test

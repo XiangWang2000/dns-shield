@@ -117,7 +117,7 @@ class DohFailureBackoffTunInstrumentedTest {
             startVpn(context)
             awaitActiveVpnNetwork(context)
             awaitServiceNetworkReady()
-            DnsVpnService.setD08TestHttpClient(pinnedD08HttpClient())
+            DnsVpnService.testHooks.setD08TestHttpClient(pinnedD08HttpClient())
 
             val transactionId = if (retransmit) 0x8701 else 0x8700
             queryTask = async(Dispatchers.IO) {
@@ -155,7 +155,7 @@ class DohFailureBackoffTunInstrumentedTest {
                 assertEquals(1, dnsAnswerCount(response))
             }
 
-            val heldMetrics = DnsVpnService.d14DiagnosticsSnapshot()
+            val heldMetrics = DnsVpnService.testHooks.diagnosticsSnapshot()
             android.util.Log.i("CapacityReview", "retransmit=$retransmit held=$heldMetrics")
             if (retransmit) {
                 assertEquals(8L, heldMetrics.coalesced)
@@ -169,9 +169,9 @@ class DohFailureBackoffTunInstrumentedTest {
             assertEquals("Strict DoH mode sent a query over UDP", 0, plaintext.queryCount.get())
             doh.releaseFirstResponse()
             withTimeout(2_000L) {
-                while (DnsVpnService.d14DiagnosticsSnapshot().pending != 0L) delay(10)
+                while (DnsVpnService.testHooks.diagnosticsSnapshot().pending != 0L) delay(10)
             }
-            val drained = DnsVpnService.d14DiagnosticsSnapshot()
+            val drained = DnsVpnService.testHooks.diagnosticsSnapshot()
             assertEquals(drained.received, drained.terminalCount)
             val next = sendQueryThroughTunOnce(buildDnsQuery("next-$domain", 0x8702))
             assertDnsResponseCode(next, 0, 0x8702)
@@ -187,7 +187,7 @@ class DohFailureBackoffTunInstrumentedTest {
             try {
                 stopVpnIfRunning(context)
             } finally {
-                DnsVpnService.setD08TestHttpClient(null)
+                DnsVpnService.testHooks.setD08TestHttpClient(null)
                 DnsVpnService.clearLogs()
                 DnsVpnService.setUiForeground(false)
                 try {
@@ -260,13 +260,13 @@ class DohFailureBackoffTunInstrumentedTest {
             val resolver = dao.getDnsServersList().first { it.name == resolverName }
             resolverId = resolver.id
             assertTrue(dao.setActiveDnsServer(resolver.id))
-            DnsVpnService.setD08TestPlaintextFallbackPolicy(resolver.id, false)
+            DnsVpnService.testHooks.setD08TestPlaintextFallbackPolicy(resolver.id, false)
             DnsVpnService.setUiForeground(true)
             DnsVpnService.clearLogs()
             startVpn(context)
             awaitActiveVpnNetwork(context)
             awaitServiceNetworkReady()
-            DnsVpnService.setD08TestHttpClient(pinnedD08HttpClient())
+            DnsVpnService.testHooks.setD08TestHttpClient(pinnedD08HttpClient())
 
             val beforeRow = dao.getActiveDnsServer()
             if (initialStoredAllowed) {
@@ -319,7 +319,7 @@ class DohFailureBackoffTunInstrumentedTest {
             try {
                 stopVpnIfRunning(context)
             } finally {
-                DnsVpnService.setD08TestHttpClient(null)
+                DnsVpnService.testHooks.setD08TestHttpClient(null)
                 DnsVpnService.clearLogs()
                 DnsVpnService.setUiForeground(false)
                 try {
@@ -400,13 +400,13 @@ class DohFailureBackoffTunInstrumentedTest {
             resolverAId = resolverA.id
             resolverBId = resolverB.id
             assertTrue(dao.setActiveDnsServer(resolverA.id))
-            DnsVpnService.setD08TestPlaintextFallbackPolicy(resolverA.id, false)
+            DnsVpnService.testHooks.setD08TestPlaintextFallbackPolicy(resolverA.id, false)
             DnsVpnService.setUiForeground(true)
             DnsVpnService.clearLogs()
             startVpn(context)
             awaitActiveVpnNetwork(context)
             awaitServiceNetworkReady()
-            DnsVpnService.setD08TestHttpClient(pinnedD08HttpClient())
+            DnsVpnService.testHooks.setD08TestHttpClient(pinnedD08HttpClient())
 
             val gateEntered = CompletableDeferred<Unit>()
             val release = CompletableDeferred<Boolean>()
@@ -491,7 +491,7 @@ class DohFailureBackoffTunInstrumentedTest {
             startVpn(context)
             awaitActiveVpnNetwork(context)
             awaitServiceNetworkReady()
-            DnsVpnService.setD08TestHttpClient(pinnedD08HttpClient())
+            DnsVpnService.testHooks.setD08TestHttpClient(pinnedD08HttpClient())
             val restartedResponse = sendQueryThroughTun(buildDnsQuery(restartDomain, 0x8604))
             assertDnsResponseCode(restartedResponse, 2, 0x8604)
             assertEquals("Strict policy did not survive same-process service restart over UDP/53", 0, plaintext.queryCount(restartDomain))
@@ -505,7 +505,7 @@ class DohFailureBackoffTunInstrumentedTest {
             try {
                 stopVpnIfRunning(context)
             } finally {
-                DnsVpnService.setD08TestHttpClient(null)
+                DnsVpnService.testHooks.setD08TestHttpClient(null)
                 DnsVpnService.clearLogs()
                 DnsVpnService.setUiForeground(false)
                 try {
@@ -588,7 +588,7 @@ class DohFailureBackoffTunInstrumentedTest {
             resolverBId = resolverB.id
             resolverCId = resolverC.id
             assertTrue(dao.setActiveDnsServer(resolverA.id))
-            DnsVpnService.setD08TestPlaintextFallbackPolicy(resolverA.id, true)
+            DnsVpnService.testHooks.setD08TestPlaintextFallbackPolicy(resolverA.id, true)
             DnsVpnService.setUiForeground(true)
             DnsVpnService.clearLogs()
             startVpn(context)
@@ -599,7 +599,7 @@ class DohFailureBackoffTunInstrumentedTest {
                 {
                     try {
                         sendResult.set(
-                            DnsVpnService.runD08TestPlaintextSend(
+                            DnsVpnService.testHooks.runD08TestPlaintextSend(
                                 resolverA.id,
                                 snapshotAllowsPlaintext = true,
                                 currentPolicyAllowsPlaintext = { true }
@@ -695,7 +695,7 @@ class DohFailureBackoffTunInstrumentedTest {
             assertNull(dao.getDnsServerById(resolverC.id))
 
             val laterSendInvoked = AtomicBoolean(false)
-            val laterSendAllowed = DnsVpnService.runD08TestPlaintextSend(
+            val laterSendAllowed = DnsVpnService.testHooks.runD08TestPlaintextSend(
                 resolverA.id,
                 snapshotAllowsPlaintext = true,
                 currentPolicyAllowsPlaintext = { true }
@@ -716,7 +716,7 @@ class DohFailureBackoffTunInstrumentedTest {
             try {
                 stopVpnIfRunning(context)
             } finally {
-                DnsVpnService.setD08TestHttpClient(null)
+                DnsVpnService.testHooks.setD08TestHttpClient(null)
                 DnsVpnService.clearLogs()
                 DnsVpnService.setUiForeground(false)
                 try {
@@ -776,7 +776,7 @@ class DohFailureBackoffTunInstrumentedTest {
             startVpn(context)
             awaitActiveVpnNetwork(context)
             delay(NETWORK_SETTLE_MILLIS)
-            DnsVpnService.setD08TestHttpClient(pinnedD08HttpClient())
+            DnsVpnService.testHooks.setD08TestHttpClient(pinnedD08HttpClient())
 
             repeat(3) { index ->
                 val transactionId = 0x8400 + index
@@ -800,7 +800,7 @@ class DohFailureBackoffTunInstrumentedTest {
             try {
                 stopVpnIfRunning(context)
             } finally {
-                DnsVpnService.setD08TestHttpClient(null)
+                DnsVpnService.testHooks.setD08TestHttpClient(null)
                 try {
                     resolverId?.let { dao.deleteDnsServerById(it) }
                     dao.getDnsServersList().filter { it.name == resolverName }
@@ -863,7 +863,7 @@ class DohFailureBackoffTunInstrumentedTest {
             startVpn(context)
             awaitActiveVpnNetwork(context)
             delay(NETWORK_SETTLE_MILLIS)
-            DnsVpnService.setD08TestHttpClient(pinnedD08HttpClient())
+            DnsVpnService.testHooks.setD08TestHttpClient(pinnedD08HttpClient())
 
             oldQuery = async(Dispatchers.IO) {
                 sendQueryThroughTunOnce(buildDnsQuery(oldDomain, 0x8500))
@@ -922,7 +922,7 @@ class DohFailureBackoffTunInstrumentedTest {
             try {
                 stopVpnIfRunning(context)
             } finally {
-                DnsVpnService.setD08TestHttpClient(null)
+                DnsVpnService.testHooks.setD08TestHttpClient(null)
                 try {
                     resolverId?.let { dao.deleteDnsServerById(it) }
                     dao.getDnsServersList().filter { it.name == initialName || it.name == updatedName }
@@ -1291,7 +1291,7 @@ class DohFailureBackoffTunInstrumentedTest {
                         it.soTimeout = SERVER_TIMEOUT_MILLIS
                         val input = DataInputStream(it.getInputStream())
                         val length = input.readUnsignedShort()
-                        if (length in 12..DnsMessageValidator.MAX_QUERY_MESSAGE_BYTES) {
+                        if (length in 12..DnsTcpFrameCodec.MAX_DNS_MESSAGE_BYTES) {
                             val query = ByteArray(length)
                             input.readFully(query)
                             val parsed = DnsMessageValidator.parseQuery(query) as? DnsQueryParseResult.Valid

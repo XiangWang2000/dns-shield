@@ -45,7 +45,7 @@ A missing, blank, malformed, or unrelated resolver result keeps matching exact-o
 
 `CompiledPublicSuffixList` implements the resolver contract from the deterministic production artifact packaged as `app/src/main/assets/public_suffix.bin`. The artifact identity is verified during routine repository verification and by a real-main-asset Android instrumentation test.
 
-`DomainPolicyAssembler` applies bounded parent traversal only to a validated `CompiledBlocklistMatcher`. `BuiltInDomainMatcher` is not wrapped because its existing suffix, contains, and label behavior is intentionally preserved, and `CompositeDomainMatcher` is not wrapped so an exact allowlist entry cannot silently become a subdomain allowlist.
+`DomainPolicyAssembler` applies bounded parent traversal only to a validated `CompiledBlocklistMatcher`. `BuiltInDomainMatcher` is not wrapped because it uses explicit exact-domain and suffix rules plus exact blocked-label matches; it does not block arbitrary substrings. The `adservice.google.com` rule covers that domain and its subdomains, and the `amazon-adsystem.com` rule covers its domain and descendants. `CompositeDomainMatcher` is not wrapped so an exact allowlist entry cannot silently become a subdomain allowlist.
 
 The registrable-domain resolver is supplied lazily. The provider is not invoked when no compiled blocklist is configured and is not invoked until a configured blocklist has loaded and passed sorted-artifact validation. If the resolver is unavailable or its provider throws a recoverable `Exception`, the validated compiled matcher remains active in exact-only mode.
 

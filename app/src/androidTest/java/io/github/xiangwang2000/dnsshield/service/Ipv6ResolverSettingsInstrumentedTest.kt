@@ -45,13 +45,15 @@ class Ipv6ResolverSettingsInstrumentedTest {
             assertNotNull(model.addCustomDnsServer(
                 name = duplicateName,
                 primaryIp = primary,
-                secondaryIp = null
+                secondaryIp = null,
+                allowPlaintextFallback = true
             ))
             assertFalse(dao.getDnsServersList().any { it.name == duplicateName })
             assertNotNull(model.addCustomDnsServer(
                 name = duplicateName,
                 primaryIp = "fe80::1%wlan0",
-                secondaryIp = null
+                secondaryIp = null,
+                allowPlaintextFallback = true
             ))
             assertFalse(dao.getDnsServersList().any { it.name == duplicateName })
         } finally {

@@ -4,16 +4,37 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 POWERSHELL = shutil.which("powershell.exe" if os.name == "nt" else "pwsh")
 
 
+@contextmanager
+def temporary_directory_with_cleanup_retry():
+    directory = tempfile.TemporaryDirectory()
+    try:
+        yield directory.name
+    finally:
+        # Windows can briefly refuse cleanup while a file handle is still open.
+        for delay in (0.05, 0.1, 0.2, 0.4, None):
+            try:
+                directory.cleanup()
+            except OSError as error:
+                if getattr(error, "winerror", None) != 32 or delay is None:
+                    raise
+                time.sleep(delay)
+            else:
+                break
+
+
 @unittest.skipUnless(POWERSHELL, "PowerShell executable is not installed")
 class VerifyScopeTest(unittest.TestCase):
     def run_verifier(self, options="", fail=False):
-        with tempfile.TemporaryDirectory() as directory:
+        with temporary_directory_with_cleanup_retry() as directory:
             root = Path(directory)
             shutil.copyfile(ROOT / "verify.ps1", root / "verify.ps1")
             # Syntax-only inputs and assets; python is stubbed to prevent recursion.
@@ -48,6 +69,84 @@ class VerifyScopeTest(unittest.TestCase):
                                     capture_output=True, text=True, errors="replace", timeout=30)
             calls = (root / "calls.txt").read_text() if (root / "calls.txt").exists() else []
             return result, calls.splitlines() if isinstance(calls, str) else calls
+
+    def test_temp_directory_cleanup_retries_a_windows_sharing_violation(self):
+        original_rmtree = shutil.rmtree
+        calls = 0
+
+        def fail_once_with_sharing_violation(path, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                error = PermissionError(13, "sharing violation", os.fspath(path))
+                error.winerror = 32
+                raise error
+            return original_rmtree(path, *args, **kwargs)
+
+        with patch("shutil.rmtree", side_effect=fail_once_with_sharing_violation):
+            with temporary_directory_with_cleanup_retry() as directory:
+                Path(directory, "held-until-cleanup").touch()
+
+        self.assertEqual(calls, 2)
+        self.assertFalse(Path(directory).exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows file sharing semantics are required")
+    def test_temp_directory_cleanup_retries_after_a_file_handle_is_released(self):
+        held_file = None
+
+        def release_handle(_delay):
+            held_file.close()
+
+        try:
+            with patch("time.sleep", side_effect=release_handle) as retry_delay:
+                with temporary_directory_with_cleanup_retry() as directory:
+                    marker = Path(directory, "held-open")
+                    marker.touch()
+                    held_file = marker.open("rb")
+            retry_delay.assert_called_once_with(0.05)
+            self.assertFalse(Path(directory).exists())
+        finally:
+            if held_file is not None:
+                held_file.close()
+
+    def test_temp_directory_cleanup_preserves_errors_and_caps_retries(self):
+        for winerror, expected_attempts in ((32, 5), (5, 1)):
+            with self.subTest(winerror=winerror):
+                directory = None
+                error = PermissionError(13, "cleanup failed")
+                error.winerror = winerror
+                try:
+                    with patch("shutil.rmtree", side_effect=error) as remove, patch("time.sleep"):
+                        with self.assertRaises(PermissionError) as raised:
+                            with temporary_directory_with_cleanup_retry() as directory:
+                                Path(directory, "held-until-cleanup").touch()
+                    self.assertIs(raised.exception, error)
+                    self.assertEqual(remove.call_count, expected_attempts)
+                    self.assertTrue(Path(directory).exists())
+                finally:
+                    if directory is not None:
+                        shutil.rmtree(directory)
+
+    def test_temp_directory_cleanup_does_not_suppress_body_errors(self):
+        original_rmtree = shutil.rmtree
+        calls = 0
+
+        def fail_once_with_sharing_violation(path, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                error = PermissionError(13, "sharing violation", os.fspath(path))
+                error.winerror = 32
+                raise error
+            return original_rmtree(path, *args, **kwargs)
+
+        with patch("shutil.rmtree", side_effect=fail_once_with_sharing_violation), patch("time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "preserve body error"):
+                with temporary_directory_with_cleanup_retry() as directory:
+                    raise RuntimeError("preserve body error")
+
+        self.assertEqual(calls, 2)
+        self.assertFalse(Path(directory).exists())
 
     def test_default_preserves_full_gate(self):
         result, calls = self.run_verifier()
