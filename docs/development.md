@@ -36,7 +36,10 @@ verify.ps1 會檢查 PowerShell 腳本語法、Python 工具、production blockl
 | [viewmodel/DnsVpnViewModel.kt](../app/src/main/java/io/github/xiangwang2000/dnsshield/viewmodel/DnsVpnViewModel.kt) | UI state、Room 資料、App 排除名單與 VPN 操作。 |
 | [data/](../app/src/main/java/io/github/xiangwang2000/dnsshield/data) | DNS 設定、網域規則與排除 App 的 Room 資料。 |
 | [blocking/](../app/src/main/java/io/github/xiangwang2000/dnsshield/blocking) | 規則比對、compiled blocklist、Public Suffix 載入及政策組裝。 |
-| [service/DnsVpnService.kt](../app/src/main/java/io/github/xiangwang2000/dnsshield/service/DnsVpnService.kt) 與 [service/](../app/src/main/java/io/github/xiangwang2000/dnsshield/service) | VPN／TUN 生命週期、DNS 查詢、網路切換、快取、上游傳輸與診斷。 |
+| [service/DnsVpnService.kt](../app/src/main/java/io/github/xiangwang2000/dnsshield/service/DnsVpnService.kt) | VPN／TUN 生命週期、查詢排程、網路選擇、快取與網域規則。 |
+| [DnsUpstreamResolver.kt](../app/src/main/java/io/github/xiangwang2000/dnsshield/service/DnsUpstreamResolver.kt) | 單筆 DNS 查詢的 DoH、UDP／TCP 備援與系統 DNS 分派。使用服務擷取的解析器與網路狀態。 |
+| [DnsLogRuntime.kt](../app/src/main/java/io/github/xiangwang2000/dnsshield/service/DnsLogRuntime.kt) | DNS 日誌、決策事件和診斷快照的保留與發布。資料隨 App 程序存續，可跨 VPN 服務重啟。 |
+| [DnsVpnServiceTestHooks.kt](../app/src/main/java/io/github/xiangwang2000/dnsshield/service/DnsVpnServiceTestHooks.kt) | 隔離建置的測試設定與觀測入口。D07 的即時規則重載由 D14 裝置測試覆蓋。 |
 | [app/src/main/cpp/](../app/src/main/cpp) 與 NativeDnsTcpRuntime、SocksDnsServer | 用於轉送用戶端 TCP/53 DNS 的 JNI／Hev 與 SOCKS 橋接。 |
 | [app/src/main/assets/](../app/src/main/assets) | 隨 APK 發布並由工具驗證的 production 資產。 |
 | [tools/](../tools)、[app/src/test/](../app/src/test)、[app/src/androidTest/](../app/src/androidTest) | 離線資產工具、CI、JVM 與裝置測試。 |
@@ -94,6 +97,10 @@ VPN 只為本機虛擬 DNS 位址 10.0.0.1/32 與 fd29:1a5d:7c0d::1/128 加入�
 API 35 模擬器已在受控雙棧及 IPv6-only 網路（有、無 464XLAT）驗證 IPv6 DNS 主備、DNS64／NAT64、嚴格 DoH 備援與一般 IPv6 流量。公開 DoH 在這個環境經 NAT64 連線。API 26 已測虛擬 IPv4／IPv6 DNS，未以同一套受控底層網路驗收。App 不提供 DNS64 合成或 NAT64 閘道；這些結果不涵蓋所有 Android 版本、實機廠牌與電信商網路。
 
 ### System DNS 與 EDNS
+
+UDP DNS 查詢上限為 4 KiB，DNS-over-TCP 可接受最多 65,535 bytes 的查詢。App 設定的解析器若需使用未加密備援，超過 UDP 上限的查詢會以 TCP 送到上游。
+
+一般明文查詢會以獨立的交易 ID 向上游查詢。收到符合該交易的 SIG(0) 回應時，如需保留原始查詢內容，服務會在同一查詢期限內使用新連線向同一上游重試一次。簽章回應須完整且符合原查詢才會交付，簽章驗證由客戶端執行。
 
 「系統 DNS」是 Android 10 以上可選用的解析器，使用目前底層網路的 Android `DnsResolver`；DNS 加密沿用 Android「私人 DNS」設定。此選項預設不會啟用，也不會替使用者變更系統設定。其他解析器則依 DNS Shield 儲存的 DoH、UDP 或 TCP 設定傳送。
 

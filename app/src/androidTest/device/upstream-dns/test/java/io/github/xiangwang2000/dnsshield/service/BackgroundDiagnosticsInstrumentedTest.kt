@@ -78,7 +78,7 @@ class BackgroundDiagnosticsInstrumentedTest {
                 } else {
                     DnsDecisionReason.PROTECTION_LIST
                 }
-                DnsVpnService.recordD08TestBlockedDomain("background-$index.example.test", reason)
+                DnsVpnService.testHooks.recordD08TestBlockedDomain("background-$index.example.test", reason)
             }
             assertTrue("Background events leaked to the service flow", DnsVpnService.liveDecisionEventsFlow.value.isEmpty())
             assertTrue("Background events leaked to the ViewModel", viewModel.uiState.value.blockedEvents.isEmpty())
@@ -94,14 +94,14 @@ class BackgroundDiagnosticsInstrumentedTest {
             assertEquals(foregroundEvents, publications.last())
 
             val pendingDomain = "pending-before-clear.example.test"
-            DnsVpnService.recordD08TestBlockedDomain(pendingDomain, DnsDecisionReason.USER_RULE)
+            DnsVpnService.testHooks.recordD08TestBlockedDomain(pendingDomain, DnsDecisionReason.USER_RULE)
             DnsVpnService.clearLogs()
             assertTrue(DnsVpnService.liveDecisionEventsFlow.value.isEmpty())
             assertTrue("clearLogs did not synchronously publish the empty snapshot", publications.last().isEmpty())
             val publicationsAfterClear = publications.size
 
             val afterClearDomain = "after-clear-${UUID.randomUUID().toString().replace("-", "")}.example.test"
-            DnsVpnService.recordD08TestBlockedDomain(afterClearDomain, DnsDecisionReason.PROTECTION_LIST)
+            DnsVpnService.testHooks.recordD08TestBlockedDomain(afterClearDomain, DnsDecisionReason.PROTECTION_LIST)
             val afterClearEvents = withTimeout(FLOW_TIMEOUT_MILLIS) {
                 DnsVpnService.liveDecisionEventsFlow.first { events ->
                     events.any { it.domain == afterClearDomain }

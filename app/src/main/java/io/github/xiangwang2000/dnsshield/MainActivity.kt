@@ -3,6 +3,7 @@ package io.github.xiangwang2000.dnsshield
 import android.Manifest
 import android.app.Activity
 import android.app.NotificationManager
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -90,6 +91,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    override fun onResume() {
+        super.onResume()
+        DnsVpnService.refreshAlwaysOnVpnStatus()
+    }
+
     override fun onStart() {
         super.onStart()
         DnsVpnService.setUiForeground(true)
@@ -246,6 +252,8 @@ fun DnsShieldDashboard(
         onAllowBlockedDomain = viewModel::allowBlockedDomain,
         onUndoDomainRule = viewModel::undoDomainRule,
         onDismissResolverNotice = viewModel::dismissResolverNotice,
+        onAcknowledgeAlwaysOnVpnReminder = viewModel::acknowledgeAlwaysOnVpnReminder,
+        onOpenVpnSettings = { openVpnSettings(context) },
         headerAction = headerAction,
         modifier = modifier
     )
@@ -274,8 +282,12 @@ fun DnsShieldScreen(
     modifier: Modifier = Modifier,
     onDismissResolverNotice: () -> Unit = {},
     onRetryLoadApps: () -> Unit = {},
+    onAcknowledgeAlwaysOnVpnReminder: () -> Unit = {},
+    onOpenVpnSettings: (() -> Unit)? = null,
     headerAction: (@Composable () -> Unit)? = null
 ) {
+    val context = LocalContext.current
+    val openVpnSettingsAction = onOpenVpnSettings ?: { openVpnSettings(context) }
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var showAddDnsDialog by rememberSaveable { mutableStateOf(false) }
     BoxWithConstraints(
@@ -299,7 +311,9 @@ fun DnsShieldScreen(
                             onAddDnsClicked = { showAddDnsDialog = true },
                             onDeleteDns = onDeleteDns,
                             onSetPlaintextFallback = onSetPlaintextFallback,
-                            onDismissResolverNotice = onDismissResolverNotice
+                            onDismissResolverNotice = onDismissResolverNotice,
+                            onAcknowledgeAlwaysOnVpnReminder = onAcknowledgeAlwaysOnVpnReminder,
+                            onOpenVpnSettings = openVpnSettingsAction
                         )
                         1 -> {
                             LaunchedEffect(Unit) { onLoadAppsIfNeeded() }
@@ -643,7 +657,9 @@ fun ControlCenterTab(
     onAddDnsClicked: () -> Unit,
     onDeleteDns: (DnsServer) -> Unit,
     onSetPlaintextFallback: (DnsServer, Boolean) -> Unit,
-    onDismissResolverNotice: () -> Unit
+    onDismissResolverNotice: () -> Unit,
+    onAcknowledgeAlwaysOnVpnReminder: () -> Unit,
+    onOpenVpnSettings: () -> Unit
 ) {
     var deleteCandidate by remember { mutableStateOf<DnsServer?>(null) }
     LazyColumn(
@@ -724,6 +740,51 @@ fun ControlCenterTab(
                 )
             }
         }
+        if (uiState.shouldShowAlwaysOnVpnReminder) item {
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("always_on_vpn_reminder"),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+            ) {
+                Column(
+                    Modifier.fillMaxWidth().padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "永久連線的 VPN 尚未開啟",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    Text(
+                        "開啟後，DNS Shield 才會在重開機後自動恢復防護。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = {
+                                onAcknowledgeAlwaysOnVpnReminder()
+                                onOpenVpnSettings()
+                            },
+                            modifier = Modifier.heightIn(min = 48.dp).testTag("always_on_vpn_open_settings")
+                        ) { Text("開啟 VPN 設定") }
+                        TextButton(
+                            onClick = onAcknowledgeAlwaysOnVpnReminder,
+                            modifier = Modifier.heightIn(min = 48.dp).testTag("always_on_vpn_dismiss")
+                        ) { Text("知道了") }
+                    }
+                }
+            }
+        }
+        if (uiState.vpnLifecycleState == VpnLifecycleState.RUNNING &&
+            !uiState.shouldShowAlwaysOnVpnReminder
+        ) item {
+            TextButton(
+                onClick = onOpenVpnSettings,
+                modifier = Modifier.heightIn(min = 48.dp).testTag("open_vpn_settings")
+            ) {
+                Text("VPN 設定")
+            }
+        }
         items(uiState.dnsServers, key = { it.id }) { server ->
             DnsServerCard(
                 server, isActive = server.id == uiState.activeDnsServer?.id, onSelect = { onSelectDns(server.id) },
@@ -735,7 +796,7 @@ fun ControlCenterTab(
         item {
             DisclosureCard("防護範圍與限制", "防護經由本機 VPN 的系統 DNS 查詢。") {
                 Text("DNS Shield 只處理送往本機 VPN 虛擬 DNS 位址的 IPv4／IPv6 UDP／TCP 53 查詢。App 自行指定其他 DNS 位址、使用自帶的 DoH／DoT，或直接連線到 IP 位址，都不會被攔截；其他網路流量仍走原本網路。", style = MaterialTheme.typography.bodyMedium)
-                Text("DoH 使用 HTTPS 加密；未加密備援使用 UDP/53，回應過大時可能改用 TCP/53。DNS Shield 不在本機驗證 DNSSEC，也無法只封鎖同一網域中的廣告內容。", style = MaterialTheme.typography.bodyMedium)
+                Text("DoH 使用 HTTPS 加密。開啟未加密備援時，App 可改用 UDP/53 或 TCP/53。DNS Shield 不在本機驗證 DNSSEC，也無法只封鎖同一網域中的廣告內容。", style = MaterialTheme.typography.bodyMedium)
             }
         }
     }
@@ -747,6 +808,14 @@ fun ControlCenterTab(
             confirmButton = { TextButton(onClick = { deleteCandidate = null; onDeleteDns(server) }) { Text("刪除", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { deleteCandidate = null }) { Text("保留") } }
         )
+    }
+}
+
+private fun openVpnSettings(context: Context) {
+    try {
+        context.startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, "請到 Android 設定搜尋「VPN」。", Toast.LENGTH_LONG).show()
     }
 }
 
@@ -987,7 +1056,7 @@ fun AddDnsDialog(
     var name by rememberSaveable { mutableStateOf("") }
     var primaryIp by rememberSaveable { mutableStateOf("") }
     var secondaryIp by rememberSaveable { mutableStateOf("") }
-    var allowPlaintextFallback by rememberSaveable { mutableStateOf(true) }
+    var allowPlaintextFallback by rememberSaveable { mutableStateOf(false) }
     var primaryDohUrl by rememberSaveable { mutableStateOf("") }
     var primaryBootstrapIps by rememberSaveable { mutableStateOf("") }
     var secondaryDohUrl by rememberSaveable { mutableStateOf("") }
@@ -1015,7 +1084,8 @@ fun AddDnsDialog(
                 }
                 DnsFormField(name, { name = it; saveError = null }, "伺服器名稱", "例如：家用 DNS", nameError, isSaving, "dialog_dns_name_input")
                 Row(
-                    Modifier.fillMaxWidth().toggleable(value = allowPlaintextFallback, enabled = !isSaving, role = Role.Switch) { allowPlaintextFallback = it; saveError = null },
+                    Modifier.fillMaxWidth().testTag("dialog_plaintext_fallback_switch")
+                        .toggleable(value = allowPlaintextFallback, enabled = !isSaving, role = Role.Switch) { allowPlaintextFallback = it; saveError = null },
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1023,7 +1093,7 @@ fun AddDnsDialog(
                         Text(if (allowPlaintextFallback) "DoH 失敗時可改用未加密 DNS。" else "僅使用加密 DNS；DoH 失敗時會回報解析錯誤。",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Switch(checked = allowPlaintextFallback, onCheckedChange = null, enabled = !isSaving, modifier = Modifier.testTag("dialog_plaintext_fallback_switch"))
+                    Switch(checked = allowPlaintextFallback, onCheckedChange = null, enabled = !isSaving)
                 }
                 Text("主要與備援 DNS 都可輸入 IPv4 或 IPv6，例如 8.8.8.8 或 2001:4860:4860::8888。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1060,7 +1130,7 @@ fun AddDnsDialog(
                         primaryDohUrl.trim().takeIf(String::isNotEmpty), primaryBootstrapIps.trim(),
                         secondaryDohUrl.trim().takeIf(String::isNotEmpty), secondaryBootstrapIps.trim()
                     )) {
-                        saveError = "僅加密模式需要可用的 DoH 網址與連線位址，請檢查設定。"
+                        saveError = "請設定可用的 HTTPS DoH，或開啟「允許未加密備援」。"
                         scope.launch { formScrollState.scrollTo(0) }
                         return@TextButton
                     }

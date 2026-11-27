@@ -61,8 +61,8 @@ android {
     ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }
     externalNativeBuild { ndkBuild { arguments += "NDK_APPLICATION_MK=${projectDir}/src/main/cpp/Application.mk" } }
     targetSdk = 37
-    versionCode = 11
-    versionName = "1.6.0"
+    versionCode = 12
+    versionName = "1.6.1"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     buildConfigField("boolean", "D14_DEVICE_TEST", "false")
     buildConfigField("int", "DNS_UPSTREAM_PORT", "53")

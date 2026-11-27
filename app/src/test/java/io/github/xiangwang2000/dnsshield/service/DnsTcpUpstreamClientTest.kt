@@ -29,9 +29,13 @@ class DnsTcpUpstreamClientTest {
     fun framesQueryAndReadsPartialResponseLengthAndBody() {
         val loopback = InetAddress.getByName("127.0.0.1")
         val server = ServerSocket(0, 1, loopback)
-        val queryBytes = DnsTestMessages.query()
+        val queryBytes = DnsTestMessages.query(edns = true)
         val query = assertIs<DnsQueryParseResult.Valid>(DnsMessageValidator.parseQuery(queryBytes)).query
         val expected = DnsTestMessages.response(queryBytes)
+        val upstreamTransactionId = query.transactionId xor 0xFFFF
+        val expectedUpstreamQuery = DnsMessageValidator.prepareUpstreamQuery(query).also {
+            DnsMessageValidator.setTransactionId(it, upstreamTransactionId)
+        }
         val upstreamQuery = AtomicReference<ByteArray?>()
         val serverFailure = AtomicReference<Throwable?>()
         val serverThread = thread(name = "partial-tcp-dns-upstream") {
@@ -42,19 +46,20 @@ class DnsTcpUpstreamClientTest {
                     val receivedQuery = ByteArray(queryLength)
                     input.readFully(receivedQuery)
                     upstreamQuery.set(receivedQuery)
+                    val upstreamResponse = DnsTestMessages.response(receivedQuery)
 
                     val output = connection.getOutputStream()
-                    output.write((expected.size ushr 8) and 0xFF)
+                    output.write((upstreamResponse.size ushr 8) and 0xFF)
                     output.flush()
                     Thread.sleep(15)
-                    output.write(expected.size and 0xFF)
+                    output.write(upstreamResponse.size and 0xFF)
                     output.flush()
                     Thread.sleep(15)
-                    val split = expected.size / 2
-                    output.write(expected, 0, split)
+                    val split = upstreamResponse.size / 2
+                    output.write(upstreamResponse, 0, split)
                     output.flush()
                     Thread.sleep(15)
-                    output.write(expected, split, expected.size - split)
+                    output.write(upstreamResponse, split, upstreamResponse.size - split)
                     output.flush()
                 }
             } catch (failure: Throwable) {
@@ -75,11 +80,12 @@ class DnsTcpUpstreamClientTest {
                     assertTrue(candidate.isBound, "protect requires an allocated socket descriptor")
                     preparedBeforeConnect.set(!candidate.isConnected)
                     true
-                }
+                    },
+                    transactionIdSource = { upstreamTransactionId }
             )
 
             assertContentEquals(expected, response)
-            assertContentEquals(DnsMessageValidator.prepareUpstreamQuery(query), upstreamQuery.get())
+            assertContentEquals(expectedUpstreamQuery, upstreamQuery.get())
             assertTrue(preparedBeforeConnect.get(), "the socket must be prepared before connect")
             serverThread.join(1_000)
             assertTrue(!serverThread.isAlive)
@@ -118,7 +124,12 @@ class DnsTcpUpstreamClientTest {
         val client = Socket()
         try {
             val response = DnsTcpUpstreamClient.queryBlocking(
-                socket = client, query = query, server = loopback, port = server.localPort, timeoutMillis = 1_500
+                socket = client,
+                query = query,
+                server = loopback,
+                port = server.localPort,
+                timeoutMillis = 1_500,
+                transactionIdSource = { query.transactionId }
             )
             assertContentEquals(expected, response)
             kotlin.test.assertEquals(DnsMessageValidator.MAX_DNS_RESPONSE_BYTES, response?.size)

@@ -14,6 +14,9 @@ internal class DnsRequestDeadline private constructor(
     fun remainingNanos(nowNanos: Long = System.nanoTime()): Long =
         (deadlineNanos - nowNanos).coerceAtLeast(0L)
 
+    internal fun cappedAt(earliestDeadlineNanos: Long): DnsRequestDeadline =
+        DnsRequestDeadline(minOf(deadlineNanos, earliestDeadlineNanos))
+
     companion object {
         const val DEFAULT_TIMEOUT_MILLIS = 6_000L
         private const val NANOS_PER_MILLI = 1_000_000L

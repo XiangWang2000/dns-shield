@@ -29,7 +29,9 @@ internal object DnsTcpUpstreamClient {
                 flush()
             }
             true
-        }
+        },
+        transactionIdSource: () -> Int = DnsMessageValidator::nextPlaintextTransactionId,
+        requireSig0Response: Boolean = false
     ): ByteArray? {
         val startedAtNanos = System.nanoTime()
         val remainingMillis = deadline.remainingMillis(startedAtNanos)
@@ -52,7 +54,9 @@ internal object DnsTcpUpstreamClient {
                         port,
                         attemptDeadlineNanos,
                         prepareSocket,
-                        sendQueryFrame
+                        sendQueryFrame,
+                        transactionIdSource,
+                        requireSig0Response
                     )
                 }
                 if (continuation.isActive) continuation.resumeWith(result)
@@ -74,11 +78,21 @@ internal object DnsTcpUpstreamClient {
                 flush()
             }
             true
-        }
+        },
+        transactionIdSource: () -> Int = DnsMessageValidator::nextPlaintextTransactionId
     ): ByteArray? {
         if (timeoutMillis <= 0) return null
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis.toLong())
-        return queryUntilDeadline(socket, query, server, port, deadlineNanos, prepareSocket, sendQueryFrame)
+        return queryUntilDeadline(
+            socket,
+            query,
+            server,
+            port,
+            deadlineNanos,
+            prepareSocket,
+            sendQueryFrame,
+            transactionIdSource
+        )
     }
 
     private fun queryUntilDeadline(
@@ -88,10 +102,12 @@ internal object DnsTcpUpstreamClient {
         port: Int,
         deadlineNanos: Long,
         prepareSocket: (Socket) -> Boolean,
-        sendQueryFrame: (Socket, ByteArray) -> Boolean
+        sendQueryFrame: (Socket, ByteArray) -> Boolean,
+        transactionIdSource: () -> Int,
+        requireSig0Response: Boolean = false
     ): ByteArray? {
-        val upstreamQuery = DnsMessageValidator.prepareUpstreamQuery(query)
-        if (upstreamQuery.size !in 12..DnsMessageValidator.MAX_QUERY_MESSAGE_BYTES) return null
+        val upstreamQuery = if (requireSig0Response) query.wire else DnsMessageValidator.prepareUpstreamQuery(query)
+        if (upstreamQuery.size !in 12..DnsTcpFrameCodec.MAX_DNS_MESSAGE_BYTES) return null
         // Android VpnService.protect needs an allocated descriptor before connect.
         if (!socket.isBound) socket.bind(InetSocketAddress(0))
         if (!prepareSocket(socket)) return null
@@ -104,6 +120,11 @@ internal object DnsTcpUpstreamClient {
         }
         if (remainingTimeoutMillis(deadlineNanos) == null) return null
 
+        val upstreamTransactionId = if (requireSig0Response) {
+            query.transactionId
+        } else {
+            DnsMessageValidator.assignPlaintextTransactionId(upstreamQuery, query, transactionIdSource)
+        }
         val framedQuery = ByteArray(LENGTH_PREFIX_BYTES + upstreamQuery.size)
         framedQuery[0] = (upstreamQuery.size ushr 8).toByte()
         framedQuery[1] = upstreamQuery.size.toByte()
@@ -118,7 +139,11 @@ internal object DnsTcpUpstreamClient {
 
         val response = ByteArray(responseLength)
         if (!readFully(input, socket, response, deadlineNanos)) return null
-        return response.takeIf { DnsMessageValidator.isValidResponse(it, query) }
+        val validation = DnsMessageValidator.validateResponse(response, query, upstreamTransactionId)
+        if (!validation.isValid) return null
+        return finishPlaintextDnsResponse(response, query, upstreamQuery, validation.hasSig0, requireSig0Response) {
+            DnsSig0RetryRequired(DnsUdpUpstreamEndpoint(server, port), DnsTransport.PLAINTEXT_TCP, deadlineNanos)
+        }
     }
 
     private fun readFully(

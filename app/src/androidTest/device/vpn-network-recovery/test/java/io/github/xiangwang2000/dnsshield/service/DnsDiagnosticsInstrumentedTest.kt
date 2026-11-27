@@ -100,39 +100,79 @@ class DnsDiagnosticsInstrumentedTest {
 
     private fun waitForDiagnosticsCard(): Boolean {
         val deadline = SystemClock.elapsedRealtime() + 5_000
+        return scrollToVisibleNode("dns_diagnostics_card", deadline) != null
+    }
+
+    private fun waitForDiagnosticsTotals(): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + 5_000
+        val summaryPattern = Regex("解析 (\\d+) · 攔截 (\\d+) · 失敗 (\\d+)")
+        val advancedPattern = Regex("收到 (\\d+) · 拒絕 (\\d+) · 超載 (\\d+)")
+        val diagnosticsCard = scrollToVisibleNode("dns_diagnostics_card", deadline) ?: return false
         while (SystemClock.elapsedRealtime() < deadline) {
-            if (visibleTexts().any { it == "DNS 診斷" }) return true
-            InstrumentationRegistry.getInstrumentation().uiAutomation
-                .executeShellCommand("input swipe 500 1600 500 350 250").close()
+            val snapshot = DnsVpnService.diagnosticsFlow.value
+            val summary = visibleTexts().firstNotNullOfOrNull { summaryPattern.find(it) }
+            if (summary != null) {
+                val (resolved, blocked, failed) = summary.destructured
+                if (resolved.toLong() == snapshot.resolved &&
+                    blocked.toLong() == snapshot.blocked &&
+                    failed.toLong() == snapshot.failed
+                ) {
+                    if (!diagnosticsCard.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return false
+                    val advancedToggle = scrollToVisibleNode("toggle_advanced_diagnostics", deadline) ?: return false
+                    if (!advancedToggle.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return false
+
+                    while (SystemClock.elapsedRealtime() < deadline) {
+                        val current = DnsVpnService.diagnosticsFlow.value
+                        val advanced = visibleTexts().firstNotNullOfOrNull { advancedPattern.find(it) }
+                        if (advanced != null) {
+                            val (received, rejected, overloaded) = advanced.destructured
+                            if (received.toLong() == current.received &&
+                                rejected.toLong() == current.rejected &&
+                                overloaded.toLong() == current.overloaded
+                            ) return true
+                        }
+                        scrollDiagnosticsForward()
+                        Thread.sleep(150)
+                    }
+                    return false
+                }
+            }
             Thread.sleep(200)
         }
         return false
     }
 
-    private fun waitForDiagnosticsTotals(): Boolean {
-        val deadline = SystemClock.elapsedRealtime() + 5_000
-        val pattern = Regex("收到 (\\d+)｜解析 (\\d+)｜攔截 (\\d+)")
+    private fun scrollToVisibleNode(tag: String, deadline: Long): AccessibilityNodeInfo? {
         while (SystemClock.elapsedRealtime() < deadline) {
-            val snapshot = DnsVpnService.diagnosticsFlow.value
-            val matched = visibleTexts().firstNotNullOfOrNull { pattern.find(it) }
-            if (matched != null) {
-                val (received, resolved, blocked) = matched.destructured
-                if (received.toLong() == snapshot.received &&
-                    resolved.toLong() == snapshot.resolved &&
-                    blocked.toLong() == snapshot.blocked) return true
-            }
-            InstrumentationRegistry.getInstrumentation().uiAutomation
-                .executeShellCommand("input swipe 500 1600 500 350 250").close()
-            Thread.sleep(200)
+            val node = findNode(tag)
+            if (node?.isVisibleToUser == true) return node
+            scrollDiagnosticsForward()
+            Thread.sleep(150)
         }
-        return false
+        return null
+    }
+
+    private fun scrollDiagnosticsForward() {
+        findNode("control_center_list")?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+    }
+
+    private fun findNode(tag: String): AccessibilityNodeInfo? {
+        val root = InstrumentationRegistry.getInstrumentation().uiAutomation.rootInActiveWindow ?: return null
+        fun find(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            if (node.viewIdResourceName == tag) return node.takeIf { it.refresh() }
+            for (index in 0 until node.childCount) {
+                node.getChild(index)?.let { child -> find(child)?.let { return it } }
+            }
+            return null
+        }
+        return find(root)
     }
 
     private fun visibleTexts(): List<String> {
         val result = mutableListOf<String>()
         fun collect(node: AccessibilityNodeInfo?) {
             if (node == null || result.size >= 100) return
-            node.text?.toString()?.let(result::add)
+            if (node.isVisibleToUser) node.text?.toString()?.let(result::add)
             for (index in 0 until node.childCount) collect(node.getChild(index))
         }
         collect(InstrumentationRegistry.getInstrumentation().uiAutomation.rootInActiveWindow)

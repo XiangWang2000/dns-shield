@@ -51,7 +51,7 @@ class DnsIpv4UdpQueryParserTest {
             DnsTestMessages.ipv4UdpDnsPacket(nonQueryDns),
             PacketRejectionReason.INVALID_DNS_MESSAGE
         )
-        val oversizedDns = ByteArray(DnsMessageValidator.MAX_QUERY_MESSAGE_BYTES + 1)
+        val oversizedDns = ByteArray(DnsMessageValidator.MAX_UDP_QUERY_BYTES + 1)
         assertRejectedWithoutFormErr(
             DnsTestMessages.ipv4UdpDnsPacket(oversizedDns),
             PacketRejectionReason.INVALID_DNS_MESSAGE

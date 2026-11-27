@@ -88,8 +88,8 @@ abstract class AppDatabase : RoomDatabase() {
                                 db.execSQL(
                                     """
                                     INSERT INTO dns_servers
-                                    (name, primaryIp, secondaryIp, isCustom, isActive)
-                                    VALUES (?, ?, ?, ?, ?)
+                                    (name, primaryIp, secondaryIp, isCustom, isActive, allowPlaintextFallback)
+                                    VALUES (?, ?, ?, ?, ?, 0)
                                     """.trimIndent(),
                                     server
                                 )

@@ -23,6 +23,14 @@ class DnsResponseCacheTest {
         val smallResponse = DnsTestMessages.responseWithAnswer(queryBytes, 16, byteArrayOf(0), ttlSeconds = 60)
         val smallEntry = assertNotNull(DnsResponseCacheEntry.create(smallResponse, query) { 0L })
         assertEquals(DnsResponseCacheEntry.MIN_CACHE_WEIGHT_BYTES, smallEntry.estimatedCacheWeightBytes)
+        assertEquals(smallEntry.estimatedCacheWeightBytes, smallEntry.estimatedCacheWeightBytes(0))
+
+        val largeTcpQueryBytes = 32 * 1024
+        assertEquals(
+            largeTcpQueryBytes + smallResponse.size + 256 + 64,
+            smallEntry.estimatedCacheWeightBytes(largeTcpQueryBytes)
+        )
+        assertTrue(smallEntry.estimatedCacheWeightBytes(largeTcpQueryBytes) > smallEntry.estimatedCacheWeightBytes)
 
         val maximumResponse = DnsTestMessages.responseWithLargeTextAnswer(queryBytes)
         val maximumEntry = assertNotNull(DnsResponseCacheEntry.create(maximumResponse, query) { 0L })

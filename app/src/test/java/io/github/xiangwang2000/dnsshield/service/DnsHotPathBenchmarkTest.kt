@@ -182,6 +182,8 @@ class DnsHotPathBenchmarkTest {
         private val exactBlocks = setOf(
             "doubleclick.net",
             "admob.com",
+            "adservice.google.com",
+            "amazon-adsystem.com",
             "pagead2.googlesyndication.com",
             "googleads.g.doubleclick.net",
             "analytics.google.com",
@@ -191,6 +193,7 @@ class DnsHotPathBenchmarkTest {
         private val suffixBlocks = listOf(
             ".doubleclick.net",
             ".admob.com",
+            ".amazon-adsystem.com",
             ".analytics.google.com",
             ".adnxs.com",
             ".adcolony.com",
@@ -200,16 +203,6 @@ class DnsHotPathBenchmarkTest {
             ".telemetry.mozilla.org",
             ".adjust.com",
             ".appsflyer.com"
-        )
-
-        private val containsBlocks = listOf(
-            "adservice",
-            "adsystem",
-            "googleads",
-            "pagead",
-            "amazon-adsystem",
-            "telemetry-",
-            "analytics-"
         )
 
         private val exactBlockedLabels = setOf(
@@ -225,7 +218,6 @@ class DnsHotPathBenchmarkTest {
             if (normalized.isEmpty() || normalized == "unknown") return false
             if (normalized in exactBlocks) return true
             if (suffixBlocks.any(normalized::endsWith)) return true
-            if (containsBlocks.any(normalized::contains)) return true
             return normalized.split('.').any(exactBlockedLabels::contains)
         }
     }

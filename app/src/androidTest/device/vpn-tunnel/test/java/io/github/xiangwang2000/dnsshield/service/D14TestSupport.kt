@@ -138,16 +138,16 @@ internal class FakeDnsUpstream : AutoCloseable {
 internal class D14FakeUpstreamFixture(private val context: Context) {
     val upstream = FakeDnsUpstream()
     private val preferences =
-        context.getSharedPreferences(DnsVpnService.D14_TEST_PREFS_NAME, Context.MODE_PRIVATE)
-    private val oldHost = preferences.getString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, null)
-    private val hadPort = preferences.contains(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY)
-    private val oldPort = preferences.getInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, -1)
+        context.getSharedPreferences(DnsVpnServiceTestHooks.D14_TEST_PREFS_NAME, Context.MODE_PRIVATE)
+    private val oldHost = preferences.getString(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_HOST_KEY, null)
+    private val hadPort = preferences.contains(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY)
+    private val oldPort = preferences.getInt(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY, -1)
 
     fun install() {
         check(
             preferences.edit()
-                .putString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, "127.0.0.1")
-                .putInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, upstream.port)
+                .putString(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_HOST_KEY, "127.0.0.1")
+                .putInt(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY, upstream.port)
                 .commit()
         ) { "Could not persist the loopback-only fake upstream settings." }
     }
@@ -183,10 +183,10 @@ internal class D14FakeUpstreamFixture(private val context: Context) {
         if (DnsVpnService.lifecycleStateFlow.value == VpnLifecycleState.STOPPED) {
             val restored = runCatching {
                 preferences.edit().apply {
-                    if (oldHost == null) remove(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY)
-                    else putString(DnsVpnService.D14_TEST_UPSTREAM_HOST_KEY, oldHost)
-                    if (hadPort) putInt(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY, oldPort)
-                    else remove(DnsVpnService.D14_TEST_UPSTREAM_PORT_KEY)
+                    if (oldHost == null) remove(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_HOST_KEY)
+                    else putString(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_HOST_KEY, oldHost)
+                    if (hadPort) putInt(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY, oldPort)
+                    else remove(DnsVpnServiceTestHooks.D14_TEST_UPSTREAM_PORT_KEY)
                 }.commit()
             }.getOrElse {
                 rememberCleanupFailure(it)

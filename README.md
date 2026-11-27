@@ -8,7 +8,7 @@ DNS Shield 讓你決定要攔哪些網域、查詢交給誰解析。用內建合
 
 內建封鎖清單從 102,241 筆增加到 247,497 筆。DNS Shield 會先用內建清單和你的規則判斷要不要封鎖，再把放行的查詢交給解析器。改用系統 DNS 或 Cloudflare，這層本機封鎖照常運作。想保留 AdGuard 解析服務本身的額外過濾，可以繼續選「AdGuard (AdBlock)」。
 
-Android 10 以上可選「系統 DNS」，跟著目前連上的 Wi-Fi 或行動網路解析。查詢是否加密，由 Android 的「私人 DNS」設定決定。想固定使用 Cloudflare 的加密 DNS，可以選「Cloudflare DNS」，再開啟「僅加密」。
+Android 10 以上可選「系統 DNS」，跟著目前連上的 Wi-Fi 或行動網路解析。查詢是否加密，由 Android 的「私人 DNS」設定決定。想固定使用 Cloudflare 的加密 DNS，可以選「Cloudflare DNS」，並確認「允許未加密備援」已關閉。
 
 在同一支 ASUS 上連同一個 Wi-Fi，開啟相同的 App 和頁面。每輪收滿 128 筆後，系統 DNS 的 P95 最高分別是 60 和 86 ms，Cloudflare DoH 那輪最高是 133 ms。想知道哪個選項適合你的網路，可以用同樣的 App，比較「連線診斷」的最近 128 筆 P95 和失敗數。
 
@@ -18,7 +18,7 @@ Android 10 以上可選「系統 DNS」，跟著目前連上的 Wi-Fi 或行動�
 
 - **擋哪些網域：** 使用 APK 內附的 1Hosts Lite 與 AdGuard DNS Filter 合併清單，也可新增精確或包含子網域的允許／封鎖規則；規則保存在裝置。名單隨 APK 更新，App 執行時不會另行下載。
 - **交給誰解析：** 選擇 Google、Cloudflare、AdGuard、Quad9，或自訂 IPv4／IPv6 DNS 位址與 DoH 端點；DoH bootstrap 支援 IPv4 與 IPv6。
-- **加密失敗怎麼辦：** 預設加密優先，DoH 故障時可降級為明文 UDP/53；選「僅加密」則故障時回報解析錯誤，不送出明文 DNS。
+- **加密失敗怎麼辦：** 新安裝的內建第三方解析器與新增的自訂解析器預設僅加密，DoH 故障時會回報解析錯誤。需要明文 DNS 時，可開啟「允許未加密備援」。已儲存的設定會沿用。
 - **App 例外與記錄：** 排除指定 App；同網域記錄合併顯示最新判斷與累計記錄次數，可搜尋、篩選及複製完整網域。
 
 ## 安裝與啟動
@@ -39,13 +39,13 @@ Android 10 以上可選「系統 DNS」，跟著目前連上的 Wi-Fi 或行動�
 
 DNS Shield 沒有帳號、分析或廣告 SDK，也沒有開發者後端。DNS 設定、網域規則與 App 排除名單留在裝置；未被封鎖的查詢會送到你選擇的解析器，或在選用「系統 DNS」時交給 Android 目前網路的系統解析器。資料保存方式依該解析器政策。
 
-DoH 透過 HTTPS 傳輸；降級至 UDP/53 時，查詢未加密。DNS Shield 不在本機驗證 DNSSEC。查詢計數與即時日誌主要保存在 App 記憶體。詳見[隱私權說明](PRIVACY.md)。
+DoH 透過 HTTPS 傳輸。使用 UDP 或 TCP 備援時，查詢以未加密的方式傳送至解析器。DNS Shield 不在本機驗證 DNSSEC。查詢計數與即時日誌主要保存在 App 記憶體。詳見[隱私權說明](PRIVACY.md)。
 
 ## 防護範圍與限制
 
 本機 VPN 只攔截送往虛擬 IPv4／IPv6 DNS 位址的 UDP／TCP 53 查詢。一般 IPv4／IPv6 流量仍走原本網路；App 直接送往其他外部 DNS 位址的查詢、App 自帶的 DoH／DoT 與直接 IP 連線不會被攔截。在沒有 464XLAT 的 IPv6-only 網路，所選解析器須可經 IPv6 連線。若網路靠 DNS64／NAT64 連到只有 IPv4 的服務，DNS64 由所選解析器提供，NAT64 由底層網路提供。同一網域若同時提供廣告與正常內容，也無法只封鎖廣告。
 
-若要在重開機後恢復防護，請在 Android 的 VPN 設定點選 DNS Shield 旁的齒輪，開啟「永久連線的 VPN」。Android 10 會在開機後首次解鎖時啟動。部分手機的電池管理可能阻止背景恢復，已測的 ASUS Android 10 裝置使用了電池豁免。目前不支援封鎖未經 VPN 的連線（lockdown）。
+若要在重開機後恢復防護，啟用防護後可點選「VPN 設定」。Android 10 以上若系統狀態可讀取且尚未啟用「永久連線的 VPN」，防護開啟時 App 會顯示一次性提醒。點選開啟設定或「知道了」即可收起提醒。若未出現提醒，可自行前往 Android 的 VPN 設定，點選 DNS Shield 旁的齒輪，再開啟「永久連線的 VPN」。Android 10 會在開機後首次解鎖時啟動。部分手機的電池管理可能阻止背景恢復，已測的 ASUS Android 10 裝置使用了電池豁免。目前不支援封鎖未經 VPN 的連線（lockdown）。
 
 ## 開發
 

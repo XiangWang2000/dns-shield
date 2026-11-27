@@ -9,8 +9,8 @@ DNS Shield 是在使用者 Android 裝置上執行的 DNS 防護工具。本專�
 啟用 VPN 防護後，DNS Shield 會讀取進入本機 VPN 介面的標準 DNS 查詢，判斷是否阻擋，或依使用者選擇將查詢傳送至第三方 DNS 解析器，或交由 Android 目前網路的系統解析器處理。
 
 - Android 10 以上可選用「系統 DNS」，查詢由 Android 系統解析器依目前網路及「私人 DNS」設定處理。
-- 選用 App 內設定的第三方解析器時，可選擇「加密優先，允許 UDP/53 降級」或「僅加密」。既有安裝會以加密優先模式遷移，以保留原本的解析行為。
-- 僅加密模式只會使用設定的 HTTPS DoH 端點；端點故障、退避或 bootstrap 失敗時會回覆 SERVFAIL，不會送出 UDP/53 查詢。加密優先模式在 DoH 端點無法使用時會改用未加密 UDP/53。
+- 選用 App 內設定的第三方解析器時，可選擇「允許未加密備援」或「僅加密」。新安裝的內建第三方解析器與新增的自訂解析器預設僅加密。升級會沿用已儲存的設定，從尚未提供加密選項的版本升級時，會沿用原有允許明文備援的行為。
+- 僅加密模式使用設定的 HTTPS DoH 端點。所有端點都無法使用時會回覆 SERVFAIL。若已允許未加密備援，App 可改用 UDP 或 TCP 向解析器查詢。
 - 使用者可以設定主要及備援 HTTPS DoH URL。自訂 hostname 以使用者輸入的 bootstrap IP 連線，不會用系統 DNS 解析該 hostname；HTTPS 仍使用平台預設的憑證鏈與 hostname 驗證。
 - DoH 只代表 DNS 查詢以 HTTPS 傳輸；DNS Shield 不在本機驗證 DNSSEC。
 - 第三方解析器會依其各自的隱私政策處理收到的 DNS 查詢；DNS Shield 無法控制其保存或使用方式。
